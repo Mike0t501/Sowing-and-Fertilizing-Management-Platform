@@ -1,0 +1,65 @@
+# Built application files
+*.apk
+*.aar
+*.ap_
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files and build output
+build/
+**/build/
+captures/
+out/
+
+# Release output (generated, not source)
+app/release/
+
+# Gradle files
+.gradle/
+gradle-app.setting
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Log files
+*.log
+*.logcat
+
+# IntelliJ IDEA / Android Studio
+*.iml
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/gradle.xml
+.idea/assetWizardSettings.xml
+.idea/dictionaries
+.idea/libraries
+.idea/.gitignore
+.idea/caches
+.idea/modules.xml
+.idea/navEditor.xml
+.idea/.name
+.idea/deploymentTargetSelector.xml
+.idea/deviceManager.xml
+.idea/runConfigurations.xml
+.idea/migrations.xml
+.idea/AndroidProjectSystem.xml
+.idea/compiler.xml
+.idea/misc.xml
+
+# Keystore files (uncomment if not already excluded)
+# *.jks
+# *.keystore
+
+# External native build
+.externalNativeBuild/
+.cxx/
+
+# Claude Code local settings
+.claude/
+
+# macOS
+.DS_Store

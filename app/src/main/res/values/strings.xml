@@ -1,0 +1,80 @@
+<resources>
+    <!--    navigation导航页面-->
+    <string name="app_name">Variablefert--Ultimate One</string>
+    <string name="param_settings">ParamSettings</string>
+    <string name="settings">Settings</string>
+    <string name="danti_settings">dantiSettings</string>
+
+    <!--    颜色分级SharedPre-->
+    <string name="colorStep_name">colorStep</string>
+    <string name="deltaX_name">deltaX</string>
+    <string name="deltaY_name">deltaY</string>
+
+    <!--    sharedpre名称-->
+    <string name="mySharedPre_name">sharedPrefile</string>
+    <string name="myDantiFertSettingsSharedPre_name">dantiFertSettingsSharedPrefile</string>
+
+    <!--    保存路径SharedPre-->
+    <string name="myWriteDir_DocumentUri_name">writeDirDocumentUri</string>
+    <string name="myLoadShpFile_Path_name">loadShpFilePath</string>
+    <string name="myLoadShpFile_AppSpecificExternalDirPath_name">appSpecificExternalDirShpFilePath</string>
+
+    <!--    参数设置、设置页面sharedpre-->
+    <string name="rowNumber_name">rowNumber</string>
+    <string name="rowNumber_defeatValue">4</string>
+    <string name="rowSize_name">rowSize</string>
+    <string name="rowSize_defeatValue">60</string>
+    <string name="gnssDistanceVertical_name">gnssDistanceVertical</string>
+    <string name="gnssDistanceVertical_defeatValue">240</string>
+    <string name="gnssDistanceHorizontal_name">gnssDistanceHorizontal</string>
+    <string name="gnssDistanceHorizontal_defeatValue">0</string>
+    <string name="lagTime_name">lagTime</string>
+    <string name="lagTime_defeatValue">2</string>
+    <!--    -1 根据GPS、处方图，>0根据设置-->
+    <string name="forwardSpeed_name">forwardSpeed</string>
+    <string name="forwardSpeed_defeatValue">-1</string>
+    <string name="forwardSpeedAverageNum_name">forwardSpeedAverageNum</string>
+    <string name="forwardSpeedAverageNum_defeatValue">5</string>
+    <string name="fertApplied_name">fertApplied</string>
+    <string name="fertApplied_defeatValue">-1</string>
+    <string name="fertQueryField_name">fertQueryField</string>
+    <string name="fertQueryField_defeatValue">施肥量</string>
+    <string name="writeSaveData_Switch_name">writeSaveSwitch</string>
+    <!--    Switch 0 关-->
+    <string name="writeSaveData_Switch_defeatValue">0</string>
+    <string name="navMarkCompensated_Switch_name">navMarkCompensatedSwitch</string>
+    <string name="navMarkCompensated_Switch_defeatValue">1</string>
+    <string name="testMode_Switch_name">testModeSwitch</string>
+    <string name="testMode_Switch_defeatValue">0</string>
+    <string name="testMode_testModeDurationTime_name">testModeDurationTime</string>
+    <string name="testMode_testModeDurationTime_defeatValue">60</string>
+    <string name="testMode_testSend_name">testSend</string>
+    <string name="testMode_testSend_defeatValue">5</string>
+    <!--    0 电机转速模式-->
+    <string name="testMode_testSendMode_name">testSendMode</string>
+    <string name="testMode_testSendMode_defeatValue">0</string>
+
+    <!--    串口配置-->
+    <string name="serial_db9_port_name">serialDb9Port</string>
+    <string name="serial_db9_port_defValue">ttyUW3</string>
+    <string name="serial_db9_baud_name">serialDb9Baud</string>
+    <string name="serial_db9_baud_defValue">230400</string>
+    <string name="serial_can_port_name">serialCanPort</string>
+    <string name="serial_can_port_defValue">ttyUW1</string>
+    <string name="serial_can_baud_name">serialCanBaud</string>
+    <string name="serial_can_baud_defValue">115200</string>
+
+    <!--    报错语音开关-->
+    <string name="errorSound_Switch_name">errorSoundSwitch</string>
+    <string name="errorSound_Switch_defeatValue">0</string>
+
+    <!--    第一次运行检测-->
+    <string name="runForTheFirstTime">firstTimeRun</string>
+
+    <!--    导出.geodatabase字段-->
+    <string name="convertfert_ExportFeild">转速估肥</string>
+    <string name="monitorfert_ExportFeild">监测肥量</string>
+    <string name="fertapplied_ExportFeild">应施肥量</string>
+    <string name="forwardspeed_ExportFeild">前进速度</string>
+
+</resources>

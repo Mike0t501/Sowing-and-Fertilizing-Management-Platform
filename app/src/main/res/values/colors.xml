@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="light_gray">#EDE9E9E9</color>
+    <color name="background_color_default">#FEF7FF</color>
+    <color name="background_color_night">#2C2C2C</color>
+    <color name="background_color_yellow">#FFEF00</color>
+    <color name="overlayDraw_yellow">#FFEB3B</color>
+    <color name="overlayDraw_green">#80E113</color>
+    <color name="overlayDraw_darkgreen">#01C325</color>
+    <color name="start_color_green">#A93EF53E</color>
+    <color name="end_color_yellow">#B4FFEB3B</color>
+    <color name="zeroZoneRender_color">#5FFE0000</color>
+    <color name="outline_color_gray">#9E7A7676</color>
+</resources>

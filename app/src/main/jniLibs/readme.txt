@@ -1,0 +1,1 @@
+Arcgis RuntimeCore不能单独使用jar包，会使用到一些图片资源所以需要引用maven并导入依赖或者使用aar包

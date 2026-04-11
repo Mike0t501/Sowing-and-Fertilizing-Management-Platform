@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <integer name="colorStep_value">5</integer>
+    <integer name="deltaX_value">50</integer>
+    <integer name="deltaY_value">50</integer>
+</resources>
