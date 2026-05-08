@@ -116,7 +116,7 @@ The app uses ArcGIS Runtime SDK 100.15.5. Dependencies come from Esri's Artifact
 
   
 
-## Sowing Depth Control (New Feature)
+## Sowing Depth Control
 
 ### Overview
 
@@ -139,31 +139,39 @@ Variable-depth sowing control using YZ-AIM CANopen servo motors + lead screw act
 - Servo motor manual (Chinese): `docs/YZ-AIM_canopen用户手册_v1_66_出线版_.pdf`
 - CAN-UART bridge protocol and frame format: `docs/CSM100T_CAN_BRIDGE.md`
 
-### New Files
+### Implementation Status (as of 2026-05-08, branch `feature/depthcontrol`)
+
+All core files are implemented. Key files:
 
 ```
-funClass/CanOpenFun.kt           — CANopen protocol: SDO read/write, frame assembly/parsing
-funClass/SowingDepthFun.kt       — Depth control logic: limits, calibration, linear fitting
-coroutine/SowingDepthCoroutine.kt — Real-time depth control loop, heartbeat maintenance
-ui/SowingDepthScreen.kt          — Main depth control interface (8-motor status)
-ui/DepthCalibrationScreen.kt     — Limit setting + 5-point calibration wizard
-data/SowingDepthData.kt          — Data classes for servo state and calibration
-```
-
-### Modified Files
-
-```
-CanReceiveCoroutine.kt  — Add CANopen frame identification (SDO reply 0x580+ID, TPDO 0x180+ID)
-ViewModelAndPublic.kt   — Add SowingDepthState to ViewModel
-MySharedPreFun.kt       — Add persistence for depth calibration data
-MainActivity.kt         — Add navigation routes for depth screens
-SettingsScreen.kt       — Add servo Node-ID configuration
+funClass/CanOpenFun.kt            — CANopen protocol: SDO/NMT/TPDO frames, jog frames, motor init sequence
+data/SowingDepthData.kt           — ServoCalibration + SowingDepthState (masterEnabled, lastHeardMs)
+coroutine/SowingDepthCoroutine.kt — 500ms control loop, Phase 1–5, timestamp offline detection, init cooldown retry
+ui/SowingDepthScreen.kt           — 8-motor status, master switch (red/green card), global target, per-motor dialog
+ui/DepthCalibrationScreen.kt      — Limit setting + 5-point direct calibration, two-phase jog deceleration
+CanReceiveCoroutine.kt            — TPDO/heartbeat → isOnline + currentPosition + lastHeardMs
+ViewModelAndPublic.kt             — sowingDepthState LiveData, updateMasterEnabled, updateServoCalibration
+MySharedPreFun.kt                 — Depth calibration persistence (limits, fit coefficients, node IDs)
 ```
 
 ### Critical Implementation Notes
 
-1. **SDO timing**: Wait for reply (0x580+ID) before sending next SDO command. Min 20ms between commands.
-2. **Heartbeat**: Motor auto-stops after 2s without CAN activity. Control loop must poll every <2s.
-3. **Dual limits**: Software check before sending + hardware limits written to motor registers.
-4. **Jog control**: Use velocity mode (0x6060=3). Send speed on press, stop (0x010F) on release.
-5. **Encoder**: 32768 pulses/rev. With 5mm lead screw: 32768 pulses = 5mm travel.
+1. **Offline detection**: `CanReceiveCoroutine` sets `isOnline=true` + updates `lastHeardMs` on every TPDO/heartbeat. `SowingDepthCoroutine` Phase 3 marks offline only when `System.currentTimeMillis() - lastHeardMs > 5000ms`. The old position-change proxy is removed — it falsely flagged stationary motors.
+
+2. **First position command after init**: `motorInitCooldown[i]=6` is set after Phase 2 init. Phase 4 clears `lastSentTargetDepth` during cooldown to force retry for 3s (handles DS402 settle time after Enable Operation).
+
+3. **Bit4 toggle**: `buildAbsoluteMoveFrames` sends `0x6040=0x000F` then `0x6040=0x002F` to guarantee Bit4 0→1 transition. Required for motor to accept new setpoint.
+
+4. **Jog stop (two-phase)**: On release — send `0x60FF=0` (velocity zero, motor decelerates per `0x6084`), wait `jogSpeed×1000/accel + 200ms` (max 4s), then restore position mode (`0x0007 → 0x6060=1 → 0x000F`).
+
+5. **Master switch**: `masterEnabled` (not persisted, defaults false). Controls Phase 2 init gate and Phase 4 dispatch gate. ON→OFF transition sends `0x6040=0x0006` (Shutdown) to all initialized motors and resets `motorInitialized`/`motorInitCooldown`/`lastSentTargetDepth`.
+
+6. **SDO timing**: 20ms min between SDO commands to same node. SDO reply (0x580+ID) comes back via `CanReceiveCoroutine`.
+
+7. **Encoder**: 32768 pulses/rev. With 5mm lead screw: 32768 pulses = 5mm travel. `fitA`/`fitB` coefficients: `depth_mm = fitA × encoderPos + fitB`.
+
+### Next Development Target
+
+**Indirect measurement calibration mode** in `DepthCalibrationScreen` — Step 2 currently only has direct measurement (jog to 5 equal positions, measure with tape). The new mode uses standard gauge blocks (2/4/6/8/10cm): user jogs the depth wheel down onto each block, records encoder position, system fits the curve without manual measurement.
+
+Full specification: `docs/SOWING_DEPTH_IMPLEMENTATION.md` Section 七.

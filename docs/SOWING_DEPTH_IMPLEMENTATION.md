@@ -8,6 +8,43 @@
 
 ---
 
+## 一½. 当前实现状态（2026-05-08）
+
+> 本节供新 Claude Code session 快速定位现状，避免重复分析已完成的工作。
+
+### 已完成（均在 `feature/depthcontrol` 分支）
+
+| 文件 | 状态 | 关键说明 |
+|------|------|---------|
+| `funClass/CanOpenFun.kt` | ✅ 完成 | CSM100T 帧格式封装；SDO/NMT/TPDO；`buildMotorInitSequence`；`buildAbsoluteMoveFrames`（含 Bit4 0→1 强制切换）；两阶段 jog 停止帧 |
+| `data/SowingDepthData.kt` | ✅ 完成 | `ServoCalibration`（含 `lastHeardMs`）+ `SowingDepthState`（含 `masterEnabled`） |
+| `coroutine/SowingDepthCoroutine.kt` | ✅ 完成 | 500ms 主循环，Phase 1–5，时间戳离线检测，`motorInitCooldown` 重试机制 |
+| `ui/SowingDepthScreen.kt` | ✅ 完成 | 8路状态卡片、总开关（红/绿双色 Card + Switch）、全局目标、单独设置弹窗 |
+| `ui/DepthCalibrationScreen.kt` | ✅ 完成 | 步骤1限位设置 + 步骤2五点直接标定；jog 两阶段减速停止 |
+| `coroutine/CanReceiveCoroutine.kt` | ✅ 完成 | TPDO → `isOnline=true` + `currentPosition` + `lastHeardMs`；心跳 → `isOnline=true` + `lastHeardMs` |
+| `ViewModelAndPublic.kt` | ✅ 完成 | `sowingDepthState` LiveData、`updateMasterEnabled`、`updateServoCalibration` |
+| `MySharedPreFun.kt` | ✅ 完成 | 限位、拟合系数、Node-ID 的持久化读写 |
+
+### 关键实现决策（新 session 须知，勿重复踩坑）
+
+1. **离线检测（已重构）**：`CanReceiveCoroutine` 每次收到 TPDO/心跳时更新 `cal.lastHeardMs = System.currentTimeMillis()`。`SowingDepthCoroutine` Phase 3 检查 `nowMs - lastHeardMs > 5000ms` → 标离线。原来的"位置变化"检测已**完全删除**（静止电机会被误判）。
+
+2. **初始化后首次位置命令不响应（已修复）**：Phase 2 init 后设 `motorInitCooldown[i]=6`，Phase 4 在冷却期内每次清空 `lastSentTargetDepth[i]=Float.NaN`，强制重发 3s（6×500ms），解决 DS402 状态机 Enable Operation 过渡期内首条命令被忽略的问题。
+
+3. **Bit4 切换（DS402 setpoint 触发）**：`buildAbsoluteMoveFrames` 先发 `0x6040=0x000F`（清 Bit4），再发 `0x6040=0x002F`（置 Bit4），确保 0→1 跳变。连续多次设定同一目标时必须有此切换，否则驱动器拒绝接受。
+
+4. **Jog 减速停止（两阶段）**：松开 jog 按钮 → ① 发 `0x60FF=0`（目标速度归零，按 `0x6084` 斜率减速） → ② 等 `jogSpeed×1000/accel + 200ms`（上限 4s） → ③ 发 `0x6040=0x0007 → 0x6060=1 → 0x000F`（切回位置模式+重新使能）。
+
+5. **总开关 `masterEnabled`**：不持久化，启动默认 `false`。ON→OFF 跳变：对所有已初始化电机发 `0x6040=0x0006`（Shutdown），清零 `motorInitialized[i]`、`motorInitCooldown[i]`、`lastSentTargetDepth[i]`。
+
+6. **`SowingDepthScreen` 与 `DepthCalibrationScreen` 均各自启动 `CanReceiveCoroutine` + `SowingDepthCoroutine`**（各自的 `DisposableEffect`），离开界面时 `onDispose` 停止。两界面之间切换会重新创建协程实例，已通过时间戳离线检测的 5s 窗口避免冷启动误判。
+
+### 当前已知待开发项
+
+- `DepthCalibrationScreen` 步骤2 当前只有**直接测量模式**（5点等分，人工测量深度值）。下一步新增**间接测量模式**（挡块法），见第七节详细规格。
+
+---
+
 ## 二、CANopen 伺服电机通信协议摘要
 
 ### 2.1 CAN帧基础
@@ -693,3 +730,157 @@ ViewModel 中用 `List<ServoCalibration>(8)` 管理。
 初期播种深度功能完全独立于施肥控制逻辑。
 它们共用同一个CAN串口，但通过不同的 CAN-ID 区分。
 施肥电机用现有的自定义协议，伺服电机用 CANopen 协议。
+
+---
+
+## 七、下一阶段开发：间接测量标定模式
+
+### 7.1 背景与动机
+
+现有"步骤2：深度校准"要求用户驱动电机到5个等分位置，然后用卷尺手动测量每个位置的实际播种深度。**痛点**：限深轮在地面以下作业，卷尺测量困难，需要反复弯腰操作。
+
+**间接测量模式**的思路：用户预备一组标准挡块（2/4/6/8/10 cm），将挡块放在限深轮下方，用点动控制缓慢下压限深轮至刚好接触挡块顶面，软件记录此时的编码器位置。编码器位置对应已知的播种深度（挡块高度），无需人工测量。
+
+现有"直接测量模式"（5点等分法）**保留不变**，两种模式可切换。
+
+### 7.2 交互流程
+
+步骤2区域顶部增加模式切换控件：
+
+```
+步骤2：深度校准
+┌────────────────────────────────────────────┐
+│  [直接测量模式]  [间接测量模式（挡块法）]       │  ← SegmentedButton 或两个 FilterChip
+└────────────────────────────────────────────┘
+```
+
+**间接测量模式界面：**
+
+```
+间接测量模式（挡块法）
+┌──────────────────────────────────────────────────────────┐
+│  说明：将标准挡块放于限深轮正下方，点动下压至刚好接触挡块，   │
+│  点击对应行的 [记录位置]。至少记录 2 个挡块后可计算拟合。    │
+├──────────────────────────────────────────────────────────┤
+│  当前位置：12345    [▲ 上升]  [▼ 下降]  （复用步骤1点动）  │
+├──────────────────────────────────────────────────────────┤
+│  挡块  深度   编码器位置        操作                        │
+│  1号   2 cm  ——               [记录当前位置]               │
+│  2号   4 cm  ——               [记录当前位置]               │
+│  3号   6 cm  8765  ✅          [清除]                      │
+│  4号   8 cm  ——               [记录当前位置]               │
+│  5号  10 cm  ——               [记录当前位置]               │
+├──────────────────────────────────────────────────────────┤
+│  已记录 1/5 个挡块（至少需要 2 个）                         │
+│  [计算拟合曲线]（需 ≥2 个挡块）                             │
+│  拟合结果：depth = 0.00152 × pos + 1.83   R² = 0.999     │
+│  [保存校准]                                                │
+└──────────────────────────────────────────────────────────┘
+```
+
+**操作步骤引导：**
+1. 取 2cm 挡块，放于限深轮正下方。
+2. 用点动（`▼ 下降`）缓慢下压，至限深轮刚好接触挡块（不要压弯挡块）。
+3. 点击第 1 行 **[记录当前位置]** → 行变绿，显示编码器值。
+4. 点动抬起限深轮，取出挡块，换下一块，重复步骤 2–3。
+5. 记录至少 2 个（建议全部 5 个）→ **[计算拟合曲线]** → 确认 R² ≥ 0.99 → **[保存校准]**。
+
+### 7.3 需新增的数据字段
+
+在 `data/SowingDepthData.kt` 的 `ServoCalibration` 中新增：
+
+```kotlin
+// 标定模式：DIRECT = 直接测量，INDIRECT = 间接测量（挡块法）
+val calibrationMode: CalibrationMode = CalibrationMode.DIRECT,
+
+// 间接测量：5个标准挡块的记录点（encoderPos=null 表示尚未记录）
+val indirectPoints: List<IndirectCalibPoint> = STANDARD_BLOCK_DEPTHS_MM.map {
+    IndirectCalibPoint(depthMm = it, encoderPos = null)
+},
+```
+
+新增枚举与数据类（可放在 `SowingDepthData.kt` 末尾）：
+
+```kotlin
+enum class CalibrationMode { DIRECT, INDIRECT }
+
+data class IndirectCalibPoint(
+    val depthMm: Float,          // 挡块对应深度，固定值（mm）
+    val encoderPos: Int? = null  // 记录的编码器位置；null = 尚未记录
+)
+
+// 标准挡块深度序列（mm）
+val STANDARD_BLOCK_DEPTHS_MM = listOf(20f, 40f, 60f, 80f, 100f)
+```
+
+`SowingDepthState` 无需改动，`masterEnabled` 等字段保持不变。
+
+### 7.4 持久化（MySharedPreFun.kt）
+
+在已有的深度标定持久化代码旁边新增：
+
+```kotlin
+// 保存：calibrationMode、5个 indirectPoints.encoderPos（-1 表示 null）
+fun saveCalibrationMode(motorIndex: Int, mode: CalibrationMode)
+fun loadCalibrationMode(motorIndex: Int): CalibrationMode
+
+fun saveIndirectPoints(motorIndex: Int, points: List<IndirectCalibPoint>)
+fun loadIndirectPoints(motorIndex: Int): List<IndirectCalibPoint>
+```
+
+### 7.5 UI 实现（DepthCalibrationScreen.kt）
+
+**改动范围极小，只在步骤2区域内修改：**
+
+1. 步骤2容器顶部加模式切换：
+
+```kotlin
+// 在步骤2的 Column 顶部
+var calibMode by remember { mutableStateOf(cal.calibrationMode) }
+Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    FilterChip(selected = calibMode == CalibrationMode.DIRECT,
+        onClick = { calibMode = CalibrationMode.DIRECT },
+        label = { Text("直接测量") })
+    FilterChip(selected = calibMode == CalibrationMode.INDIRECT,
+        onClick = { calibMode = CalibrationMode.INDIRECT },
+        label = { Text("间接测量（挡块法）") })
+}
+```
+
+2. 根据 `calibMode` 显示两个子 composable：
+   - `calibMode == DIRECT` → 已有的直接测量 UI（5点等分，不改动）
+   - `calibMode == INDIRECT` → 新的 `IndirectCalibSection(cal, viewModel, motorIndex)`
+
+3. `IndirectCalibSection` 要点：
+   - 顶部复用步骤1的点动控件（`onJogStart`/`onJogStop` 逻辑完全相同，可直接复用变量）
+   - 5行挡块列表，每行一个 `[记录当前位置]` 按钮：
+     ```kotlin
+     viewModel.updateServoCalibration(motorIndex) { c ->
+         val newPts = c.indirectPoints.mapIndexed { idx, pt ->
+             if (idx == blockIdx) pt.copy(encoderPos = c.currentPosition) else pt
+         }
+         c.copy(indirectPoints = newPts)
+     }
+     ```
+   - `[计算拟合曲线]` 按钮（需 ≥2 个有效点）：
+     ```kotlin
+     val points = cal.indirectPoints
+         .filter { it.encoderPos != null }
+         .map { Pair(it.encoderPos!!, it.depthMm) }
+     val (a, b) = SowingDepthFun.linearFit(points)  // 复用已有函数
+     // 显示公式和 R²，等用户确认
+     ```
+   - `[保存校准]` 调用已有的 `viewModel.updateServoCalibration` 写入 `fitA`/`fitB`/`fitValid`/`calibrationPoints`（与直接模式一致，向下兼容控制循环）
+
+### 7.6 与现有控制循环的衔接
+
+`SowingDepthCoroutine` Phase 4 的深度→脉冲转换只用 `fitA`/`fitB`/`fitValid`，**不关心标定模式**。两种模式最终都写入相同的 `fitA`/`fitB`，控制循环无需任何改动。
+
+| 文件 | 改动量 |
+|------|--------|
+| `data/SowingDepthData.kt` | 新增 `CalibrationMode`、`IndirectCalibPoint`、2个字段 |
+| `MySharedPreFun.kt` | 新增 4 个持久化方法 |
+| `ui/DepthCalibrationScreen.kt` | 步骤2区域加模式切换 + `IndirectCalibSection` composable |
+| `coroutine/SowingDepthCoroutine.kt` | **无需改动** |
+| `funClass/CanOpenFun.kt` | **无需改动**（点动帧复用） |
+| `funClass/SowingDepthFun.kt` | **无需改动**（`linearFit` 复用） |
