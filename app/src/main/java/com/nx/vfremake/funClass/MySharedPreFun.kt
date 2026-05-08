@@ -299,4 +299,168 @@ class MySharedPreFun(private val context: Context) {
             apply()
         }
     }
+
+    // =========================================================================
+    // 播种深度控制 — SharedPreferences 持久化
+    // 使用独立的 SharedPreferences 文件 "sowing_depth_prefs"，避免与现有配置冲突。
+    //
+    // Key 命名规则（N = motorIndex 0~7，M = 校准点序号 0~4）：
+    //   depth_N_nodeId          Int    CAN Node-ID
+    //   depth_N_limitMin        Int    最浅位置编码器值
+    //   depth_N_limitMax        Int    最深位置编码器值
+    //   depth_N_limitsSet       Bool   限位是否已标定
+    //   depth_N_fitA            Float  拟合系数 a
+    //   depth_N_fitB            Float  拟合系数 b
+    //   depth_N_fitValid        Bool   拟合是否有效
+    //   depth_N_cal_count       Int    已存校准点数量
+    //   depth_N_cal_M_pos       Int    第 M 个校准点的编码器位置
+    //   depth_N_cal_M_depth     Float  第 M 个校准点的实际深度 mm
+    //   depth_jog_speed         Int    全局点动速度 RPM
+    //   depth_pos_speed         Int    全局位置运动速度 RPM
+    //   depth_acceleration      Int    全局加速度 RPM/s
+    //   depth_global_target     Float  全局目标深度 mm
+    // =========================================================================
+
+    /** 获取播种深度专用 SharedPreferences */
+    fun getSowingDepthSharedPre(): android.content.SharedPreferences =
+        context.getSharedPreferences("sowing_depth_prefs", Context.MODE_PRIVATE)
+
+    /**
+     * 保存单个电机的全部校准配置（nodeId / 限位 / 校准点 / 拟合系数）。
+     * 运行时状态（currentPosition / isOnline 等）不持久化。
+     */
+    fun saveSowingDepthCalibration(cal: com.nx.vfremake.data.ServoCalibration) {
+        val n = cal.motorIndex
+        val prefs = getSowingDepthSharedPre().edit()
+
+        prefs.putInt("depth_${n}_nodeId",    cal.nodeId)
+        prefs.putInt("depth_${n}_limitMin",  cal.limitMin)
+        prefs.putInt("depth_${n}_limitMax",  cal.limitMax)
+        prefs.putBoolean("depth_${n}_limitsSet", cal.limitsSet)
+        prefs.putFloat("depth_${n}_fitA",    cal.fitA)
+        prefs.putFloat("depth_${n}_fitB",    cal.fitB)
+        prefs.putBoolean("depth_${n}_fitValid",  cal.fitValid)
+
+        // 校准点：先存数量，再逐点存储
+        val pts = cal.calibrationPoints
+        prefs.putInt("depth_${n}_cal_count", pts.size)
+        pts.forEachIndexed { m, (pos, depth) ->
+            prefs.putInt("depth_${n}_cal_${m}_pos",   pos)
+            prefs.putFloat("depth_${n}_cal_${m}_depth", depth)
+        }
+
+        prefs.apply()
+    }
+
+    /**
+     * 读取单个电机的校准配置，返回 [ServoCalibration]（仅含持久化字段，运行时字段保持默认值）。
+     * 若从未写入，返回含默认值的对象（nodeId = 11 + motorIndex）。
+     */
+    fun loadSowingDepthCalibration(motorIndex: Int): com.nx.vfremake.data.ServoCalibration {
+        val n = motorIndex
+        val prefs = getSowingDepthSharedPre()
+
+        val nodeId      = prefs.getInt("depth_${n}_nodeId",    11 + n)
+        val limitMin    = prefs.getInt("depth_${n}_limitMin",  0)
+        val limitMax    = prefs.getInt("depth_${n}_limitMax",  0)
+        val limitsSet   = prefs.getBoolean("depth_${n}_limitsSet", false)
+        val fitA        = prefs.getFloat("depth_${n}_fitA",    0f)
+        val fitB        = prefs.getFloat("depth_${n}_fitB",    0f)
+        val fitValid    = prefs.getBoolean("depth_${n}_fitValid",  false)
+
+        val calCount    = prefs.getInt("depth_${n}_cal_count", 0)
+        val calPoints   = (0 until calCount).map { m ->
+            val pos   = prefs.getInt("depth_${n}_cal_${m}_pos",   0)
+            val depth = prefs.getFloat("depth_${n}_cal_${m}_depth", 0f)
+            Pair(pos, depth)
+        }
+
+        return com.nx.vfremake.data.ServoCalibration(
+            motorIndex         = n,
+            nodeId             = nodeId,
+            limitMin           = limitMin,
+            limitMax           = limitMax,
+            limitsSet          = limitsSet,
+            calibrationPoints  = calPoints,
+            fitA               = fitA,
+            fitB               = fitB,
+            fitValid           = fitValid
+        )
+    }
+
+    /**
+     * 读取全部 8 个电机的校准配置，返回列表（下标 = motorIndex）。
+     */
+    fun loadAllSowingDepthCalibrations(): List<com.nx.vfremake.data.ServoCalibration> =
+        (0 until 8).map { loadSowingDepthCalibration(it) }
+
+    /**
+     * 保存全局播种深度控制参数（点动速度 / 位置速度 / 加速度 / 全局目标深度）。
+     */
+    fun saveSowingDepthGlobalSettings(
+        jogSpeed: Int,
+        positionSpeed: Int,
+        acceleration: Int,
+        globalTargetDepth: Float
+    ) {
+        getSowingDepthSharedPre().edit()
+            .putInt("depth_jog_speed",        jogSpeed)
+            .putInt("depth_pos_speed",        positionSpeed)
+            .putInt("depth_acceleration",     acceleration)
+            .putFloat("depth_global_target",  globalTargetDepth)
+            .apply()
+    }
+
+    /**
+     * 读取全局播种深度控制参数，返回含默认值的四元组。
+     * @return Triple (jogSpeed, positionSpeed, acceleration) + globalTargetDepth
+     *         以 [com.nx.vfremake.data.SowingDepthState] 形式返回，motors 列表由调用方填充。
+     */
+    fun loadSowingDepthGlobalSettings(): SowingDepthGlobalSettings {
+        val prefs = getSowingDepthSharedPre()
+        return SowingDepthGlobalSettings(
+            jogSpeed          = prefs.getInt("depth_jog_speed",    2000),
+            positionSpeed     = prefs.getInt("depth_pos_speed",    500),
+            acceleration      = prefs.getInt("depth_acceleration", 10000),
+            globalTargetDepth = prefs.getFloat("depth_global_target", 50f)
+        )
+    }
+
+    /**
+     * 加载完整的 [com.nx.vfremake.data.SowingDepthState]（含 8 个电机 + 全局设置）。
+     * 通常在 App 启动或设置页初始化时调用一次。
+     */
+    fun loadSowingDepthState(): com.nx.vfremake.data.SowingDepthState {
+        val settings = loadSowingDepthGlobalSettings()
+        return com.nx.vfremake.data.SowingDepthState(
+            motors            = loadAllSowingDepthCalibrations(),
+            globalTargetDepth = settings.globalTargetDepth,
+            jogSpeed          = settings.jogSpeed,
+            positionSpeed     = settings.positionSpeed,
+            acceleration      = settings.acceleration
+        )
+    }
+
+    /**
+     * 保存完整的 [com.nx.vfremake.data.SowingDepthState]（含 8 个电机 + 全局设置）。
+     */
+    fun saveSowingDepthState(state: com.nx.vfremake.data.SowingDepthState) {
+        state.motors.forEach { saveSowingDepthCalibration(it) }
+        saveSowingDepthGlobalSettings(
+            jogSpeed          = state.jogSpeed,
+            positionSpeed     = state.positionSpeed,
+            acceleration      = state.acceleration,
+            globalTargetDepth = state.globalTargetDepth
+        )
+    }
 }
+
+/**
+ * 全局播种深度控制参数（[MySharedPreFun.loadSowingDepthGlobalSettings] 的返回类型）
+ */
+data class SowingDepthGlobalSettings(
+    val jogSpeed: Int,
+    val positionSpeed: Int,
+    val acceleration: Int,
+    val globalTargetDepth: Float
+)

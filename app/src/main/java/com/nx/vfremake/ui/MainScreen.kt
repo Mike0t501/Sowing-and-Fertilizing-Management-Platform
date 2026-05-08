@@ -127,13 +127,14 @@ fun MainScreen(
     mapView: MapView,
     mVariableFertViewModel: VariableFertViewModel,
     onClickSettigns: () -> Unit = {},
-    onClickParamSet: () -> Unit = {}
+    onClickParamSet: () -> Unit = {},
+    onClickSowingDepth: () -> Unit = {}
 ) {
     Box(modifier = Modifier.background(Color(LocalContext.current.getColor(R.color.background_color_night)))) {
         MapAndFunBontonVeiw(mapView, mVariableFertViewModel)
         MsgScreenRight(mVariableFertViewModel)
         MsgScreenBottom(mVariableFertViewModel)
-        MenuBottomBar(mapView, mVariableFertViewModel, onClickSettigns, onClickParamSet)
+        MenuBottomBar(mapView, mVariableFertViewModel, onClickSettigns, onClickParamSet, onClickSowingDepth)
     }
 }
 
@@ -455,7 +456,8 @@ fun MenuBottomBar(
     mapView: MapView,
     mVariableFertViewModel: VariableFertViewModel,
     onClickSettigns: () -> Unit = {},
-    onClickParamSet: () -> Unit = {}
+    onClickParamSet: () -> Unit = {},
+    onClickSowingDepth: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val sharedPre = MySharedPreFun(context).getMySharedPre()
@@ -531,10 +533,18 @@ fun MenuBottomBar(
             DropdownMenuItem(
                 onClick = {
                     onClickParamSet()
-                    menuIsExpanded.value = false // 手动关闭 DropdownMenu
+                    menuIsExpanded.value = false
                 }
             ) {
                 Text("参数设置")
+            }
+            DropdownMenuItem(
+                onClick = {
+                    onClickSowingDepth()
+                    menuIsExpanded.value = false
+                }
+            ) {
+                Text("播种深度控制")
             }
             DropdownMenuItem(onClick = {
                 // 点击更换处方图时，显示悬浮界面
