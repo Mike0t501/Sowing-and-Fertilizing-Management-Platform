@@ -298,6 +298,7 @@ object CanOpenFun {
      * 构建绝对位置运动帧序列。
      *
      * 发送顺序（调用方必须在帧间等待 SDO 应答，最少 20ms 间隔）：
+     *   0. 切换位置模式 (0x6060 = 0x01)  — 点动后电机可能处于速度模式，此处确保模式正确
      *   1. 可选：设置梯形速度 (0x6081)
      *   2. 写入目标位置 (0x607A)
      *   3. 写控制字 0x002F：Bit1(急停)+Bit2(电压)+Bit3(操作)+Bit4(执行新设置点)+Bit5(立即生效)
@@ -314,6 +315,8 @@ object CanOpenFun {
         profileSpeed: Int = 0
     ): List<ByteArray> {
         val frames = mutableListOf<ByteArray>()
+        // 确保电机处于位置模式（点动停止后保持速度模式，此处幂等切换）
+        frames.add(buildSdoWriteFrame(nodeId, 0x6060, 0x00, 1, 0x01L))
         if (profileSpeed > 0) {
             frames.add(buildSdoWriteFrame(nodeId, 0x6081, 0x00, 4, profileSpeed.toLong()))
         }
@@ -364,41 +367,12 @@ object CanOpenFun {
     )
 
     /**
-     * 构建点动停止完整序列：归零速度 → 切回位置模式 → 重新使能。
-     *
-     * 发送顺序（帧间需等待 SDO 应答，约 20ms）：
-     *   1. 目标速度归零                           (0x60FF = 0)
-     *   2. Disable Operation → Switched On      (0x6040 = 0x0007)
-     *   3. 切换位置模式                           (0x6060 = 0x01)
-     *   4. Enable Operation → Operation Enabled  (0x6040 = 0x000F)
-     *
-     * @param nodeId 节点 ID
-     * @return 按顺序发送的帧列表
-     */
-    fun buildJogStopSequence(nodeId: Int): List<ByteArray> = listOf(
-        buildSdoWriteFrame(nodeId, 0x60FF, 0x00, 4, 0L),          // 目标速度归零
-        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x0007L),     // Disable → Switched On
-        buildSdoWriteFrame(nodeId, 0x6060, 0x00, 1, 0x01L),       // 位置模式
-        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000FL)      // Enable Operation
-    )
-
-    /**
-     * 点动减速停止 - 第 1 步：仅设置目标速度为零，电机按 0x6084 斜率自然减速。
-     * 调用后需等待减速完成（time ≈ jogSpeed / acceleration × 1000 ms），
-     * 再调用 [buildJogModeRestoreFrames] 切回位置模式。
+     * 点动停止：将目标速度归零，电机按 0x6084 减速斜率自然减速至停止。
+     * 发送后等待减速完成（≈ jogSpeed / acceleration × 1000 ms + 200ms）即可。
+     * 丝杆自锁，无需切回位置模式；下次位置指令由 [buildAbsoluteMoveFrames] 幂等切换模式。
      */
     fun buildJogVelocityZeroFrame(nodeId: Int): ByteArray =
         buildSdoWriteFrame(nodeId, 0x60FF, 0x00, 4, 0L)
-
-    /**
-     * 点动减速停止 - 第 2 步：电机停稳后切回位置模式并重新使能。
-     * 需在 [buildJogVelocityZeroFrame] 发送且减速完成后调用。
-     */
-    fun buildJogModeRestoreFrames(nodeId: Int): List<ByteArray> = listOf(
-        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x0007L),  // Disable → Switched On
-        buildSdoWriteFrame(nodeId, 0x6060, 0x00, 1, 0x01L),    // 位置模式
-        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000FL)   // Enable Operation
-    )
 
     /**
      * 构建设置加减速度帧序列。

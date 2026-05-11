@@ -64,6 +64,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.data.CalibrationMode
+import com.nx.vfremake.data.IndirectCalibPoint
+import com.nx.vfremake.data.STANDARD_BLOCK_DEPTHS_MM
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
@@ -73,7 +76,10 @@ import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mSerialPortCAN
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -183,7 +189,12 @@ fun DepthCalibrationScreen(
     var deepPressCount    by remember { mutableStateOf(0) }
     var shallowPressCount by remember { mutableStateOf(0) }
 
+    // 点动启动协程 Job 引用（Step1/Step2 共用）：onJogStop 通过 cancelAndJoin 等待启动
+    // 序列完全退出后再发送 velocity=0，防止快速轻触时两个协程交错导致电机持续运行
+    val jogStartJobRef = remember { object { var value: Job? = null } }
+
     // ── 步骤 2 状态 ──────────────────────────────────────────────────────────
+    var calibMode by remember { mutableStateOf(cal.calibrationMode) }
     val depthInputs = remember { Array(5) { mutableStateOf("") } }
     var fitResult   by remember { mutableStateOf<Pair<Float, Float>?>(null) }
     var fitErrorMsg by remember { mutableStateOf("") }
@@ -235,14 +246,23 @@ fun DepthCalibrationScreen(
     }
 
     fun computeFit() {
-        val points = (0..4).mapNotNull { i ->
-            val depth = depthInputs[i].value.toFloatOrNull()
-            val pos   = calibPositions.getOrNull(i)
-            if (depth != null && depth > 0f && pos != null) Pair(pos, depth) else null
+        val points = if (calibMode == CalibrationMode.DIRECT) {
+            (0..4).mapNotNull { i ->
+                val depth = depthInputs[i].value.toFloatOrNull()
+                val pos   = calibPositions.getOrNull(i)
+                if (depth != null && depth > 0f && pos != null) Pair(pos, depth) else null
+            }
+        } else {
+            cal.indirectPoints
+                .filter { it.encoderPos != null }
+                .map { Pair(it.encoderPos!!, it.depthMm) }
         }
         val result = buildLinearFit(points)
         if (result == null) {
-            fitErrorMsg = "需要至少 2 个有效输入点（深度 > 0）"
+            fitErrorMsg = if (calibMode == CalibrationMode.DIRECT)
+                "需要至少 2 个有效输入点（深度 > 0）"
+            else
+                "需要至少 2 个已记录的挡块点"
             fitResult   = null
         } else {
             fitResult   = result
@@ -252,13 +272,23 @@ fun DepthCalibrationScreen(
 
     fun saveCalibration() {
         val (a, b) = fitResult ?: return
-        val calPoints = (0..4).mapNotNull { i ->
-            val depth = depthInputs[i].value.toFloatOrNull()
-            val pos   = calibPositions.getOrNull(i)
-            if (depth != null && depth > 0f && pos != null) Pair(pos, depth) else null
+        val calPoints = if (calibMode == CalibrationMode.DIRECT) {
+            (0..4).mapNotNull { i ->
+                val depth = depthInputs[i].value.toFloatOrNull()
+                val pos   = calibPositions.getOrNull(i)
+                if (depth != null && depth > 0f && pos != null) Pair(pos, depth) else null
+            }
+        } else {
+            cal.indirectPoints
+                .filter { it.encoderPos != null }
+                .map { Pair(it.encoderPos!!, it.depthMm) }
         }
         viewModel.updateServoCalibration(motorIndex) {
-            it.copy(calibrationPoints = calPoints, fitA = a, fitB = b, fitValid = true)
+            it.copy(
+                calibrationPoints = calPoints,
+                fitA = a, fitB = b, fitValid = true,
+                calibrationMode = calibMode
+            )
         }
         scope.launch(Dispatchers.IO) {
             val updated = viewModel.sowingDepthState.value?.motors?.getOrNull(motorIndex)
@@ -371,7 +401,8 @@ fun DepthCalibrationScreen(
                         Log.d("DepthCalib",
                             "onJogDeep handler invoked: nodeId=${cal.nodeId} jogSpeed=$jogSpeed " +
                             "port=$portState count=$deepPressCount")
-                        scope.launch(Dispatchers.IO) {
+                        jogStartJobRef.value?.cancel()
+                        jogStartJobRef.value = scope.launch(Dispatchers.IO) {
                             try {
                                 if (!ensureCanPortOpen(context)) {
                                     Log.e("DepthCalib", "onJogDeep: ensureCanPortOpen failed, abort")
@@ -391,8 +422,12 @@ fun DepthCalibrationScreen(
                                     delay(SDO_DELAY)
                                 }
                                 Log.d("DepthCalib", "onJogDeep IO done")
+                            } catch (e: CancellationException) {
+                                throw e  // 由 onJogStop 取消时正常传播
                             } catch (e: Throwable) {
                                 Log.e("DepthCalib", "onJogDeep IO threw: ${e.message}", e)
+                            } finally {
+                                if (jogStartJobRef.value?.isActive == false) jogStartJobRef.value = null
                             }
                         }
                     },
@@ -402,7 +437,8 @@ fun DepthCalibrationScreen(
                         Log.d("DepthCalib",
                             "onJogShallow handler invoked: nodeId=${cal.nodeId} jogSpeed=$jogSpeed " +
                             "port=$portState count=$shallowPressCount")
-                        scope.launch(Dispatchers.IO) {
+                        jogStartJobRef.value?.cancel()
+                        jogStartJobRef.value = scope.launch(Dispatchers.IO) {
                             try {
                                 if (!ensureCanPortOpen(context)) {
                                     Log.e("DepthCalib", "onJogShallow: ensureCanPortOpen failed, abort")
@@ -421,34 +457,37 @@ fun DepthCalibrationScreen(
                                     delay(SDO_DELAY)
                                 }
                                 Log.d("DepthCalib", "onJogShallow IO done")
+                            } catch (e: CancellationException) {
+                                throw e
                             } catch (e: Throwable) {
                                 Log.e("DepthCalib", "onJogShallow IO threw: ${e.message}", e)
+                            } finally {
+                                if (jogStartJobRef.value?.isActive == false) jogStartJobRef.value = null
                             }
                         }
                     },
                     onJogStop = {
                         Log.d("DepthCalib", "onJogStop handler invoked: nodeId=${cal.nodeId}")
+                        val startJob = jogStartJobRef.value.also { jogStartJobRef.value = null }
                         scope.launch(Dispatchers.IO) {
                             try {
                                 if (!ensureCanPortOpen(context)) {
+                                    startJob?.cancel()
                                     Log.e("DepthCalib", "onJogStop: ensureCanPortOpen failed, abort")
                                     return@launch
                                 }
-                                // 第 1 步：目标速度归零，电机开始按 0x6084 斜率减速
+                                // 等待点动启动序列完全退出，确保 velocity=0 是最后一条指令
+                                startJob?.cancelAndJoin()
+
+                                // 目标速度归零，电机开始按 0x6084 斜率减速
                                 CanOpenFun.sendFrame(CanOpenFun.buildJogVelocityZeroFrame(cal.nodeId))
                                 Log.d("DepthCalib", "onJogStop: velocity=0 sent, waiting for decel")
 
-                                // 第 2 步：等待减速完成（time = speed/accel×1000 + 200ms缓冲，最多4s）
                                 val decelMs = (jogSpeed.toLong() * 1000L / acceleration.toLong() + 200L)
                                     .coerceAtMost(4000L)
                                 delay(decelMs)
 
-                                // 第 3 步：切回位置模式并重新使能
-                                CanOpenFun.buildJogModeRestoreFrames(cal.nodeId).forEachIndexed { idx, f ->
-                                    Log.d("DepthCalib", "onJogStop restore[$idx] ${f.size}B")
-                                    CanOpenFun.sendFrame(f)
-                                    delay(SDO_DELAY)
-                                }
+                                // 电机已停稳，保持速度模式（丝杠自锁，无需切回位置模式）
                                 Log.d("DepthCalib", "onJogStop IO done (decelMs=$decelMs)")
                             } catch (e: Throwable) {
                                 Log.e("DepthCalib", "onJogStop IO threw: ${e.message}", e)
@@ -501,6 +540,8 @@ fun DepthCalibrationScreen(
             ) {
                 Step2Content(
                     cal                      = cal,
+                    calibMode                = calibMode,
+                    onCalibModeChange        = { calibMode = it },
                     calibPositions           = calibPositions,
                     depthInputs              = depthInputs,
                     fitResult                = fitResult,
@@ -524,6 +565,76 @@ fun DepthCalibrationScreen(
                             } finally {
                                 withContext(Dispatchers.Main) { moveBusy = false }
                             }
+                        }
+                    },
+                    onJogDeep = {
+                        jogStartJobRef.value?.cancel()
+                        jogStartJobRef.value = scope.launch(Dispatchers.IO) {
+                            try {
+                                if (!ensureCanPortOpen(context)) return@launch
+                                CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, acceleration).forEach { f ->
+                                    CanOpenFun.sendFrame(f); delay(SDO_DELAY)
+                                }
+                                CanOpenFun.buildJogStartSequence(cal.nodeId, jogSpeed).forEach { f ->
+                                    CanOpenFun.sendFrame(f); delay(SDO_DELAY)
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                Log.e("DepthCalib", "Step2 onJogDeep threw: ${e.message}", e)
+                            } finally {
+                                if (jogStartJobRef.value?.isActive == false) jogStartJobRef.value = null
+                            }
+                        }
+                    },
+                    onJogShallow = {
+                        jogStartJobRef.value?.cancel()
+                        jogStartJobRef.value = scope.launch(Dispatchers.IO) {
+                            try {
+                                if (!ensureCanPortOpen(context)) return@launch
+                                CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, acceleration).forEach { f ->
+                                    CanOpenFun.sendFrame(f); delay(SDO_DELAY)
+                                }
+                                CanOpenFun.buildJogStartSequence(cal.nodeId, -jogSpeed).forEach { f ->
+                                    CanOpenFun.sendFrame(f); delay(SDO_DELAY)
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                Log.e("DepthCalib", "Step2 onJogShallow threw: ${e.message}", e)
+                            } finally {
+                                if (jogStartJobRef.value?.isActive == false) jogStartJobRef.value = null
+                            }
+                        }
+                    },
+                    onJogStop = {
+                        val startJob = jogStartJobRef.value.also { jogStartJobRef.value = null }
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                if (!ensureCanPortOpen(context)) { startJob?.cancel(); return@launch }
+                                startJob?.cancelAndJoin()
+                                CanOpenFun.sendFrame(CanOpenFun.buildJogVelocityZeroFrame(cal.nodeId))
+                                val decelMs = (jogSpeed.toLong() * 1000L / acceleration.toLong() + 200L)
+                                    .coerceAtMost(4000L)
+                                delay(decelMs)
+                                // 电机已停稳，保持速度模式（丝杠自锁，无需切回位置模式）
+                            } catch (e: Throwable) {
+                                Log.e("DepthCalib", "Step2 onJogStop threw: ${e.message}", e)
+                            }
+                        }
+                    },
+                    onRecordIndirectPoint = { blockIdx ->
+                        viewModel.updateServoCalibration(motorIndex) { c ->
+                            c.copy(indirectPoints = c.indirectPoints.mapIndexed { i, pt ->
+                                if (i == blockIdx) pt.copy(encoderPos = c.currentPosition) else pt
+                            })
+                        }
+                    },
+                    onClearIndirectPoint = { blockIdx ->
+                        viewModel.updateServoCalibration(motorIndex) { c ->
+                            c.copy(indirectPoints = c.indirectPoints.mapIndexed { i, pt ->
+                                if (i == blockIdx) pt.copy(encoderPos = null) else pt
+                            })
                         }
                     },
                     onComputeFit = { computeFit() },
@@ -766,6 +877,8 @@ private fun Step1Content(
 @Composable
 private fun Step2Content(
     cal:                     ServoCalibration,
+    calibMode:               CalibrationMode,
+    onCalibModeChange:       (CalibrationMode) -> Unit,
     calibPositions:          List<Int>,
     depthInputs:             Array<MutableState<String>>,
     fitResult:               Pair<Float, Float>?,
@@ -775,6 +888,11 @@ private fun Step2Content(
     onPositionSpeedChange:   (Int) -> Unit,
     onPositionSpeedFinished: () -> Unit,
     onMoveToPosition:        (Int) -> Unit,
+    onJogDeep:               () -> Unit,
+    onJogShallow:            () -> Unit,
+    onJogStop:               () -> Unit,
+    onRecordIndirectPoint:   (Int) -> Unit,
+    onClearIndirectPoint:    (Int) -> Unit,
     onComputeFit:            () -> Unit,
     onSaveClick:             () -> Unit
 ) {
@@ -787,42 +905,86 @@ private fun Step2Content(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("5 挡位深度校准", fontSize = 16.sp, color = Color(0xFF1565C0))
-            Text(
-                "限位范围: ${cal.limitMin} ~ ${cal.limitMax} pulses\n" +
-                "移动到每个挡位，用深度尺测量实际值后填入。",
-                fontSize = 13.sp, color = Color.Gray
-            )
+            Text("深度校准", fontSize = 16.sp, color = Color(0xFF1565C0))
 
-            // 位置运动速度滑块：steps=289 → (3000-100)/10 - 1，步长 10 RPM
-            Text("位置运动速度: $positionSpeed RPM", fontSize = 14.sp)
-            Slider(
-                value                 = positionSpeed.toFloat(),
-                onValueChange         = { onPositionSpeedChange(it.toInt()) },
-                onValueChangeFinished = onPositionSpeedFinished,
-                valueRange            = 100f..3000f,
-                steps                 = 289,
-                colors                = SliderDefaults.colors(
-                    thumbColor       = Color(0xFF1565C0),
-                    activeTrackColor = Color(0xFF1565C0)
-                )
-            )
+            // 模式切换行
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                listOf(
+                    CalibrationMode.DIRECT   to "直接测量",
+                    CalibrationMode.INDIRECT to "间接测量（挡块法）"
+                ).forEach { (mode, label) ->
+                    val selected = calibMode == mode
+                    TextButton(
+                        onClick  = { onCalibModeChange(mode) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .background(
+                                color = if (selected) Color(0xFF1565C0) else Color(0xFFEEEEEE),
+                                shape = RoundedCornerShape(6.dp)
+                            )
+                    ) {
+                        Text(
+                            text     = label,
+                            color    = if (selected) Color.White else Color(0xFF1565C0),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
 
             Divider()
 
-            if (calibPositions.isEmpty()) {
-                Text("限位尚未设置，请返回步骤 1 完成限位标定。", color = Color.Red, fontSize = 13.sp)
-            } else {
-                calibPositions.forEachIndexed { i, encoderPos ->
-                    CalibPointRow(
-                        index      = i,
-                        encoderPos = encoderPos,
-                        depthInput = depthInputs[i],
-                        moveBusy   = moveBusy,
-                        onMoveHere = { onMoveToPosition(encoderPos) }
+            if (calibMode == CalibrationMode.DIRECT) {
+                // ── 直接测量模式 ──────────────────────────────────────────────
+                Text(
+                    "限位范围: ${cal.limitMin} ~ ${cal.limitMax} pulses\n" +
+                    "移动到每个挡位，用深度尺测量实际值后填入。",
+                    fontSize = 13.sp, color = Color.Gray
+                )
+
+                // 位置运动速度滑块：steps=289 → (3000-100)/10 - 1，步长 10 RPM
+                Text("位置运动速度: $positionSpeed RPM", fontSize = 14.sp)
+                Slider(
+                    value                 = positionSpeed.toFloat(),
+                    onValueChange         = { onPositionSpeedChange(it.toInt()) },
+                    onValueChangeFinished = onPositionSpeedFinished,
+                    valueRange            = 100f..3000f,
+                    steps                 = 289,
+                    colors                = SliderDefaults.colors(
+                        thumbColor       = Color(0xFF1565C0),
+                        activeTrackColor = Color(0xFF1565C0)
                     )
-                    if (i < 4) Divider(color = Color(0xFFEEEEEE), thickness = 0.5.dp)
+                )
+
+                Divider()
+
+                if (calibPositions.isEmpty()) {
+                    Text("限位尚未设置，请返回步骤 1 完成限位标定。", color = Color.Red, fontSize = 13.sp)
+                } else {
+                    calibPositions.forEachIndexed { i, encoderPos ->
+                        CalibPointRow(
+                            index      = i,
+                            encoderPos = encoderPos,
+                            depthInput = depthInputs[i],
+                            moveBusy   = moveBusy,
+                            onMoveHere = { onMoveToPosition(encoderPos) }
+                        )
+                        if (i < 4) Divider(color = Color(0xFFEEEEEE), thickness = 0.5.dp)
+                    }
                 }
+            } else {
+                // ── 间接测量模式（挡块法）───────────────────────────────────
+                IndirectCalibSection(
+                    cal           = cal,
+                    onJogDeep     = onJogDeep,
+                    onJogShallow  = onJogShallow,
+                    onJogStop     = onJogStop,
+                    onRecordPoint = onRecordIndirectPoint,
+                    onClearPoint  = onClearIndirectPoint
+                )
             }
 
             Divider()
@@ -851,13 +1013,17 @@ private fun Step2Content(
             }
 
             // 操作按钮行
+            val computeEnabled = if (calibMode == CalibrationMode.DIRECT)
+                calibPositions.isNotEmpty()
+            else
+                cal.indirectPoints.count { it.encoderPos != null } >= 2
             Row(
                 modifier              = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
                     onClick  = onComputeFit,
-                    enabled  = calibPositions.isNotEmpty(),
+                    enabled  = computeEnabled,
                     modifier = Modifier.weight(1f),
                     colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF455A64)),
                     shape    = RoundedCornerShape(8.dp)
@@ -877,6 +1043,106 @@ private fun Step2Content(
                     Text("保存校准", color = Color.White, fontSize = 13.sp)
                 }
             }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 间接测量区块（挡块法）
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun IndirectCalibSection(
+    cal:           ServoCalibration,
+    onJogDeep:     () -> Unit,
+    onJogShallow:  () -> Unit,
+    onJogStop:     () -> Unit,
+    onRecordPoint: (Int) -> Unit,
+    onClearPoint:  (Int) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // 实时编码器位置
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("当前编码器位置", modifier = Modifier.weight(1f), fontSize = 14.sp, color = Color.Gray)
+            Text(
+                "${cal.currentPosition}",
+                fontSize   = 20.sp,
+                color      = Color(0xFF1565C0),
+                fontFamily = FontFamily.Monospace
+            )
+            Spacer(Modifier.width(4.dp))
+            Text("pulses", fontSize = 12.sp, color = Color.Gray)
+        }
+
+        // 点动按钮
+        Text("点动控制（按住运动，松开停止）", fontSize = 13.sp, color = Color.Gray)
+        Row(
+            modifier              = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment     = Alignment.CenterVertically
+        ) {
+            JogButton(label = "深 ▼", onPress = onJogDeep,    onRelease = onJogStop)
+            JogButton(label = "浅 ▲", onPress = onJogShallow, onRelease = onJogStop)
+        }
+
+        Text(
+            "将挡块放在限深轮下方，点动压到刚好接触后点击 [记录当前位置]",
+            fontSize = 13.sp, color = Color.Gray
+        )
+
+        Divider()
+
+        // 5 行挡块列表
+        cal.indirectPoints.forEachIndexed { i, pt ->
+            val blockCm = (pt.depthMm / 10f).toInt()
+            Row(
+                modifier              = Modifier.fillMaxWidth(),
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "$blockCm cm",
+                    fontSize = 14.sp,
+                    color    = Color(0xFF1565C0),
+                    modifier = Modifier.width(44.dp)
+                )
+                if (pt.encoderPos != null) {
+                    Text(
+                        "${pt.encoderPos}",
+                        fontSize   = 13.sp,
+                        color      = Color(0xFF388E3C),
+                        fontFamily = FontFamily.Monospace,
+                        modifier   = Modifier.weight(1f)
+                    )
+                    Text("✓", fontSize = 14.sp, color = Color(0xFF388E3C))
+                } else {
+                    Text(
+                        "——",
+                        fontSize = 13.sp,
+                        color    = Color.Gray,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                if (pt.encoderPos == null) {
+                    OutlinedButton(
+                        onClick        = { onRecordPoint(i) },
+                        shape          = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("记录当前位置", fontSize = 11.sp, color = Color(0xFF1565C0))
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick        = { onClearPoint(i) },
+                        shape          = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("清除", fontSize = 11.sp, color = Color.Gray)
+                    }
+                }
+            }
+            if (i < cal.indirectPoints.lastIndex)
+                Divider(color = Color(0xFFEEEEEE), thickness = 0.5.dp)
         }
     }
 }
