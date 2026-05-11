@@ -18,6 +18,9 @@ import android.content.SharedPreferences
 import android.net.Uri
 import android.provider.DocumentsContract
 import com.nx.vfremake.R
+import com.nx.vfremake.data.CalibrationMode
+import com.nx.vfremake.data.IndirectCalibPoint
+import com.nx.vfremake.data.STANDARD_BLOCK_DEPTHS_MM
 import com.nx.vfremake.mSPParamData
 
 class MySharedPreFun(private val context: Context) {
@@ -319,6 +322,8 @@ class MySharedPreFun(private val context: Context) {
     //   depth_pos_speed         Int    全局位置运动速度 RPM
     //   depth_acceleration      Int    全局加速度 RPM/s
     //   depth_global_target     Float  全局目标深度 mm
+    //   depth_N_calibMode       String 标定模式 "DIRECT" 或 "INDIRECT"
+    //   depth_N_ind_M_enc       Int    第 M 个挡块的编码器值（-1 = null）
     // =========================================================================
 
     /** 获取播种深度专用 SharedPreferences */
@@ -349,6 +354,13 @@ class MySharedPreFun(private val context: Context) {
             prefs.putFloat("depth_${n}_cal_${m}_depth", depth)
         }
 
+        // 标定模式与间接测量点
+        prefs.putString("depth_${n}_calibMode", cal.calibrationMode.name)
+        STANDARD_BLOCK_DEPTHS_MM.indices.forEach { m ->
+            val enc = cal.indirectPoints.getOrNull(m)?.encoderPos ?: -1
+            prefs.putInt("depth_${n}_ind_${m}_enc", enc)
+        }
+
         prefs.apply()
     }
 
@@ -375,6 +387,14 @@ class MySharedPreFun(private val context: Context) {
             Pair(pos, depth)
         }
 
+        val calibModeStr = prefs.getString("depth_${n}_calibMode", "DIRECT") ?: "DIRECT"
+        val calibMode = runCatching { CalibrationMode.valueOf(calibModeStr) }
+            .getOrDefault(CalibrationMode.DIRECT)
+        val indirectPoints = STANDARD_BLOCK_DEPTHS_MM.mapIndexed { m, depthMm ->
+            val enc = prefs.getInt("depth_${n}_ind_${m}_enc", -1)
+            IndirectCalibPoint(depthMm = depthMm, encoderPos = if (enc == -1) null else enc)
+        }
+
         return com.nx.vfremake.data.ServoCalibration(
             motorIndex         = n,
             nodeId             = nodeId,
@@ -384,7 +404,9 @@ class MySharedPreFun(private val context: Context) {
             calibrationPoints  = calPoints,
             fitA               = fitA,
             fitB               = fitB,
-            fitValid           = fitValid
+            fitValid           = fitValid,
+            calibrationMode    = calibMode,
+            indirectPoints     = indirectPoints
         )
     }
 

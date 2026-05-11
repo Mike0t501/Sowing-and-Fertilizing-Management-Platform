@@ -31,6 +31,12 @@ data class ServoCalibration(
     val fitB: Float = 0f,
     val fitValid: Boolean = false,        // 拟合是否有效（至少需要 2 个校准点）
 
+    // ── 标定模式与间接测量点（持久化）──────────────────────────────────
+    val calibrationMode: CalibrationMode = CalibrationMode.DIRECT,
+    val indirectPoints: List<IndirectCalibPoint> = STANDARD_BLOCK_DEPTHS_MM.map {
+        IndirectCalibPoint(depthMm = it)
+    },
+
     // ── 运行时状态（不持久化，由协程更新）──────────────────────────────
     val currentPosition: Int = 0,         // 当前编码器计数值（从 TPDO1 / SDO 读取）
     val targetDepth: Float = 0f,          // 当前目标深度 mm（由控制协程写入）
@@ -64,3 +70,12 @@ data class SowingDepthState(
      */
     val masterEnabled: Boolean = false
 )
+
+enum class CalibrationMode { DIRECT, INDIRECT }
+
+data class IndirectCalibPoint(
+    val depthMm: Float,
+    val encoderPos: Int? = null
+)
+
+val STANDARD_BLOCK_DEPTHS_MM = listOf(20f, 40f, 60f, 80f, 100f)
