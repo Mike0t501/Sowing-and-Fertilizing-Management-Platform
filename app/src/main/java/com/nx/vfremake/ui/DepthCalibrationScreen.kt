@@ -193,6 +193,9 @@ fun DepthCalibrationScreen(
     // 序列完全退出后再发送 velocity=0，防止快速轻触时两个协程交错导致电机持续运行
     val jogStartJobRef = remember { object { var value: Job? = null } }
 
+    // Step2 间接测量模式限位监控 Job：在点动方向到达 limitMax/limitMin 时自动停止电机
+    val step2LimitMonitorJobRef = remember { object { var value: Job? = null } }
+
     // ── 步骤 2 状态 ──────────────────────────────────────────────────────────
     var calibMode by remember { mutableStateOf(cal.calibrationMode) }
     val depthInputs = remember { Array(5) { mutableStateOf("") } }
@@ -569,14 +572,52 @@ fun DepthCalibrationScreen(
                     },
                     onJogDeep = {
                         jogStartJobRef.value?.cancel()
+                        step2LimitMonitorJobRef.value?.cancel()
+                        step2LimitMonitorJobRef.value = null
                         jogStartJobRef.value = scope.launch(Dispatchers.IO) {
                             try {
                                 if (!ensureCanPortOpen(context)) return@launch
+                                // 限位预检：若已到达或超过最深限位则不启动
+                                if (cal.limitsSet) {
+                                    val startPos = viewModel.sowingDepthState.value
+                                        ?.motors?.getOrNull(motorIndex)?.currentPosition ?: cal.currentPosition
+                                    val deepDir = when {
+                                        cal.limitMax > cal.limitMin -> 1
+                                        cal.limitMax < cal.limitMin -> -1
+                                        else -> 0
+                                    }
+                                    val alreadyAtLimit = deepDir != 0 &&
+                                        (if (deepDir > 0) startPos >= cal.limitMax else startPos <= cal.limitMax)
+                                    if (alreadyAtLimit) return@launch
+                                }
                                 CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, acceleration).forEach { f ->
                                     CanOpenFun.sendFrame(f); delay(SDO_DELAY)
                                 }
                                 CanOpenFun.buildJogStartSequence(cal.nodeId, jogSpeed).forEach { f ->
                                     CanOpenFun.sendFrame(f); delay(SDO_DELAY)
+                                }
+                                // 点动已启动，启动限位监控协程
+                                if (cal.limitsSet) {
+                                    val deepDir = when {
+                                        cal.limitMax > cal.limitMin -> 1
+                                        cal.limitMax < cal.limitMin -> -1
+                                        else -> 0
+                                    }
+                                    if (deepDir != 0) {
+                                        step2LimitMonitorJobRef.value = scope.launch(Dispatchers.IO) {
+                                            while (true) {
+                                                delay(100)
+                                                val pos = viewModel.sowingDepthState.value
+                                                    ?.motors?.getOrNull(motorIndex)?.currentPosition ?: break
+                                                val hitLimit = if (deepDir > 0) pos >= cal.limitMax else pos <= cal.limitMax
+                                                if (hitLimit) {
+                                                    Log.d("DepthCalib", "Step2 deep limit reached pos=$pos limitMax=${cal.limitMax}")
+                                                    CanOpenFun.sendFrame(CanOpenFun.buildJogVelocityZeroFrame(cal.nodeId))
+                                                    break
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             } catch (e: CancellationException) {
                                 throw e
@@ -589,14 +630,52 @@ fun DepthCalibrationScreen(
                     },
                     onJogShallow = {
                         jogStartJobRef.value?.cancel()
+                        step2LimitMonitorJobRef.value?.cancel()
+                        step2LimitMonitorJobRef.value = null
                         jogStartJobRef.value = scope.launch(Dispatchers.IO) {
                             try {
                                 if (!ensureCanPortOpen(context)) return@launch
+                                // 限位预检：若已到达或超过最浅限位则不启动
+                                if (cal.limitsSet) {
+                                    val startPos = viewModel.sowingDepthState.value
+                                        ?.motors?.getOrNull(motorIndex)?.currentPosition ?: cal.currentPosition
+                                    val deepDir = when {
+                                        cal.limitMax > cal.limitMin -> 1
+                                        cal.limitMax < cal.limitMin -> -1
+                                        else -> 0
+                                    }
+                                    val alreadyAtLimit = deepDir != 0 &&
+                                        (if (deepDir > 0) startPos <= cal.limitMin else startPos >= cal.limitMin)
+                                    if (alreadyAtLimit) return@launch
+                                }
                                 CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, acceleration).forEach { f ->
                                     CanOpenFun.sendFrame(f); delay(SDO_DELAY)
                                 }
                                 CanOpenFun.buildJogStartSequence(cal.nodeId, -jogSpeed).forEach { f ->
                                     CanOpenFun.sendFrame(f); delay(SDO_DELAY)
+                                }
+                                // 点动已启动，启动限位监控协程
+                                if (cal.limitsSet) {
+                                    val deepDir = when {
+                                        cal.limitMax > cal.limitMin -> 1
+                                        cal.limitMax < cal.limitMin -> -1
+                                        else -> 0
+                                    }
+                                    if (deepDir != 0) {
+                                        step2LimitMonitorJobRef.value = scope.launch(Dispatchers.IO) {
+                                            while (true) {
+                                                delay(100)
+                                                val pos = viewModel.sowingDepthState.value
+                                                    ?.motors?.getOrNull(motorIndex)?.currentPosition ?: break
+                                                val hitLimit = if (deepDir > 0) pos <= cal.limitMin else pos >= cal.limitMin
+                                                if (hitLimit) {
+                                                    Log.d("DepthCalib", "Step2 shallow limit reached pos=$pos limitMin=${cal.limitMin}")
+                                                    CanOpenFun.sendFrame(CanOpenFun.buildJogVelocityZeroFrame(cal.nodeId))
+                                                    break
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             } catch (e: CancellationException) {
                                 throw e
@@ -608,6 +687,9 @@ fun DepthCalibrationScreen(
                         }
                     },
                     onJogStop = {
+                        // 先取消限位监控（防止监控协程与手动停止并发发送帧）
+                        step2LimitMonitorJobRef.value?.cancel()
+                        step2LimitMonitorJobRef.value = null
                         val startJob = jogStartJobRef.value.also { jogStartJobRef.value = null }
                         scope.launch(Dispatchers.IO) {
                             try {
@@ -617,7 +699,6 @@ fun DepthCalibrationScreen(
                                 val decelMs = (jogSpeed.toLong() * 1000L / acceleration.toLong() + 200L)
                                     .coerceAtMost(4000L)
                                 delay(decelMs)
-                                // 电机已停稳，保持速度模式（丝杠自锁，无需切回位置模式）
                             } catch (e: Throwable) {
                                 Log.e("DepthCalib", "Step2 onJogStop threw: ${e.message}", e)
                             }
