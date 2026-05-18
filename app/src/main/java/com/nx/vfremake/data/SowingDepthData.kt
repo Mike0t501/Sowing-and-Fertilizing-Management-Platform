@@ -33,9 +33,7 @@ data class ServoCalibration(
 
     // ── 标定模式与间接测量点（持久化）──────────────────────────────────
     val calibrationMode: CalibrationMode = CalibrationMode.DIRECT,
-    val indirectPoints: List<IndirectCalibPoint> = STANDARD_BLOCK_DEPTHS_MM.map {
-        IndirectCalibPoint(depthMm = it)
-    },
+    val indirectPoints: List<IndirectCalibPoint> = DEFAULT_INDIRECT_POINTS,
 
     // ── 运行时状态（不持久化，由协程更新）──────────────────────────────
     val currentPosition: Int = 0,         // 当前编码器计数值（从 TPDO1 / SDO 读取）
@@ -79,3 +77,13 @@ data class IndirectCalibPoint(
 )
 
 val STANDARD_BLOCK_DEPTHS_MM = listOf(20f, 40f, 60f, 80f, 100f)
+
+private val DEFAULT_INDIRECT_POINTS: List<IndirectCalibPoint> =
+    STANDARD_BLOCK_DEPTHS_MM.map { IndirectCalibPoint(depthMm = it) }
+
+/**
+ * 由 limitMin/limitMax 推出"深方向"的符号：+1 / -1 / 0(限位未分离)。
+ * 仅用于点动方向判断与到限检查；写入 0x261F/0x2620 时已按浅/深字面值处理。
+ */
+val ServoCalibration.deepDirection: Int
+    get() = limitMax.compareTo(limitMin)

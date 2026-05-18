@@ -178,9 +178,11 @@ class VariableFertViewModel : ViewModel() {
      */
     fun updateServoCalibration(motorIndex: Int, updater: (ServoCalibration) -> ServoCalibration) {
         val current = sowingDepthState.value ?: SowingDepthState()
-        val newMotors = current.motors.toMutableList().also {
-            if (motorIndex in it.indices) it[motorIndex] = updater(it[motorIndex])
-        }
+        if (motorIndex !in current.motors.indices) return
+        val updated = updater(current.motors[motorIndex])
+        // 同值短路：避免 LiveData 在重复点击 / 周期性刷新时触发无谓重组
+        if (updated === current.motors[motorIndex] || updated == current.motors[motorIndex]) return
+        val newMotors = current.motors.toMutableList().also { it[motorIndex] = updated }
         sowingDepthState.postValue(current.copy(motors = newMotors))
     }
 
