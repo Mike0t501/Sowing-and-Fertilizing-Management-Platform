@@ -46,6 +46,12 @@ var mTestSerialPortCAN: SerialPort? = null
 // 字段
 lateinit var fertQueryField: String
 
+// 处方图深度字段；空串=未配置，查询前判空（深度可选，故用 var 而非 lateinit）
+var depthQueryField: String = ""
+
+// 处方图深度单位(cm) → targetDepth(mm) 唯一换算点
+const val DEPTH_MAP_CM_TO_MM = 10f
+
 // RMC解析存储data
 var mRmcData = RmcData()
 
@@ -169,6 +175,18 @@ class VariableFertViewModel : ViewModel() {
     // 初始值为全默认（nodeId=11~18，限位未设定，拟合无效），
     // 由 MainActivity 在串口初始化完成后从 MySharedPreFun.loadSowingDepthState() 更新。
     val sowingDepthState = MutableLiveData(SowingDepthState())
+
+    // 处方图控深模式开关：不持久化，启动默认 false。
+    // ON → dantiPositionAndCtrl 每条 RMC 把地图深度写入各电机 targetDepth。
+    val depthPrescriptionMode = MutableLiveData(false)
+
+    // 最近一次从处方图读到的各电机深度(mm)，仅供 UI 显示，-1 表示无效/未读
+    val mapDepthApplied = MutableLiveData<FloatArray>()
+
+    /** 切换处方图控深模式（数据源开关，与 [updateMasterEnabled] 的使能门控相互独立）。 */
+    fun setDepthPrescriptionMode(enabled: Boolean) {
+        depthPrescriptionMode.postValue(enabled)
+    }
 
     /**
      * 更新单个电机的 [ServoCalibration]（用于协程收到 TPDO/SDO 时刷新运行时状态，

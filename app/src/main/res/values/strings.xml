@@ -39,6 +39,8 @@
     <string name="fertApplied_defeatValue">-1</string>
     <string name="fertQueryField_name">fertQueryField</string>
     <string name="fertQueryField_defeatValue">施肥量</string>
+    <string name="depthQueryField_name">depthQueryField</string>
+    <string name="depthQueryField_defeatValue">播种深度</string>
     <string name="writeSaveData_Switch_name">writeSaveSwitch</string>
     <!--    Switch 0 关-->
     <string name="writeSaveData_Switch_defeatValue">0</string>
@@ -53,6 +55,26 @@
     <!--    0 电机转速模式-->
     <string name="testMode_testSendMode_name">testSendMode</string>
     <string name="testMode_testSendMode_defeatValue">0</string>
+
+    <!--    模拟GNSS定位（无 GNSS 时按设定航线插值生成 RMC 测试电机）-->
+    <string name="simGnss_Switch_name">simGnssSwitch</string>
+    <string name="simGnss_Switch_defeatValue">0</string>
+    <string name="simGnss_startLat_name">simGnssStartLat</string>
+    <string name="simGnss_startLat_defeatValue">36.850825</string>
+    <string name="simGnss_startLon_name">simGnssStartLon</string>
+    <string name="simGnss_startLon_defeatValue">115.007949</string>
+    <string name="simGnss_endLat_name">simGnssEndLat</string>
+    <string name="simGnss_endLat_defeatValue">36.853154</string>
+    <string name="simGnss_endLon_name">simGnssEndLon</string>
+    <string name="simGnss_endLon_defeatValue">115.008574</string>
+    <!--    速度单位 km/h-->
+    <string name="simGnss_speed_name">simGnssSpeed</string>
+    <string name="simGnss_speed_defeatValue">15</string>
+    <!--    tick 间隔 ms（高级项）-->
+    <string name="simGnss_interval_name">simGnssInterval</string>
+    <string name="simGnss_interval_defeatValue">400</string>
+    <string name="simGnss_loop_name">simGnssLoop</string>
+    <string name="simGnss_loop_defeatValue">0</string>
 
     <!--    串口配置-->
     <string name="serial_db9_port_name">serialDb9Port</string>

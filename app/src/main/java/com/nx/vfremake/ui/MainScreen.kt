@@ -107,6 +107,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material.Surface
 import androidx.compose.material.Divider
+import androidx.compose.material.Switch
 import androidx.compose.material.TextButton
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
@@ -463,6 +464,7 @@ fun MenuBottomBar(
     val sharedPre = MySharedPreFun(context).getMySharedPre()
     val editor = sharedPre.edit()
     val fertValueFieldResKey = context.getString(R.string.fertQueryField_name)
+    val depthValueFieldResKey = context.getString(R.string.depthQueryField_name)
 
     // 展开/收起菜单逻辑
     val menuIsExpanded = remember { mutableStateOf(false) }
@@ -474,6 +476,13 @@ fun MenuBottomBar(
         rememberSaveable {
             mutableStateOf(sharedPre.getString(fertValueFieldResKey, null) ?: "")
         }
+    // 处方图深度字段（可选）
+    val depthValueField =
+        rememberSaveable {
+            mutableStateOf(sharedPre.getString(depthValueFieldResKey, null) ?: "")
+        }
+    // 处方图控深模式开关
+    val depthPrescriptionMode by mVariableFertViewModel.depthPrescriptionMode.observeAsState(false)
 
     // 从viewmodel加载字段列表
     val fieldList by mVariableFertViewModel.fieldsList.observeAsState()
@@ -724,6 +733,91 @@ fun MenuBottomBar(
                                 }
                             }
                         }
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    // ================= 步骤 3：播种深度字段 + 控深模式 =================
+                    Text(
+                        text = "步骤 3：选择播种深度字段（可选，单位 cm）",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (shpLoadDone.value) Color(0xFF1976D2) else Color.Gray,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color.White,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE0E0E0)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (!shpLoadDone.value) {
+                            Text(
+                                text = "请先在上方选择处方图文件",
+                                fontSize = 14.sp,
+                                color = Color.LightGray,
+                                modifier = Modifier.padding(16.dp),
+                                textAlign = TextAlign.Center
+                            )
+                        } else {
+                            FlowRow(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                fieldList?.forEach { field ->
+                                    val isSelected = depthValueField.value == field
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (isSelected) Color(0xFF2E7D32) else Color(0xFFF5F5F5),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            width = 1.dp,
+                                            color = if (isSelected) Color(0xFF2E7D32) else Color.Transparent
+                                        ),
+                                        modifier = Modifier.clickable {
+                                            depthValueField.value = field
+                                            editor.putString(depthValueFieldResKey, field).apply()
+                                        }
+                                    ) {
+                                        Text(
+                                            text = field,
+                                            color = if (isSelected) Color.White else Color(0xFF555555),
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                            fontSize = 14.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "处方图控深模式",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF333333)
+                            )
+                            Text(
+                                text = "开启后播种深度由处方图驱动；按\"开始\"自动使能深度电机，\"停止\"自动断使能",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                        Switch(
+                            checked = depthPrescriptionMode,
+                            onCheckedChange = { mVariableFertViewModel.setDepthPrescriptionMode(it) }
+                        )
                     }
 
                     Spacer(modifier = Modifier.height(32.dp))

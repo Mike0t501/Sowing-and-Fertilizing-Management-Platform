@@ -265,6 +265,10 @@ class MySharedPreFun(private val context: Context) {
             context.getString(R.string.fertQueryField_defeatValue)
         )
         setDefaultValueIfNullOrEmpty(
+            R.string.depthQueryField_name,
+            context.getString(R.string.depthQueryField_defeatValue)
+        )
+        setDefaultValueIfNullOrEmpty(
             R.string.deltaX_name,
             context.resources.getInteger(R.integer.deltaX_value).toString()
         )

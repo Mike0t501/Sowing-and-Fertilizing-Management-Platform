@@ -31,6 +31,7 @@ import com.nx.vfremake.ui.DepthCalibrationScreen
 import com.nx.vfremake.ui.MainScreen
 import com.nx.vfremake.ui.ParamSettingsScreen
 import com.nx.vfremake.ui.SettingsScreen
+import com.nx.vfremake.ui.SimGnssScreen
 import com.nx.vfremake.ui.SowingDepthScreen
 import androidx.navigation.NavType
 import androidx.navigation.navArgument
@@ -41,6 +42,7 @@ enum class VariableFertScreen(@StringRes val title: Int) {
     ParamSet(title = R.string.param_settings),
     Settings(title = R.string.settings),
     DantiSettings(title = R.string.settings),
+    SimGnss(title = R.string.settings),             // 模拟GNSS定位配置界面
     SowingDepth(title = R.string.settings),         // 播种深度主控制界面
     DepthCalibration(title = R.string.settings)     // 单路电机深度校准向导（携带 motorIndex 参数）
 }
@@ -88,6 +90,7 @@ fun VariableFert(
             SettingsScreen(
                 onClickBack          = { navController.popBackStack() },
                 onClickDantiSettigns = { navController.navigate(VariableFertScreen.DantiSettings.name) },
+                onClickSimGnss = { navController.navigate(VariableFertScreen.SimGnss.name) },
                 onReinitSerialPort = {
                     if (isSystemRunning) {
                         Toast.makeText(context, "系统运行中，请先停止后再应用", Toast.LENGTH_SHORT).show()
@@ -101,6 +104,12 @@ fun VariableFert(
         }
         composable(route = VariableFertScreen.DantiSettings.name) {
             DantiFertSettings(
+                onClickBack = { navController.popBackStack() }
+            )
+        }
+        // ── 模拟GNSS定位配置界面 ────────────────────────────────────────────
+        composable(route = VariableFertScreen.SimGnss.name) {
+            SimGnssScreen(
                 onClickBack = { navController.popBackStack() }
             )
         }

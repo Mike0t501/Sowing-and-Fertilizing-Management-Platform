@@ -90,7 +90,10 @@ fun SowingDepthScreen(
 
     // ── 独立串口与协程生命周期 ───────────────────────────────────────────────────
     // 进入页面时自动开启 CAN 串口 + 接收/控制协程；离开时自动关闭。
-    // 若施肥系统正在运行（isSystemRunning=true），跳过开启（同一物理串口不可共用）。
+    // 若施肥系统正在运行（isSystemRunning=true），跳过开启：此时 SowingDepthCoroutine
+    // 由 MainActivity 独占持有（处方图控深模式），本页再启一份会造成双实例同时写
+    // 同一 CAN 串口、重复 DS402 初始化与冲突的绝对位移帧。CAN 串口本身可共享
+    // （slaveCanMsgSend 已 synchronized），跳过的真实原因是避免重复协程实例。
     DisposableEffect(Unit) {
         if (!isSystemRunning) {
             val sp       = MySharedPreFun(context).getMySharedPre()

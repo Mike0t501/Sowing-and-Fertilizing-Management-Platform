@@ -525,13 +525,14 @@ private suspend fun runDiagnosticTest(
 }
 
 @Composable
-fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Unit = {}, onReinitSerialPort: () -> Unit = {}) {
+fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Unit = {}, onClickSimGnss: () -> Unit = {}, onReinitSerialPort: () -> Unit = {}) {
     val context = LocalContext.current
     val sharedPre = MySharedPreFun(context).getMySharedPre()
 
     val writeSaveDataSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.writeSaveData_Switch_name) == "1") }
     val navMarkCompensatedSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.navMarkCompensated_Switch_name) == "1") }
     val testModeSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1") }
+    val simGnssSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.simGnss_Switch_name) == "1") }
     val errorSoundSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.errorSound_Switch_name) == "1") }
     val testModeDurationTime = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.testMode_testModeDurationTime_name) ?: context.getString(R.string.testMode_testModeDurationTime_defeatValue)) }
     val forwardSpeedAverageNum = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.forwardSpeedAverageNum_name) ?: context.getString(R.string.forwardSpeedAverageNum_defeatValue)) }
@@ -720,6 +721,19 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                                 }
                             )
                         }
+                    }
+
+                    Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
+
+                    AnimatedSettingRow(title = "模拟GNSS定位", subtitle = "无 GNSS 时按设定航线模拟定位测试电机，点击进入配置", onClick = onClickSimGnss) {
+                        Switch(
+                            checked = simGnssSwitchIsOnState.value,
+                            onCheckedChange = { newValue ->
+                                simGnssSwitchIsOnState.value = newValue
+                                sharedPre.edit().putString(context.getString(R.string.simGnss_Switch_name), if (newValue) "1" else "0").apply()
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF4CAF50))
+                        )
                     }
 
                     Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
