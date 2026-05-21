@@ -109,6 +109,10 @@ class VariableFertViewModel : ViewModel() {
     val fertGraphicsOverlayExport = MutableLiveData<GraphicsOverlay>() // 已施肥区域图层
     val mapViewRotation = MutableLiveData(0.0) // 已施肥区域图层
 
+    // 模拟GNSS地图取点模式（不持久化，默认 0）：
+    // 0=关 1=点选起点 2=点选终点 3=完成。由 SimGnss 配置页置 1 进入，主地图浮层读取并推进。
+    val simGnssPickMode = MutableLiveData(0)
+
     // 颜色分级与范围
     var colorList = MutableLiveData<List<Int>>() // 颜色分级提示用
     val classBreaksList = MutableLiveData<List<String>>()

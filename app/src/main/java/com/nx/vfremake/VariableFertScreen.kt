@@ -77,7 +77,9 @@ fun VariableFert(
                 mVariableFertViewModel = mVariableFertViewModel,
                 onClickSettigns     = { navController.navigate(VariableFertScreen.Settings.name) },
                 onClickParamSet     = { navController.navigate(VariableFertScreen.ParamSet.name) },
-                onClickSowingDepth  = { navController.navigate(VariableFertScreen.SowingDepth.name) }
+                onClickSowingDepth  = { navController.navigate(VariableFertScreen.SowingDepth.name) },
+                // 地图取点完成后回到模拟GNSS配置页（重建实例以重新读取刚点选的经纬度）
+                onSimGnssReturnToConfig = { navController.navigate(VariableFertScreen.SimGnss.name) }
             )
             content()
         }
@@ -110,7 +112,12 @@ fun VariableFert(
         // ── 模拟GNSS定位配置界面 ────────────────────────────────────────────
         composable(route = VariableFertScreen.SimGnss.name) {
             SimGnssScreen(
-                onClickBack = { navController.popBackStack() }
+                onClickBack = { navController.popBackStack() },
+                // 进入地图取点：置“点选起点”模式，回到已存在的主地图实例
+                onPickOnMap = {
+                    mVariableFertViewModel.simGnssPickMode.value = 1
+                    navController.popBackStack(VariableFertScreen.Main.name, false)
+                }
             )
         }
         // ── 播种深度主控制界面 ──────────────────────────────────────────────

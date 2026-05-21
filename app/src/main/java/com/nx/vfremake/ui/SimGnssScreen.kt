@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.Button
+import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.Card
 import androidx.compose.material.Divider
 import androidx.compose.material.Scaffold
@@ -64,7 +66,7 @@ private fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Doub
 }
 
 @Composable
-fun SimGnssScreen(onClickBack: () -> Unit = {}) {
+fun SimGnssScreen(onClickBack: () -> Unit = {}, onPickOnMap: () -> Unit = {}) {
     val context = LocalContext.current
     val sharedPre = MySharedPreFun(context).getMySharedPre()
 
@@ -142,6 +144,22 @@ fun SimGnssScreen(onClickBack: () -> Unit = {}) {
                     }
                 }
             }
+
+            // 在地图上取点：跳到主地图处方图，依次点选起点、终点，自动回填上方经纬度
+            Button(
+                onClick = onPickOnMap,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF4CAF50))
+            ) {
+                Text("🖐 在地图上取点", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
+            Text(
+                text = "点击后跳到主地图，在处方图上依次点选起点、终点，自动回填经纬度。",
+                fontSize = 12.sp,
+                color = Color.Gray,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            )
 
             // 卡片二：运动参数
             Card(shape = RoundedCornerShape(16.dp), elevation = 4.dp, modifier = Modifier.fillMaxWidth()) {

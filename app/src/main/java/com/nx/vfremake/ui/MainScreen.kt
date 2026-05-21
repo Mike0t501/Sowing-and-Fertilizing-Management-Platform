@@ -17,6 +17,8 @@
 package com.nx.vfremake.ui
 
 import android.util.Log
+import android.view.MotionEvent
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -78,11 +80,19 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import com.esri.arcgisruntime.geometry.Envelope
+import com.esri.arcgisruntime.geometry.GeometryEngine
 import com.esri.arcgisruntime.geometry.Point
+import com.esri.arcgisruntime.geometry.PolylineBuilder
 import com.esri.arcgisruntime.geometry.SpatialReferences
 import com.esri.arcgisruntime.mapping.Viewpoint
+import com.esri.arcgisruntime.mapping.view.DefaultMapViewOnTouchListener
+import com.esri.arcgisruntime.mapping.view.Graphic
+import com.esri.arcgisruntime.mapping.view.GraphicsOverlay
 import com.esri.arcgisruntime.mapping.view.MapView
 import com.esri.arcgisruntime.symbology.PictureMarkerSymbol
+import com.esri.arcgisruntime.symbology.SimpleLineSymbol
+import com.esri.arcgisruntime.symbology.SimpleMarkerSymbol
+import com.esri.arcgisruntime.symbology.TextSymbol
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.fittingCoefficientA
@@ -101,7 +111,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.PaddingValues
@@ -129,13 +141,176 @@ fun MainScreen(
     mVariableFertViewModel: VariableFertViewModel,
     onClickSettigns: () -> Unit = {},
     onClickParamSet: () -> Unit = {},
-    onClickSowingDepth: () -> Unit = {}
+    onClickSowingDepth: () -> Unit = {},
+    onSimGnssReturnToConfig: () -> Unit = {}
 ) {
     Box(modifier = Modifier.background(Color(LocalContext.current.getColor(R.color.background_color_night)))) {
         MapAndFunBontonVeiw(mapView, mVariableFertViewModel)
         MsgScreenRight(mVariableFertViewModel)
         MsgScreenBottom(mVariableFertViewModel)
         MenuBottomBar(mapView, mVariableFertViewModel, onClickSettigns, onClickParamSet, onClickSowingDepth)
+        // 模拟GNSS地图取点浮层：z 序最上，仅取点模式下显示
+        SimGnssPickOverlay(mapView, mVariableFertViewModel, onSimGnssReturnToConfig)
+    }
+}
+
+/**
+ * 模拟GNSS地图取点浮层
+ * @param  mapView:主地图（处方图已加载其上）
+ * @param  mVariableFertViewModel:读取/推进取点模式
+ * @param  onReturnToConfig:取点结束回到模拟GNSS配置页
+ * @note   仅 simGnssPickMode != 0 时安装单击监听并显示提示浮层；点中即写 SharedPreferences。
+ *         经纬度复用 simGnss_startLat/Lon、simGnss_endLat/Lon 键，与配置页一致。
+ */
+@Composable
+fun SimGnssPickOverlay(
+    mapView: MapView,
+    mVariableFertViewModel: VariableFertViewModel,
+    onReturnToConfig: () -> Unit
+) {
+    val context = LocalContext.current
+    val pickMode by mVariableFertViewModel.simGnssPickMode.observeAsState(0)
+    val sharedPre = MySharedPreFun(context).getMySharedPre()
+    // 起/终标记与连线专用图层（独立于业务图层，取消时单独清除）
+    val pickOverlay = remember { GraphicsOverlay() }
+
+    // 经纬度即点即存（6 位小数，约 0.1m 精度，与默认值格式一致）
+    fun writeCoord(latKey: Int, lonKey: Int, lat: Double, lon: Double) {
+        sharedPre.edit()
+            .putString(context.getString(latKey), String.format(Locale.US, "%.6f", lat))
+            .putString(context.getString(lonKey), String.format(Locale.US, "%.6f", lon))
+            .apply()
+    }
+    // 画终点连线时从 SharedPreferences 取回起点，避免跨监听器闭包传值
+    fun readStartPoint(): Point? {
+        val la = sharedPre.getString(context.getString(R.string.simGnss_startLat_name), null)?.toDoubleOrNull()
+        val lo = sharedPre.getString(context.getString(R.string.simGnss_startLon_name), null)?.toDoubleOrNull()
+        return if (la != null && lo != null) Point(lo, la, SpatialReferences.getWgs84()) else null
+    }
+    fun drawMarker(p: Point, isStart: Boolean) {
+        val fillColor = if (isStart) 0xFF4CAF50.toInt() else 0xFFF44336.toInt()
+        val textColor = if (isStart) 0xFF1B5E20.toInt() else 0xFFB71C1C.toInt()
+        pickOverlay.graphics.add(Graphic(p, SimpleMarkerSymbol(SimpleMarkerSymbol.Style.CIRCLE, fillColor, 16f)))
+        val label = TextSymbol(
+            14f, if (isStart) "起" else "终", textColor,
+            TextSymbol.HorizontalAlignment.CENTER, TextSymbol.VerticalAlignment.BOTTOM
+        ).apply { offsetY = 12f }
+        pickOverlay.graphics.add(Graphic(p, label))
+        mapView.post { mapView.invalidate() }
+    }
+    fun drawLine(start: Point?, end: Point) {
+        if (start == null) return
+        val line = PolylineBuilder(SpatialReferences.getWgs84()).apply {
+            addPoint(start); addPoint(end)
+        }.toGeometry()
+        pickOverlay.graphics.add(
+            Graphic(line, SimpleLineSymbol(SimpleLineSymbol.Style.DASH, 0xFF1565C0.toInt(), 2f))
+        )
+        mapView.post { mapView.invalidate() }
+    }
+
+    // 安装/卸载单击监听 + 进入时清旧标记、关跟随
+    LaunchedEffect(pickMode) {
+        if (pickMode != 0) {
+            if (!mapView.graphicsOverlays.contains(pickOverlay)) mapView.graphicsOverlays.add(pickOverlay)
+            mVariableFertViewModel.navCenterIsRunning.value = false  // 取点期间停跟随，地图不乱动
+            if (pickMode == 1) {
+                pickOverlay.graphics.clear()
+                mapView.post { mapView.invalidate() }
+            }
+            mapView.setOnTouchListener(object : DefaultMapViewOnTouchListener(context, mapView) {
+                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                    val mapPt = mapView.screenToLocation(android.graphics.Point(e.x.roundToInt(), e.y.roundToInt()))
+                    val wgs = mapPt?.let { GeometryEngine.project(it, SpatialReferences.getWgs84()) as? Point }
+                    if (wgs == null) {
+                        Toast.makeText(context, "请先加载处方图", Toast.LENGTH_SHORT).show()
+                        return true
+                    }
+                    val lat = wgs.y
+                    val lon = wgs.x
+                    when (mVariableFertViewModel.simGnssPickMode.value) {
+                        1 -> {
+                            writeCoord(R.string.simGnss_startLat_name, R.string.simGnss_startLon_name, lat, lon)
+                            drawMarker(wgs, isStart = true)
+                            mVariableFertViewModel.simGnssPickMode.value = 2
+                        }
+                        2 -> {
+                            writeCoord(R.string.simGnss_endLat_name, R.string.simGnss_endLon_name, lat, lon)
+                            drawMarker(wgs, isStart = false)
+                            drawLine(readStartPoint(), wgs)
+                            mVariableFertViewModel.simGnssPickMode.value = 3
+                        }
+                    }
+                    return true
+                }
+            })
+        } else {
+            // 退出取点：还原默认触摸 + 兜底清除残留标记/连线
+            mapView.setOnTouchListener(DefaultMapViewOnTouchListener(context, mapView))
+            if (pickOverlay.graphics.isNotEmpty()) {
+                pickOverlay.graphics.clear()
+                mapView.post { mapView.invalidate() }
+            }
+        }
+    }
+
+    // 顶部提示浮层
+    if (pickMode != 0) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Surface(shape = RoundedCornerShape(12.dp), color = Color(0xCC000000), elevation = 8.dp) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = when (pickMode) {
+                            1 -> "请点击地图选择【起点】"
+                            2 -> "请点击地图选择【终点】"
+                            else -> "✓ 取点完成"
+                        },
+                        color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (pickMode == 3) {
+                            Button(
+                                onClick = {
+                                    // 同步清除标记/连线：pickOverlay 挂在长生命周期 mapView 上，
+                                    // 不能只靠 LaunchedEffect（导航离开后本 composable 可能已销毁不再执行）
+                                    pickOverlay.graphics.clear()
+                                    mapView.post { mapView.invalidate() }
+                                    mVariableFertViewModel.simGnssPickMode.value = 0
+                                    onReturnToConfig()
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF4CAF50))
+                            ) { Text("返回配置", color = Color.White) }
+                            Button(
+                                onClick = { mVariableFertViewModel.simGnssPickMode.value = 1 },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1976D2))
+                            ) { Text("重新取点", color = Color.White) }
+                        } else {
+                            Button(
+                                onClick = {
+                                    pickOverlay.graphics.clear()
+                                    mapView.post { mapView.invalidate() }
+                                    mVariableFertViewModel.simGnssPickMode.value = 0
+                                    onReturnToConfig()
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF757575))
+                            ) { Text("取消", color = Color.White) }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -226,10 +401,11 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
             title = "清除已施肥区域图层",
             text = "你确实要清除已施肥区域的绘制图层吗？",
             onConfirm = {
-//                if (mapView.graphicsOverlays.contains(fertGraphicsOverlay) && fertGraphicsOverlay != null) {
-//                    fertGraphicsOverlay?.graphics?.clear()
-////                    mapView.post { mapView.invalidate() }
-//                }
+                // 运行时 drawPoly→fertGraphicsOverlay、drawPolyExport→fertGraphicsOverlayExport
+                // 两个图层都画，必须都清，否则黄色施肥轨迹残留
+                if (mapView.graphicsOverlays.contains(fertGraphicsOverlay) && fertGraphicsOverlay != null) {
+                    fertGraphicsOverlay?.graphics?.clear()
+                }
                 if (mapView.graphicsOverlays.contains(fertGraphicsOverlayExport) && fertGraphicsOverlayExport != null) {
                     fertGraphicsOverlayExport?.graphics?.clear()
                 }
