@@ -63,3 +63,7 @@ local.properties
 
 # macOS
 .DS_Store
+
+# Local reference artifacts and screenshots (already-tracked docs remain tracked)
+docs/
+screenshots/
