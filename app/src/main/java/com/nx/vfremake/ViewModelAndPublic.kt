@@ -187,6 +187,9 @@ class VariableFertViewModel : ViewModel() {
     // 最近一次从处方图读到的各电机深度(mm)，仅供 UI 显示，-1 表示无效/未读
     val mapDepthApplied = MutableLiveData<FloatArray>()
 
+    // 控深「未下发原因」一次性提示；主界面 observe 后弹窗，消费后置 null。
+    val depthControlNotice = MutableLiveData<String?>(null)
+
     /** 切换处方图控深模式（数据源开关，与 [updateMasterEnabled] 的使能门控相互独立）。 */
     fun setDepthPrescriptionMode(enabled: Boolean) {
         depthPrescriptionMode.postValue(enabled)

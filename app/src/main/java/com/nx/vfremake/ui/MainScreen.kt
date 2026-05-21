@@ -682,6 +682,27 @@ fun MenuBottomBar(
     }
     //... 如果添加了新shp却没有选择字段则警告结束
 
+    //... 处方图控深「未下发原因」一次性提示弹窗
+    val depthNotice by mVariableFertViewModel.depthControlNotice.observeAsState()
+    val depthNoticeText = remember { mutableStateOf("") }
+    val showDepthNotice = remember { mutableStateOf(false) }
+    LaunchedEffect(depthNotice) {
+        depthNotice?.let {
+            depthNoticeText.value = it
+            showDepthNotice.value = true
+            mVariableFertViewModel.depthControlNotice.postValue(null)  // 消费一次，避免重复弹
+        }
+    }
+    if (showDepthNotice.value) {
+        ShowConfirmDialog(
+            title = "处方图控深提示",
+            text = depthNoticeText.value,
+            showDialog = showDepthNotice,
+            showDismiss = false
+        )
+    }
+    //... 处方图控深提示结束
+
     // 菜单展开栏
     Box(
         modifier = Modifier
@@ -979,13 +1000,14 @@ fun MenuBottomBar(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "处方图控深模式",
+                                text = if (depthPrescriptionMode) "处方图工作模式：播深" else "处方图工作模式：施肥",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = Color(0xFF333333)
                             )
                             Text(
-                                text = "开启后播种深度由处方图驱动；按\"开始\"自动使能深度电机，\"停止\"自动断使能",
+                                text = "关=施肥 / 开=播深，二者互斥：同一时刻只控制一类电机并显示对应字段的处方图。" +
+                                    "播深模式下按\"开始\"自动使能深度电机、\"停止\"自动断使能。",
                                 fontSize = 12.sp,
                                 color = Color.Gray
                             )
@@ -1006,9 +1028,12 @@ fun MenuBottomBar(
                     ) {
                         TextButton(
                             onClick = {
-                                val fertFieldResValue = sharedPre.getString(fertValueFieldResKey, null)
+                                // 按工作模式校验对应字段：播深查深度字段，施肥查施肥字段
+                                val activeFieldResKey =
+                                    if (depthPrescriptionMode) depthValueFieldResKey else fertValueFieldResKey
+                                val activeFieldResValue = sharedPre.getString(activeFieldResKey, null)
                                 val fieldListValue = fieldList
-                                if (fieldListValue?.contains(fertFieldResValue) != true) {
+                                if (fieldListValue?.contains(activeFieldResValue) != true) {
                                     showNoFieldDialogAlert.value = true
                                     return@TextButton
                                 }
@@ -1029,13 +1054,26 @@ fun MenuBottomBar(
                                     return@Button
                                 }
 
-                                // 检查是否选择了字段
-                                val fertFieldResValue = sharedPre.getString(fertValueFieldResKey, null) ?: ""
+                                // 检查是否选择了当前工作模式所需字段
                                 val fieldListValue = fieldList
-                                if (fieldListValue?.contains(fertFieldResValue) != true) {
-                                    // 没选字段，弹出警告
-                                    showNoFieldDialogAlert.value = true
-                                    return@Button
+                                if (depthPrescriptionMode) {
+                                    // 播深模式：必须选播种深度字段
+                                    val depthFieldResValue = sharedPre.getString(depthValueFieldResKey, null) ?: ""
+                                    if (fieldListValue?.contains(depthFieldResValue) != true) {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "播深模式：请先在步骤 3 选择播种深度字段！",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        return@Button
+                                    }
+                                } else {
+                                    // 施肥模式：必须选施肥字段
+                                    val fertFieldResValue = sharedPre.getString(fertValueFieldResKey, null) ?: ""
+                                    if (fieldListValue?.contains(fertFieldResValue) != true) {
+                                        showNoFieldDialogAlert.value = true
+                                        return@Button
+                                    }
                                 }
 
                                 // 移除旧业务图层和覆盖层

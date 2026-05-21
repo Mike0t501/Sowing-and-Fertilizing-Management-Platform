@@ -69,6 +69,7 @@ import com.nx.vfremake.coroutine.CanReceiveCoroutine
 import com.nx.vfremake.coroutine.DB9reCANseCoroutine
 import com.nx.vfremake.coroutine.MyWriteSaveFun
 import com.nx.vfremake.coroutine.SowingDepthCoroutine
+import com.nx.vfremake.data.depthControlReadinessWarning
 import com.nx.vfremake.coroutine.TestModeCoroutine
 import com.nx.vfremake.funClass.ConvAndCtrlFun
 import com.nx.vfremake.funClass.DocuAndManageFun
@@ -325,6 +326,21 @@ class MainActivity : AppCompatActivity() {
                                     if (!mSowingDepthCoroutine.isRunning) {
                                         mSowingDepthCoroutine = SowingDepthCoroutine()
                                         mSowingDepthCoroutine.start(mVariableFertViewModel, context)
+                                    }
+
+                                    // 5c. 控深就绪诊断：留出上线检测窗口后评估一次，
+                                    // 若仍无电机可下发位置命令则在主界面弹一次提示。
+                                    coroutineScope.launch {
+                                        delay(3000)   // 等心跳/TPDO + 2s 离线看门狗判定
+                                        if (isSystemRunning &&
+                                            mVariableFertViewModel.depthPrescriptionMode.value == true
+                                        ) {
+                                            val warn = mVariableFertViewModel.sowingDepthState.value
+                                                ?.depthControlReadinessWarning()
+                                            if (warn != null) {
+                                                mVariableFertViewModel.depthControlNotice.postValue(warn)
+                                            }
+                                        }
                                     }
                                 }
 

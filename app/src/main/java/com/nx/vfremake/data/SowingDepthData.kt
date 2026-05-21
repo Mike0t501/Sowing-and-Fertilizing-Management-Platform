@@ -87,3 +87,26 @@ private val DEFAULT_INDIRECT_POINTS: List<IndirectCalibPoint> =
  */
 val ServoCalibration.deepDirection: Int
     get() = limitMax.compareTo(limitMin)
+
+/**
+ * 控深就绪诊断：返回阻止处方图深度命令下发的首要原因（人类可读），全部就绪返回 null。
+ *
+ * 仅读状态、无副作用，供主界面在按「开始」后做一次性提示。
+ * 优先级与 [com.nx.vfremake.coroutine.SowingDepthCoroutine] 的门控顺序一致：
+ *   无任何在线（Phase1/2/4 全跳过）> 在线但限位未标定（Phase4 b）> 在线但拟合无效（Phase4 c）。
+ */
+fun SowingDepthState.depthControlReadinessWarning(): String? {
+    val online = motors.filter { it.isOnline }
+    if (online.isEmpty()) {
+        return "处方图控深已开启，但未检测到任何深度伺服在线（CAN 节点 11–18 无心跳/TPDO）。\n" +
+            "已发送 NMT 广播，但因无电机在线，未下发任何位置命令。\n" +
+            "请检查：①伺服供电与 CAN 接线 ②CAN 波特率是否匹配 ③节点 ID 是否为 11–18。"
+    }
+    val notCalibrated = online.filter { !it.limitsSet || !it.fitValid }
+    if (notCalibrated.isNotEmpty()) {
+        val list = notCalibrated.joinToString("、") { "${it.motorIndex + 1}号" }
+        return "深度电机 $list 在线但未完成标定（限位/拟合），处方图深度命令已被忽略。\n" +
+            "请先在「播种深度标定」页完成限位标定与深度拟合后再开始。"
+    }
+    return null
+}
