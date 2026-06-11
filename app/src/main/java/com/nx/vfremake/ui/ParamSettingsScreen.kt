@@ -181,6 +181,16 @@ fun InteractiveTractorDiagram() {
         mutableStateListOf(*list.toTypedArray())
     }
 
+    // 读取当前机型行数（4/6/8），决定渲染多少个单体方块
+    val rowNumberState = rememberSaveable {
+        mutableStateOf(
+            (sharedPre.getString(
+                context.getString(R.string.rowNumber_name),
+                context.getString(R.string.rowNumber_defeatValue)
+            ) ?: "4").toIntOrNull()?.coerceIn(1, 8) ?: 4
+        )
+    }
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         // 【修改1】将内部的垂直排列方式设为从底部对齐
@@ -199,7 +209,52 @@ fun InteractiveTractorDiagram() {
             alignment = Alignment.BottomCenter
         )
 
-        // 2. 8 个交互矩形方块
+        // 1.5 机型行数选择（4/6/8）：决定单体数量与单体定位，改后需点“应用”生效
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp, start = 16.dp, end = 16.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "机型：",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(end = 8.dp)
+            )
+            listOf(4, 6, 8).forEach { preset ->
+                val selected = rowNumberState.value == preset
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (selected) Color(0xFF1976D2) else Color(0xFFE0E0E0))
+                        .clickable {
+                            rowNumberState.value = preset
+                            sharedPre.edit()
+                                .putString(context.getString(R.string.rowNumber_name), preset.toString())
+                                .apply()
+                        }
+                        .border(
+                            width = 2.dp,
+                            color = if (selected) Color(0xFF0D47A1) else Color(0xFFBDBDBD),
+                            shape = RoundedCornerShape(6.dp)
+                        )
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "${preset}行",
+                        color = if (selected) Color.White else Color(0xFF424242),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        // 2. 按机型行数渲染交互矩形方块
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -207,7 +262,7 @@ fun InteractiveTractorDiagram() {
                 .padding(top = 8.dp, bottom = 12.dp, start = 16.dp, end = 16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            for (i in 0 until 8) {
+            for (i in 0 until rowNumberState.value) {
                 val isActive = activeMotorsState[i]
                 Box(
                     modifier = Modifier

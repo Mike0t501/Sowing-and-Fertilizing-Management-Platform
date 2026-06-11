@@ -534,8 +534,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initFittingCoefficient() {
-        fittingCoefficientA = Array(mSPParamData.rowNumber) { 0.0 }
-        fittingCoefficientB = Array(mSPParamData.rowNumber) { 0.0 }
+        // 固定按最大行数 8 分配，避免运行中机型行数增大时（应用/开始仅重载参数、不重建本数组）下标越界
+        fittingCoefficientA = Array(8) { 0.0 }
+        fittingCoefficientB = Array(8) { 0.0 }
 
         val tableRows = MydantiFertSharedPre(this).getTableRows()
         tableRows.forEach { row ->

@@ -38,12 +38,11 @@ import kotlin.system.measureTimeMillis
  */
 class DB9reCANseCoroutine {
     // 因为我在Mainactivity顶层类里初始化DB9reCANseCoroutine()，可以这么写
-    private val polyPoint = arrayOfNulls<Point>(4) // 绘制已施肥区域用Point
-    private val polyPointExport = Array(mSPParamData.rowNumber) { arrayOfNulls<Point>(4) }
+    // 固定按最大行数 8 分配，避免运行中机型行数增大时下标越界（rowNumber 上限为 8）
+    private val polyPointExport = Array(8) { arrayOfNulls<Point>(4) }
 
     // 绘制图形需要持续调用函数，这个得放函数外面，才可以持续 add(Graphic)
     private val navMarkGraphicsOverlay = GraphicsOverlay() // 该图层只用于navMark，因为每次更新需要清除图层，便于管理
-    private val fertGraphicsOverlay = GraphicsOverlay() // 该图层只用于绘制施肥区域，每次更新是在上次基础添加，不清除
     private val fertGraphicsOverlayExport = GraphicsOverlay() // 该图层只用于绘制施肥区域，每次更新是在上次基础添加，不清除
 
     // 定义一个协程作用域，保存作业引用的HashSet，以便于管理
@@ -294,18 +293,11 @@ class DB9reCANseCoroutine {
 //        mVariableFertViewModel.confertflow.postValue(confertflow)
         //...
 
-        // 绘制已施肥区域
-        // 如果改成每次都调用，会清空
-        MyArcGisFun().drawPoly(
-            polyPoint = polyPoint,
-            point = arrayOf(pointi[1][0], pointi[1].last()),
-            fertGraphicsOverlay = fertGraphicsOverlay,
-            mVariableFertViewModel = mVariableFertViewModel,
-            context = context
-        )
-
+        // 绘制已施肥区域：只画开启的单体、按真实位置；关闭的单体留空
+        // （不再绘制整幅绿色带，避免只开部分单体时仍铺满整机宽度）
         val fertApplied = mVariableFertViewModel.fertApplied.value
         for (i in 0 until mSPParamData.rowNumber) {
+            if (!(mSPParamData.activeMotors.getOrNull(i) ?: true)) continue // 关闭的单体不绘制
             Log.d(
                 "DB9reCANseCoroutine",
                 "$i: " + fertApplied?.get(i).toString()

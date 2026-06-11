@@ -90,10 +90,12 @@ class MySharedPreFun(private val context: Context) {
     fun initSettingsParam() {
         val sharedPre = MySharedPreFun(context).getMySharedPre()
 
-        // ================= 【核心修改：强制默认8行，洗掉旧缓存】 =================
-        mSPParamData.rowNumber = 8
-        sharedPre.edit().putString(context.getString(R.string.rowNumber_name), "8").apply()
-        // ====================================================================
+        // 读取机型行数（4/6/8），限定 1~8，默认走 rowNumber_defeatValue
+        mSPParamData.rowNumber =
+            (sharedPre.getString(
+                context.getString(R.string.rowNumber_name),
+                context.getString(R.string.rowNumber_defeatValue)
+            ) ?: "4").toIntOrNull()?.coerceIn(1, 8) ?: 4
 
         // 用户设置界面的单位是cm，用于后续代码计算的单位统一转换为 m
         mSPParamData.rowSize =
