@@ -7,6 +7,7 @@ import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.funClass.CanOpenFun
+import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.funClass.MySharedPreFun
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -104,6 +105,11 @@ class SowingDepthCoroutine {
             var lastMasterEnabled   = false
 
             while (isActive) {
+                // 跨页 DisposableEffect 竞态可能把 CAN 串口关掉（mSerialPortCAN=null）；
+                // 每轮幂等重开，配合 CanReceiveCoroutine 的自愈接收循环，端口恢复后立即继续收发。
+                // 作业模式下端口由 MySerialPortFun 持有不为 null，此调用为 no-op。
+                context?.let { MySerialPortFun.ensureCanPortOpen(it) }
+
                 val state  = viewModel.sowingDepthState.value ?: SowingDepthState()
                 val motors = state.motors
 
@@ -113,10 +119,11 @@ class SowingDepthCoroutine {
                 // 对不同节点可以连续发送，无需帧间等待；
                 // 回复由 CanReceiveCoroutine 处理并更新 ViewModel。
                 // ════════════════════════════════════════════════════════════
+                // 探测所有配置节点（不再用 isOnline 门控）：请求-应答存活模型下，任何 SDO 回包
+                // 都会被 CanReceiveCoroutine 标记在线，使被误判离线的电机一旦重新应答即自动恢复，
+                // 打破「离线后停止轮询 → 再无回包 → 无法自愈」的锁死。
                 for (i in 0 until 8) {
-                    val cal = motors[i]
-                    if (!cal.isOnline) continue
-                    CanOpenFun.sendFrame(CanOpenFun.buildReadPositionFrame(cal.nodeId))
+                    CanOpenFun.sendFrame(CanOpenFun.buildReadPositionFrame(motors[i].nodeId))
                 }
 
                 // 等待 SDO 回复到达并由 CanReceiveCoroutine 写入 ViewModel

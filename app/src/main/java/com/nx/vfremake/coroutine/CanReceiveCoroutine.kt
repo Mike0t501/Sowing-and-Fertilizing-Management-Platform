@@ -13,6 +13,7 @@ import com.nx.vfremake.mRmcData
 import com.nx.vfremake.canMonitorData
 import com.nx.vfremake.mSPParamData
 import com.nx.vfremake.mSerialPortCAN
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +22,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.InputStream
 import java.io.IOException
 import kotlin.random.Random
 
@@ -77,81 +79,112 @@ class CanReceiveCoroutine {
         // CANopen TPDO1 ：len=9  → frameSize=12，data=6B
         // CANopen 心跳  ：len=4  → frameSize=7，data=1B
         jobs.add(scope.launch {
-            val inputStreamCAN = mSerialPortCAN?.inputStream
             var buffer = mutableListOf<Byte>()
+            val tempBuffer = ByteArray(64)
+            // 上一轮使用的输入流引用：端口被重开后（新 SerialPort → 新 fd → 新流）会变化，
+            // 据此切换到新流并丢弃跨流残字节，实现端口关闭/重开后的自愈接收。
+            var lastStream: InputStream? = null
 
-            try {
-                val tempBuffer = ByteArray(64)
-                var dataSize: Int
+            while (isActive) {
+                // ── 每轮重新获取串口流（不再一次性缓存）：端口被关后读到的流失效，
+                //    重开后这里能立即拿到新流恢复接收 ──────────────────────────
+                val stream = mSerialPortCAN?.inputStream
+                if (stream == null) {
+                    delay(20)
+                    continue
+                }
+                // 流身份变化（端口重开）→ 清空缓冲，避免旧流残字节与新流数据拼接造成帧错位
+                if (stream !== lastStream) {
+                    buffer.clear()
+                    lastStream = stream
+                }
 
-                while (isActive) {
-                    if (inputStreamCAN == null ||
-                        withContext(Dispatchers.IO) { inputStreamCAN.available() } == 0
-                    ) {
+                try {
+                    if (withContext(Dispatchers.IO) { stream.available() } == 0) {
                         delay(10)
                         continue
                     }
 
-                    try {
-                        dataSize = withContext(Dispatchers.IO) { inputStreamCAN.read(tempBuffer) }
-                        buffer.addAll(tempBuffer.copyOfRange(0, dataSize).toTypedArray())
+                    val dataSize = withContext(Dispatchers.IO) { stream.read(tempBuffer) }
+                    // read() 返回 -1(EOF) 或 0：绝不能 copyOfRange(0,-1)（会抛 IllegalArgumentException
+                    // 杀死接收协程），跳过本轮，下一轮重新获取流。
+                    if (dataSize <= 0) {
+                        delay(10)
+                        continue
+                    }
+                    buffer.addAll(tempBuffer.copyOfRange(0, dataSize).toTypedArray())
 
-                        // ── 变长帧解析循环 ──────────────────────────────
-                        while (buffer.size >= 3) {
-                            // 1. 同步：跳过非起始字节
-                            if (buffer[0] != 0x27.toByte()) {
-                                buffer.removeAt(0)
-                                continue
-                            }
-                            // 2. 读取载荷长度（len = frameInfo_1B + canId_2B + data_NB）
-                            val len = buffer[1].toInt() and 0xFF
-                            val frameSize = len + 3   // start(1) + len_byte(1) + payload(len) + end(1)
-                            // 3. 等待完整帧
-                            if (buffer.size < frameSize) break
-                            // 4. 验证结束字节
-                            if (buffer[frameSize - 1] != 0x39.toByte()) {
-                                buffer.removeAt(0)
-                                continue
-                            }
-                            // 5. 提取完整帧，丢弃已消费字节
-                            val frame = buffer.take(frameSize).toByteArray()
-                            buffer = buffer.drop(frameSize).toMutableList()
+                    // ── 变长帧解析循环 ──────────────────────────────
+                    while (buffer.size >= 3) {
+                        // 1. 同步：跳过非起始字节
+                        if (buffer[0] != 0x27.toByte()) {
+                            buffer.removeAt(0)
+                            continue
+                        }
+                        // 2. 读取载荷长度（len = frameInfo_1B + canId_2B + data_NB）
+                        val len = buffer[1].toInt() and 0xFF
+                        val frameSize = len + 3   // start(1) + len_byte(1) + payload(len) + end(1)
+                        // 3. 等待完整帧
+                        if (buffer.size < frameSize) break
+                        // 4. 验证结束字节
+                        if (buffer[frameSize - 1] != 0x39.toByte()) {
+                            buffer.removeAt(0)
+                            continue
+                        }
+                        // 5. 提取完整帧，丢弃已消费字节
+                        val frame = buffer.take(frameSize).toByteArray()
+                        buffer = buffer.drop(frameSize).toMutableList()
 
-                            // 6. 最少需要 frameInfo(1) + canId(2) = 3 字节载荷
-                            // 接收帧格式（与发送帧相同）：
-                            //   [0x27][len][0x00(frameInfo)][canId_hi][canId_lo][data...][0x39]
-                            if (len >= 3) {
+                        // 6. 最少需要 frameInfo(1) + canId(2) = 3 字节载荷
+                        // 接收帧格式（与发送帧相同）：
+                        //   [0x27][len][0x00(frameInfo)][canId_hi][canId_lo][data...][0x39]
+                        if (len >= 3) {
+                            // 单帧解析异常隔离：解析出错不应杀死整个接收循环；
+                            // 协程取消（CancellationException）必须原样抛出，否则会吞掉取消。
+                            try {
                                 dispatchFrame(
                                     frame, len,
                                     confertflow, monfertAdcv, monAdcV, motorSpeed,
                                     mVariableFertViewModel
                                 )
-                                // 任意 CAN 帧均更新接收时间戳，供施肥看门狗判断总线在线
-                                mVariableFertViewModel.canEverReceived = true
-                                mVariableFertViewModel.canLastReceiveTime
-                                    .postValue(System.currentTimeMillis())
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                Log.e(TAG, "dispatchFrame 解析异常（已跳过该帧）: ${e.message}", e)
                             }
+                            // 任意 CAN 帧均更新接收时间戳，供施肥看门狗判断总线在线
+                            mVariableFertViewModel.canEverReceived = true
+                            mVariableFertViewModel.canLastReceiveTime
+                                .postValue(System.currentTimeMillis())
                         }
-                        // ── 变长帧解析循环结束 ──────────────────────────
-
-                        // 更新施肥电机数据到 ViewModel（与原逻辑完全一致）
-                        val mon = monfertAdcv.copyOf()
-                        val con = confertflow.copyOf()
-                        mVariableFertViewModel.monfertflow.postValue(mon)
-                        mVariableFertViewModel.confertflow.postValue(con)
-                        mVariableFertViewModel.monAdcV.postValue(monAdcV)
-                        mVariableFertViewModel.motorSpeed.postValue(motorSpeed)
-
-                        val applied = mVariableFertViewModel.fertApplied.value
-                            ?: DoubleArray(mSPParamData.rowNumber) { 0.0 }
-                        mVariableFertViewModel.updateFertData(con, applied)
-
-                    } catch (e: IOException) {
-                        Log.e(TAG, "IOException: ${e.message}")
                     }
+                    // ── 变长帧解析循环结束 ──────────────────────────
+
+                    // 更新施肥电机数据到 ViewModel（与原逻辑完全一致）
+                    val mon = monfertAdcv.copyOf()
+                    val con = confertflow.copyOf()
+                    mVariableFertViewModel.monfertflow.postValue(mon)
+                    mVariableFertViewModel.confertflow.postValue(con)
+                    mVariableFertViewModel.monAdcV.postValue(monAdcV)
+                    mVariableFertViewModel.motorSpeed.postValue(motorSpeed)
+
+                    val applied = mVariableFertViewModel.fertApplied.value
+                        ?: DoubleArray(mSPParamData.rowNumber) { 0.0 }
+                    mVariableFertViewModel.updateFertData(con, applied)
+
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: IOException) {
+                    // 端口被关/重开导致读写失败：清空缓冲、短暂等待，下一轮用新流恢复（不退出循环）
+                    Log.w(TAG, "接收 IOException（将重试，端口可能已重开）: ${e.message}")
+                    buffer.clear()
+                    lastStream = null
+                    delay(50)
+                } catch (e: Throwable) {
+                    // 兜底：任何未预期异常都不致死接收循环
+                    Log.e(TAG, "接收循环未预期异常（将重试）: ${e.message}", e)
+                    delay(50)
                 }
-            } catch (e: IOException) {
-                e.printStackTrace()
             }
         })
 
@@ -283,9 +316,17 @@ class CanReceiveCoroutine {
             // ── 实际位置读回复（0x6064，有符号32位）─────────────────────
             cs == 0x43 && index == 0x6064 -> {
                 val pos = CanOpenFun.parseSdoResponseSigned32(sdoData) ?: return
+                // 请求-应答存活模型：任何 SDO 回包都说明节点在总线上应答 → 刷新存活时间戳并置在线，
+                // 使在线判定独立于 TPDO/心跳配置，避免静止电机被 2s 看门狗误判离线后锁死。
+                servoLastSeen[motorIndex] = System.currentTimeMillis()
                 viewModel.updateServoCalibration(motorIndex) { cal ->
                     val depth = if (cal.fitValid) cal.fitA * pos + cal.fitB else cal.currentDepth
-                    cal.copy(currentPosition = pos, currentDepth = depth)
+                    cal.copy(
+                        currentPosition = pos,
+                        currentDepth    = depth,
+                        isOnline        = true,
+                        lastHeardMs     = servoLastSeen[motorIndex]
+                    )
                 }
                 viewModel.appendCanOpenLog("SDO位置 M${motorIndex+1}(N$nodeId) pos=$pos")
         Log.d(TAG, "SDO位置回复: motor=$motorIndex nodeId=$nodeId pos=$pos")
@@ -300,17 +341,22 @@ class CanReceiveCoroutine {
                     flags.negativeLimitReached -> 2
                     else -> 0
                 }
+                servoLastSeen[motorIndex] = System.currentTimeMillis()
                 viewModel.updateServoCalibration(motorIndex) { cal ->
-                    cal.copy(alarmCode = alarm)
+                    cal.copy(alarmCode = alarm, isOnline = true, lastHeardMs = servoLastSeen[motorIndex])
                 }
                 viewModel.appendCanOpenLog("SDO状态 M${motorIndex+1}(N$nodeId) sw=0x${sw.toString(16)} alarm=$alarm targetReached=${flags.targetReached}")
                 Log.d(TAG, "SDO状态字回复: motor=$motorIndex sw=0x${sw.toString(16)}" +
                            " targetReached=${flags.targetReached} alarm=$alarm")
             }
 
-            // ── 写入成功应答（不需要更新状态，仅记录日志）───────────────
+            // ── 写入成功应答（节点已应答 → 视为存活，刷新时间戳）───────────
             cs == 0x60 -> {
                 val subIdx = sdoData[3].toInt() and 0xFF
+                servoLastSeen[motorIndex] = System.currentTimeMillis()
+                viewModel.updateServoCalibration(motorIndex) { cal ->
+                    cal.copy(isOnline = true, lastHeardMs = servoLastSeen[motorIndex])
+                }
                 viewModel.appendCanOpenLog("SDO写ACK M${motorIndex+1}(N$nodeId) idx=0x${index.toString(16).uppercase()} sub=$subIdx")
                 Log.d(TAG, "SDO写成功: motor=$motorIndex nodeId=$nodeId" +
                            " index=0x${index.toString(16).uppercase()} sub=$subIdx")

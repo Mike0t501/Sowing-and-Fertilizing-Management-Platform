@@ -40,7 +40,6 @@ import androidx.compose.material.Slider
 import androidx.compose.material.SliderDefaults
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
-import android.serialport.SerialPort
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.MutableState
@@ -71,10 +70,10 @@ import com.nx.vfremake.data.deepDirection
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
 import com.nx.vfremake.coroutine.SowingDepthCoroutine
 import com.nx.vfremake.funClass.CanOpenFun
+import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mSerialPortCAN
-import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -96,42 +95,6 @@ private class JobHolder { var job: Job? = null }
  */
 private fun jogDecelMs(jogSpeed: Int, acceleration: Int): Long =
     (jogSpeed.toLong() * 1000L / acceleration.toLong() + 200L).coerceAtMost(4000L)
-
-/**
- * 按需打开 CAN 串口（幂等）。
- *
- * 解决竞态：从 SowingDepthScreen 导航到本页时，本页 DisposableEffect setup
- * 在上一页 onDispose 之前运行——此时看到端口已开，不会重开；随后上一页
- * onDispose 关闭端口，本页就再也没机会打开。
- *
- * 让点动按钮的 IO 协程在发送前调用此函数，按需打开，绕开时序问题。
- *
- * @return true 端口已打开（或刚刚打开）；false 打开失败（端口名为空 / 异常）
- */
-private fun ensureCanPortOpen(context: android.content.Context): Boolean {
-    if (mSerialPortCAN != null) return true
-    val sp = MySharedPreFun(context).getMySharedPre()
-    val portName = sp.getString(
-        context.getString(R.string.serial_can_port_name),
-        context.getString(R.string.serial_can_port_defValue)
-    ) ?: ""
-    val baud = sp.getString(
-        context.getString(R.string.serial_can_baud_name),
-        context.getString(R.string.serial_can_baud_defValue)
-    )?.toIntOrNull() ?: 115200
-    if (portName.isEmpty()) {
-        Log.e("DepthCalib", "ensureCanPortOpen: port name empty in SharedPreferences")
-        return false
-    }
-    return try {
-        mSerialPortCAN = SerialPort(File("/dev/$portName"), baud)
-        Log.d("DepthCalib", "ensureCanPortOpen: opened /dev/$portName @$baud")
-        true
-    } catch (e: Exception) {
-        Log.e("DepthCalib", "ensureCanPortOpen: open failed for /dev/$portName: ${e.message}", e)
-        false
-    }
-}
 
 /**
  * 最小二乘线性拟合 depth_mm = a * encoderPos + b
@@ -325,7 +288,7 @@ fun DepthCalibrationScreen(
         }
         val launched = scope.launch(Dispatchers.IO) {
             try {
-                if (!ensureCanPortOpen(context)) return@launch
+                if (!MySerialPortFun.ensureCanPortOpen(context)) return@launch
 
                 if (withLimitMonitor && cal.limitsSet) {
                     val deepDir = cal.deepDirection
@@ -382,7 +345,7 @@ fun DepthCalibrationScreen(
         val startJob = jogStartHolder.job.also { jogStartHolder.job = null }
         scope.launch(Dispatchers.IO) {
             try {
-                if (!ensureCanPortOpen(context)) {
+                if (!MySerialPortFun.ensureCanPortOpen(context)) {
                     startJob?.cancelAndJoin()
                     return@launch
                 }
@@ -406,7 +369,7 @@ fun DepthCalibrationScreen(
         val depthCoroutine:   SowingDepthCoroutine?
         if (!isSystemRunning) {
             // 进入本页时尝试一次打开（若已开则 no-op）
-            ensureCanPortOpen(context)
+            MySerialPortFun.ensureCanPortOpen(context)
             receiveCoroutine = CanReceiveCoroutine().also { it.start(viewModel, context) }
             depthCoroutine   = SowingDepthCoroutine().also { it.start(viewModel, context) }
         } else {
@@ -524,7 +487,7 @@ fun DepthCalibrationScreen(
                         limitsWriteBusy = true
                         scope.launch {
                             withContext(Dispatchers.IO) {
-                                if (!ensureCanPortOpen(context)) {
+                                if (!MySerialPortFun.ensureCanPortOpen(context)) {
                                     Log.e("DepthCalib", "onConfirmLimits: ensureCanPortOpen failed")
                                     return@withContext
                                 }
@@ -576,7 +539,7 @@ fun DepthCalibrationScreen(
                         moveBusy = true
                         scope.launch(Dispatchers.IO) {
                             try {
-                                if (!ensureCanPortOpen(context)) {
+                                if (!MySerialPortFun.ensureCanPortOpen(context)) {
                                     Log.e("DepthCalib", "onMoveToPosition: ensureCanPortOpen failed")
                                     return@launch
                                 }
