@@ -67,3 +67,6 @@ local.properties
 # Local reference artifacts and screenshots (already-tracked docs remain tracked)
 docs/
 screenshots/
+
+# AI assistant guidance (local, not tracked)
+AGENTS.md
