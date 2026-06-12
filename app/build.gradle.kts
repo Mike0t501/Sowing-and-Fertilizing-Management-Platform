@@ -10,11 +10,11 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.nx.vfremake.v2"
+        applicationId = "com.nx.vfremake.v3"
         minSdk = 29
         targetSdk = 34
         versionCode = 2
-        versionName = "2.0.0"
+        versionName = "3.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

@@ -29,6 +29,43 @@ import java.io.IOException
 
 class MySerialPortFun {
 
+    companion object {
+        /**
+         * 按需打开 CAN 串口（幂等）。端口已开（mSerialPortCAN != null）直接返回 true；
+         * 为 null 时按 SharedPreferences 的端口名/波特率打开。
+         *
+         * 用途：解决跨页 DisposableEffect 关端口的时序竞态——点动发送、深度控制协程在发送/
+         * 接收前调用此函数懒打开端口，使端口被上一页 onDispose 关闭后能自动重开，配合
+         * CanReceiveCoroutine 的自愈接收循环恢复收包。
+         *
+         * @return true 端口已打开（或刚刚打开）；false 端口名为空 / 打开失败
+         */
+        fun ensureCanPortOpen(context: Context): Boolean {
+            if (mSerialPortCAN != null) return true
+            val sp = MySharedPreFun(context).getMySharedPre()
+            val portName = sp.getString(
+                context.getString(R.string.serial_can_port_name),
+                context.getString(R.string.serial_can_port_defValue)
+            ) ?: ""
+            val baud = sp.getString(
+                context.getString(R.string.serial_can_baud_name),
+                context.getString(R.string.serial_can_baud_defValue)
+            )?.toIntOrNull() ?: 115200
+            if (portName.isEmpty()) {
+                Log.e("MySerialPortFun", "ensureCanPortOpen: port name empty in SharedPreferences")
+                return false
+            }
+            return try {
+                mSerialPortCAN = SerialPort(File("/dev/$portName"), baud)
+                Log.d("MySerialPortFun", "ensureCanPortOpen: opened /dev/$portName @$baud")
+                true
+            } catch (e: Exception) {
+                Log.e("MySerialPortFun", "ensureCanPortOpen: open failed for /dev/$portName: ${e.message}", e)
+                false
+            }
+        }
+    }
+
     /**
      *  打开串口资源，串口名称和波特率从 SharedPreferences 读取
      * @note

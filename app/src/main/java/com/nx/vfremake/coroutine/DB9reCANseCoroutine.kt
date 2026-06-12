@@ -5,9 +5,11 @@ import android.util.Log
 import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.geometry.SpatialReferences
 import com.esri.arcgisruntime.mapping.view.GraphicsOverlay
+import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.funClass.MyArcGisFun
 import com.nx.vfremake.funClass.MyGNSSFun
+import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.mRmcData
 import com.nx.vfremake.mSPParamData
 import com.nx.vfremake.mSerialPortDB9
@@ -21,6 +23,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.Locale
+import kotlin.math.atan2
+import kotlin.math.ceil
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 import kotlin.system.measureTimeMillis
 
@@ -30,12 +38,11 @@ import kotlin.system.measureTimeMillis
  */
 class DB9reCANseCoroutine {
     // 因为我在Mainactivity顶层类里初始化DB9reCANseCoroutine()，可以这么写
-    private val polyPoint = arrayOfNulls<Point>(4) // 绘制已施肥区域用Point
-    private val polyPointExport = Array(mSPParamData.rowNumber) { arrayOfNulls<Point>(4) }
+    // 固定按最大行数 8 分配，避免运行中机型行数增大时下标越界（rowNumber 上限为 8）
+    private val polyPointExport = Array(8) { arrayOfNulls<Point>(4) }
 
     // 绘制图形需要持续调用函数，这个得放函数外面，才可以持续 add(Graphic)
     private val navMarkGraphicsOverlay = GraphicsOverlay() // 该图层只用于navMark，因为每次更新需要清除图层，便于管理
-    private val fertGraphicsOverlay = GraphicsOverlay() // 该图层只用于绘制施肥区域，每次更新是在上次基础添加，不清除
     private val fertGraphicsOverlayExport = GraphicsOverlay() // 该图层只用于绘制施肥区域，每次更新是在上次基础添加，不清除
 
     // 定义一个协程作用域，保存作业引用的HashSet，以便于管理
@@ -114,87 +121,102 @@ class DB9reCANseCoroutine {
     }
 
     /**
-    fun start1(
+     * 模拟GNSS定位协程：无真实 GNSS 时，按设置界面配置的起点→终点航线，
+     * 以设定速度匀速插值生成 RMC 语句，复用 onGNSSMsgReceived 整条处理链路。
+     *
+     * totalSteps / interval 不再写死：interval 为固定 tick（默认 400ms，可在
+     * 高级项调整），用 haversine 计算起止距离，按设定速度推导 totalSteps，
+     * 使模拟车辆严格按设定速度前进、到终点自动停（或循环重跑）。
+     *
+     * @note onGNSSMsgReceived 是本类私有方法，故模拟逻辑必须留在本类内。
+     */
+    fun start1Simulated(
         context: Context,
         mVariableFertViewModel: VariableFertViewModel
     ) {
+        // 与真实 start1 一致：每次启动重建 scope，重置速度滑动窗口
+        scope = CoroutineScope(Dispatchers.Default)
+        mRmcData.speedBufCount = 0
+        mRmcData.speedBufHead = 0
+
+        // 十进制度 → RMC 的「度分」格式（纬度2位度 / 经度3位度），沿用旧实现
         fun decimalToRMCFormat(coordinate: Double, isLatitude: Boolean): String {
-            val degrees = coordinate.toInt() // 获取整数部分（度）
-            val minutes = (coordinate - degrees) * 60 // 计算分
+            val degrees = coordinate.toInt()
+            val minutes = (coordinate - degrees) * 60
             return if (isLatitude) {
-                // 纬度用两位度
                 String.format(Locale.US, "%02d%07.4f", degrees, minutes)
             } else {
-                // 经度用三位度
                 String.format(Locale.US, "%03d%07.4f", degrees, minutes)
             }
         }
 
+        // 两经纬度间大圆距离（米）
+        fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+            val rEarth = 6371000.0
+            val dLat = Math.toRadians(lat2 - lat1)
+            val dLon = Math.toRadians(lon2 - lon1)
+            val sLat = sin(dLat / 2)
+            val sLon = sin(dLon / 2)
+            val a = sLat * sLat +
+                    cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sLon * sLon
+            return 2 * rEarth * atan2(sqrt(a), sqrt(1 - a))
+        }
+
+        // 读取模拟航线配置（缺失/非法时回退默认值）
+        val sp = MySharedPreFun(context)
+        fun cfg(nameId: Int, defId: Int): String =
+            sp.getSpecificValue(nameId) ?: context.getString(defId)
+
+        val startLat = cfg(R.string.simGnss_startLat_name, R.string.simGnss_startLat_defeatValue)
+            .toDoubleOrNull() ?: 36.850825
+        val startLon = cfg(R.string.simGnss_startLon_name, R.string.simGnss_startLon_defeatValue)
+            .toDoubleOrNull() ?: 115.007949
+        val endLat = cfg(R.string.simGnss_endLat_name, R.string.simGnss_endLat_defeatValue)
+            .toDoubleOrNull() ?: 36.853154
+        val endLon = cfg(R.string.simGnss_endLon_name, R.string.simGnss_endLon_defeatValue)
+            .toDoubleOrNull() ?: 115.008574
+        val speedKmh = (cfg(R.string.simGnss_speed_name, R.string.simGnss_speed_defeatValue)
+            .toDoubleOrNull() ?: 15.0).coerceAtLeast(0.1)
+        val interval = (cfg(R.string.simGnss_interval_name, R.string.simGnss_interval_defeatValue)
+            .toLongOrNull() ?: 400L).coerceAtLeast(50L)
+        val loop = cfg(R.string.simGnss_loop_name, R.string.simGnss_loop_defeatValue) == "1"
+
+        // 由距离 + 速度推导步数：固定 tick，匀速从起点走到终点
+        val distM = haversineMeters(startLat, startLon, endLat, endLon)
+        val vMps = speedKmh / 3.6
+        val tickS = interval / 1000.0
+        val totalSteps = max(1, ceil(distM / (vMps * tickS)).toInt())
+        val speedKnots = speedKmh / 1.852
+
+        Log.i(
+            "DB9reCANseCoroutine",
+            "模拟GNSS：dist=%.1fm speed=%.1fkm/h steps=%d interval=%dms loop=%b"
+                .format(distM, speedKmh, totalSteps, interval, loop)
+        )
+
         jobs.add(scope.launch {
-            val sb = StringBuilder()
+            do {
+                for (step in 0..totalSteps) {
+                    if (!isActive) return@launch
+                    val fraction = step / totalSteps.toFloat()
+                    val currentLat = startLat + (endLat - startLat) * fraction
+                    val currentLon = startLon + (endLon - startLon) * fraction
 
-            // 原始起点和终点数据
-            val startPoint =
-                "\$GPRMC,171012.000,A,3651.10062,N,11500.48990,E,8.1,10.7068,151216,,D*49"
-            val endPoint =
-                "\$GPRMC,171012.000,A,3651.11964,N,11500.49482,E,8.1,10.7068,151216,,D*49"
-
-            // 提取数据（纬度、经度、速度等）以便插值计算
-            val startLat = 36.850825
-            val startLon = 115.007949
-            val startSpeed = 8.1 // 1节 = 1.852km/h
-
-            val endLat = 36.853154
-            val endLon = 115.008574
-            val endSpeed = 8.1
-
-
-            val totalSteps = 155 // 12秒 / 0.4秒 = 30次
-            val interval = 400L // 每次间隔400ms
-
-            for (step in 0..totalSteps) {
-                val fraction = step / totalSteps.toFloat()
-
-                // 线性插值计算当前点的经纬度和速度
-                val currentLat = startLat + (endLat - startLat) * fraction
-                val currentLon = startLon + (endLon - startLon) * fraction
-                val currentSpeed = startSpeed + (endSpeed - startSpeed) * fraction
-
-                // 格式化数据为RMC字符串
-                val currentLatRMC = decimalToRMCFormat(currentLat, true)  // 纬度转换
-                val currentLonRMC = decimalToRMCFormat(currentLon, false) // 经度转换
-
-                val simulatedData = String.format(
-                    Locale.CHINA,
-                    "\$GPRMC,171012.000,A,%s,N,%s,E,%.3f,10.7068,151216,,D*49\n",
-                    currentLatRMC, currentLonRMC, currentSpeed
-                )
-
-                sb.append(simulatedData)
-
-                // 模拟GNSS消息接收（放到Dispatchers.IO中执行）
-                launch(Dispatchers.IO) {
-                    while (sb.indexOf("\n") != -1) {
-                        val endOfLineIndex = sb.indexOf("\n")
-                        val line = sb.substring(0, endOfLineIndex).trim()
-                        if (line.startsWith("\$GPRMC")) {
-                            Log.d("GNSS", line)
-                            onGNSSMsgReceived(
-                                line,
-                                context,
-                                mVariableFertViewModel
-                            )
-                        }
-                        sb.delete(0, endOfLineIndex + 1)
-                    }
+                    val line = String.format(
+                        Locale.US,
+                        "\$GPRMC,171012.000,A,%s,N,%s,E,%.3f,10.7068,151216,,D*49",
+                        decimalToRMCFormat(currentLat, true),
+                        decimalToRMCFormat(currentLon, false),
+                        speedKnots
+                    )
+                    Log.d("GNSS", line)
+                    onGNSSMsgReceived(line, context, mVariableFertViewModel)
+                    delay(interval)
                 }
-
-                delay(interval) // 模拟每400ms接收一次数据
-            }
+            } while (loop && isActive)
         })
         isRunning = true
     }
-    */
     /**
      * 处理 RMC 语句查询施肥量控制单体流量总成
      * @param  gnssString:GNSS语句信息
@@ -271,18 +293,11 @@ class DB9reCANseCoroutine {
 //        mVariableFertViewModel.confertflow.postValue(confertflow)
         //...
 
-        // 绘制已施肥区域
-        // 如果改成每次都调用，会清空
-        MyArcGisFun().drawPoly(
-            polyPoint = polyPoint,
-            point = arrayOf(pointi[1][0], pointi[1].last()),
-            fertGraphicsOverlay = fertGraphicsOverlay,
-            mVariableFertViewModel = mVariableFertViewModel,
-            context = context
-        )
-
+        // 绘制已施肥区域：只画开启的单体、按真实位置；关闭的单体留空
+        // （不再绘制整幅绿色带，避免只开部分单体时仍铺满整机宽度）
         val fertApplied = mVariableFertViewModel.fertApplied.value
         for (i in 0 until mSPParamData.rowNumber) {
+            if (!(mSPParamData.activeMotors.getOrNull(i) ?: true)) continue // 关闭的单体不绘制
             Log.d(
                 "DB9reCANseCoroutine",
                 "$i: " + fertApplied?.get(i).toString()

@@ -17,6 +17,8 @@
 package com.nx.vfremake.ui
 
 import android.util.Log
+import android.view.MotionEvent
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -78,11 +80,19 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import com.esri.arcgisruntime.geometry.Envelope
+import com.esri.arcgisruntime.geometry.GeometryEngine
 import com.esri.arcgisruntime.geometry.Point
+import com.esri.arcgisruntime.geometry.PolylineBuilder
 import com.esri.arcgisruntime.geometry.SpatialReferences
 import com.esri.arcgisruntime.mapping.Viewpoint
+import com.esri.arcgisruntime.mapping.view.DefaultMapViewOnTouchListener
+import com.esri.arcgisruntime.mapping.view.Graphic
+import com.esri.arcgisruntime.mapping.view.GraphicsOverlay
 import com.esri.arcgisruntime.mapping.view.MapView
 import com.esri.arcgisruntime.symbology.PictureMarkerSymbol
+import com.esri.arcgisruntime.symbology.SimpleLineSymbol
+import com.esri.arcgisruntime.symbology.SimpleMarkerSymbol
+import com.esri.arcgisruntime.symbology.TextSymbol
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.fittingCoefficientA
@@ -101,12 +111,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material.Surface
 import androidx.compose.material.Divider
+import androidx.compose.material.Switch
 import androidx.compose.material.TextButton
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
@@ -127,13 +140,177 @@ fun MainScreen(
     mapView: MapView,
     mVariableFertViewModel: VariableFertViewModel,
     onClickSettigns: () -> Unit = {},
-    onClickParamSet: () -> Unit = {}
+    onClickParamSet: () -> Unit = {},
+    onClickSowingDepth: () -> Unit = {},
+    onSimGnssReturnToConfig: () -> Unit = {}
 ) {
     Box(modifier = Modifier.background(Color(LocalContext.current.getColor(R.color.background_color_night)))) {
         MapAndFunBontonVeiw(mapView, mVariableFertViewModel)
         MsgScreenRight(mVariableFertViewModel)
         MsgScreenBottom(mVariableFertViewModel)
-        MenuBottomBar(mapView, mVariableFertViewModel, onClickSettigns, onClickParamSet)
+        MenuBottomBar(mapView, mVariableFertViewModel, onClickSettigns, onClickParamSet, onClickSowingDepth)
+        // 模拟GNSS地图取点浮层：z 序最上，仅取点模式下显示
+        SimGnssPickOverlay(mapView, mVariableFertViewModel, onSimGnssReturnToConfig)
+    }
+}
+
+/**
+ * 模拟GNSS地图取点浮层
+ * @param  mapView:主地图（处方图已加载其上）
+ * @param  mVariableFertViewModel:读取/推进取点模式
+ * @param  onReturnToConfig:取点结束回到模拟GNSS配置页
+ * @note   仅 simGnssPickMode != 0 时安装单击监听并显示提示浮层；点中即写 SharedPreferences。
+ *         经纬度复用 simGnss_startLat/Lon、simGnss_endLat/Lon 键，与配置页一致。
+ */
+@Composable
+fun SimGnssPickOverlay(
+    mapView: MapView,
+    mVariableFertViewModel: VariableFertViewModel,
+    onReturnToConfig: () -> Unit
+) {
+    val context = LocalContext.current
+    val pickMode by mVariableFertViewModel.simGnssPickMode.observeAsState(0)
+    val sharedPre = MySharedPreFun(context).getMySharedPre()
+    // 起/终标记与连线专用图层（独立于业务图层，取消时单独清除）
+    val pickOverlay = remember { GraphicsOverlay() }
+
+    // 经纬度即点即存（6 位小数，约 0.1m 精度，与默认值格式一致）
+    fun writeCoord(latKey: Int, lonKey: Int, lat: Double, lon: Double) {
+        sharedPre.edit()
+            .putString(context.getString(latKey), String.format(Locale.US, "%.6f", lat))
+            .putString(context.getString(lonKey), String.format(Locale.US, "%.6f", lon))
+            .apply()
+    }
+    // 画终点连线时从 SharedPreferences 取回起点，避免跨监听器闭包传值
+    fun readStartPoint(): Point? {
+        val la = sharedPre.getString(context.getString(R.string.simGnss_startLat_name), null)?.toDoubleOrNull()
+        val lo = sharedPre.getString(context.getString(R.string.simGnss_startLon_name), null)?.toDoubleOrNull()
+        return if (la != null && lo != null) Point(lo, la, SpatialReferences.getWgs84()) else null
+    }
+    fun drawMarker(p: Point, isStart: Boolean) {
+        val fillColor = if (isStart) 0xFF4CAF50.toInt() else 0xFFF44336.toInt()
+        val textColor = if (isStart) 0xFF1B5E20.toInt() else 0xFFB71C1C.toInt()
+        pickOverlay.graphics.add(Graphic(p, SimpleMarkerSymbol(SimpleMarkerSymbol.Style.CIRCLE, fillColor, 16f)))
+        val label = TextSymbol(
+            14f, if (isStart) "起" else "终", textColor,
+            TextSymbol.HorizontalAlignment.CENTER, TextSymbol.VerticalAlignment.BOTTOM
+        ).apply { offsetY = 12f }
+        pickOverlay.graphics.add(Graphic(p, label))
+        mapView.post { mapView.invalidate() }
+    }
+    fun drawLine(start: Point?, end: Point) {
+        if (start == null) return
+        val line = PolylineBuilder(SpatialReferences.getWgs84()).apply {
+            addPoint(start); addPoint(end)
+        }.toGeometry()
+        pickOverlay.graphics.add(
+            Graphic(line, SimpleLineSymbol(SimpleLineSymbol.Style.DASH, 0xFF1565C0.toInt(), 2f))
+        )
+        mapView.post { mapView.invalidate() }
+    }
+
+    // 安装/卸载单击监听 + 进入时清旧标记、关跟随
+    LaunchedEffect(pickMode) {
+        if (pickMode != 0) {
+            if (!mapView.graphicsOverlays.contains(pickOverlay)) mapView.graphicsOverlays.add(pickOverlay)
+            mVariableFertViewModel.navCenterIsRunning.value = false  // 取点期间停跟随，地图不乱动
+            if (pickMode == 1) {
+                pickOverlay.graphics.clear()
+                mapView.post { mapView.invalidate() }
+            }
+            mapView.setOnTouchListener(object : DefaultMapViewOnTouchListener(context, mapView) {
+                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                    val mapPt = mapView.screenToLocation(android.graphics.Point(e.x.roundToInt(), e.y.roundToInt()))
+                    val wgs = mapPt?.let { GeometryEngine.project(it, SpatialReferences.getWgs84()) as? Point }
+                    if (wgs == null) {
+                        Toast.makeText(context, "请先加载处方图", Toast.LENGTH_SHORT).show()
+                        return true
+                    }
+                    val lat = wgs.y
+                    val lon = wgs.x
+                    when (mVariableFertViewModel.simGnssPickMode.value) {
+                        1 -> {
+                            writeCoord(R.string.simGnss_startLat_name, R.string.simGnss_startLon_name, lat, lon)
+                            drawMarker(wgs, isStart = true)
+                            mVariableFertViewModel.simGnssPickMode.value = 2
+                        }
+                        2 -> {
+                            writeCoord(R.string.simGnss_endLat_name, R.string.simGnss_endLon_name, lat, lon)
+                            drawMarker(wgs, isStart = false)
+                            drawLine(readStartPoint(), wgs)
+                            mVariableFertViewModel.simGnssPickMode.value = 3
+                        }
+                    }
+                    return true
+                }
+            })
+        } else {
+            // 退出取点：还原默认触摸 + 兜底清除残留标记/连线
+            mapView.setOnTouchListener(DefaultMapViewOnTouchListener(context, mapView))
+            if (pickOverlay.graphics.isNotEmpty()) {
+                pickOverlay.graphics.clear()
+                mapView.post { mapView.invalidate() }
+            }
+        }
+    }
+
+    // 顶部提示浮层
+    if (pickMode != 0) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Surface(shape = RoundedCornerShape(12.dp), color = Color(0xCC000000), elevation = 8.dp) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = when (pickMode) {
+                            1 -> "请点击地图选择【起点】"
+                            2 -> "请点击地图选择【终点】"
+                            else -> "✓ 取点完成"
+                        },
+                        color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (pickMode == 3) {
+                            Button(
+                                onClick = {
+                                    // 同步清除标记/连线：pickOverlay 挂在长生命周期 mapView 上，
+                                    // 不能只靠 LaunchedEffect（导航离开后本 composable 可能已销毁不再执行）
+                                    pickOverlay.graphics.clear()
+                                    mapView.post { mapView.invalidate() }
+                                    mVariableFertViewModel.simGnssPickMode.value = 0
+                                    onReturnToConfig()
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF4CAF50))
+                            ) { Text("返回配置", color = Color.White) }
+                            Button(
+                                onClick = { mVariableFertViewModel.simGnssPickMode.value = 1 },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1976D2))
+                            ) { Text("重新取点", color = Color.White) }
+                        } else {
+                            Button(
+                                onClick = {
+                                    pickOverlay.graphics.clear()
+                                    mapView.post { mapView.invalidate() }
+                                    mVariableFertViewModel.simGnssPickMode.value = 0
+                                    onReturnToConfig()
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF757575))
+                            ) { Text("取消", color = Color.White) }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -224,10 +401,11 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
             title = "清除已施肥区域图层",
             text = "你确实要清除已施肥区域的绘制图层吗？",
             onConfirm = {
-//                if (mapView.graphicsOverlays.contains(fertGraphicsOverlay) && fertGraphicsOverlay != null) {
-//                    fertGraphicsOverlay?.graphics?.clear()
-////                    mapView.post { mapView.invalidate() }
-//                }
+                // 运行时 drawPoly→fertGraphicsOverlay、drawPolyExport→fertGraphicsOverlayExport
+                // 两个图层都画，必须都清，否则黄色施肥轨迹残留
+                if (mapView.graphicsOverlays.contains(fertGraphicsOverlay) && fertGraphicsOverlay != null) {
+                    fertGraphicsOverlay?.graphics?.clear()
+                }
                 if (mapView.graphicsOverlays.contains(fertGraphicsOverlayExport) && fertGraphicsOverlayExport != null) {
                     fertGraphicsOverlayExport?.graphics?.clear()
                 }
@@ -455,12 +633,14 @@ fun MenuBottomBar(
     mapView: MapView,
     mVariableFertViewModel: VariableFertViewModel,
     onClickSettigns: () -> Unit = {},
-    onClickParamSet: () -> Unit = {}
+    onClickParamSet: () -> Unit = {},
+    onClickSowingDepth: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val sharedPre = MySharedPreFun(context).getMySharedPre()
     val editor = sharedPre.edit()
     val fertValueFieldResKey = context.getString(R.string.fertQueryField_name)
+    val depthValueFieldResKey = context.getString(R.string.depthQueryField_name)
 
     // 展开/收起菜单逻辑
     val menuIsExpanded = remember { mutableStateOf(false) }
@@ -472,6 +652,13 @@ fun MenuBottomBar(
         rememberSaveable {
             mutableStateOf(sharedPre.getString(fertValueFieldResKey, null) ?: "")
         }
+    // 处方图深度字段（可选）
+    val depthValueField =
+        rememberSaveable {
+            mutableStateOf(sharedPre.getString(depthValueFieldResKey, null) ?: "")
+        }
+    // 处方图控深模式开关
+    val depthPrescriptionMode by mVariableFertViewModel.depthPrescriptionMode.observeAsState(false)
 
     // 从viewmodel加载字段列表
     val fieldList by mVariableFertViewModel.fieldsList.observeAsState()
@@ -494,6 +681,27 @@ fun MenuBottomBar(
         )
     }
     //... 如果添加了新shp却没有选择字段则警告结束
+
+    //... 处方图控深「未下发原因」一次性提示弹窗
+    val depthNotice by mVariableFertViewModel.depthControlNotice.observeAsState()
+    val depthNoticeText = remember { mutableStateOf("") }
+    val showDepthNotice = remember { mutableStateOf(false) }
+    LaunchedEffect(depthNotice) {
+        depthNotice?.let {
+            depthNoticeText.value = it
+            showDepthNotice.value = true
+            mVariableFertViewModel.depthControlNotice.postValue(null)  // 消费一次，避免重复弹
+        }
+    }
+    if (showDepthNotice.value) {
+        ShowConfirmDialog(
+            title = "处方图控深提示",
+            text = depthNoticeText.value,
+            showDialog = showDepthNotice,
+            showDismiss = false
+        )
+    }
+    //... 处方图控深提示结束
 
     // 菜单展开栏
     Box(
@@ -531,10 +739,18 @@ fun MenuBottomBar(
             DropdownMenuItem(
                 onClick = {
                     onClickParamSet()
-                    menuIsExpanded.value = false // 手动关闭 DropdownMenu
+                    menuIsExpanded.value = false
                 }
             ) {
                 Text("参数设置")
+            }
+            DropdownMenuItem(
+                onClick = {
+                    onClickSowingDepth()
+                    menuIsExpanded.value = false
+                }
+            ) {
+                Text("播种深度控制")
             }
             DropdownMenuItem(onClick = {
                 // 点击更换处方图时，显示悬浮界面
@@ -716,6 +932,92 @@ fun MenuBottomBar(
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    // ================= 步骤 3：播种深度字段 + 控深模式 =================
+                    Text(
+                        text = "步骤 3：选择播种深度字段（可选，单位 cm）",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (shpLoadDone.value) Color(0xFF1976D2) else Color.Gray,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color.White,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE0E0E0)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (!shpLoadDone.value) {
+                            Text(
+                                text = "请先在上方选择处方图文件",
+                                fontSize = 14.sp,
+                                color = Color.LightGray,
+                                modifier = Modifier.padding(16.dp),
+                                textAlign = TextAlign.Center
+                            )
+                        } else {
+                            FlowRow(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                fieldList?.forEach { field ->
+                                    val isSelected = depthValueField.value == field
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (isSelected) Color(0xFF2E7D32) else Color(0xFFF5F5F5),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            width = 1.dp,
+                                            color = if (isSelected) Color(0xFF2E7D32) else Color.Transparent
+                                        ),
+                                        modifier = Modifier.clickable {
+                                            depthValueField.value = field
+                                            editor.putString(depthValueFieldResKey, field).apply()
+                                        }
+                                    ) {
+                                        Text(
+                                            text = field,
+                                            color = if (isSelected) Color.White else Color(0xFF555555),
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                            fontSize = 14.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (depthPrescriptionMode) "处方图工作模式：播深" else "处方图工作模式：施肥",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF333333)
+                            )
+                            Text(
+                                text = "关=施肥 / 开=播深，二者互斥：同一时刻只控制一类电机并显示对应字段的处方图。" +
+                                    "播深模式下按\"开始\"自动使能深度电机、\"停止\"自动断使能。",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                        Switch(
+                            checked = depthPrescriptionMode,
+                            onCheckedChange = { mVariableFertViewModel.setDepthPrescriptionMode(it) }
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(32.dp))
 
                     // ================= 底部操作按钮区 =================
@@ -726,9 +1028,12 @@ fun MenuBottomBar(
                     ) {
                         TextButton(
                             onClick = {
-                                val fertFieldResValue = sharedPre.getString(fertValueFieldResKey, null)
+                                // 按工作模式校验对应字段：播深查深度字段，施肥查施肥字段
+                                val activeFieldResKey =
+                                    if (depthPrescriptionMode) depthValueFieldResKey else fertValueFieldResKey
+                                val activeFieldResValue = sharedPre.getString(activeFieldResKey, null)
                                 val fieldListValue = fieldList
-                                if (fieldListValue?.contains(fertFieldResValue) != true) {
+                                if (fieldListValue?.contains(activeFieldResValue) != true) {
                                     showNoFieldDialogAlert.value = true
                                     return@TextButton
                                 }
@@ -749,13 +1054,26 @@ fun MenuBottomBar(
                                     return@Button
                                 }
 
-                                // 检查是否选择了字段
-                                val fertFieldResValue = sharedPre.getString(fertValueFieldResKey, null) ?: ""
+                                // 检查是否选择了当前工作模式所需字段
                                 val fieldListValue = fieldList
-                                if (fieldListValue?.contains(fertFieldResValue) != true) {
-                                    // 没选字段，弹出警告
-                                    showNoFieldDialogAlert.value = true
-                                    return@Button
+                                if (depthPrescriptionMode) {
+                                    // 播深模式：必须选播种深度字段
+                                    val depthFieldResValue = sharedPre.getString(depthValueFieldResKey, null) ?: ""
+                                    if (fieldListValue?.contains(depthFieldResValue) != true) {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "播深模式：请先在步骤 3 选择播种深度字段！",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        return@Button
+                                    }
+                                } else {
+                                    // 施肥模式：必须选施肥字段
+                                    val fertFieldResValue = sharedPre.getString(fertValueFieldResKey, null) ?: ""
+                                    if (fieldListValue?.contains(fertFieldResValue) != true) {
+                                        showNoFieldDialogAlert.value = true
+                                        return@Button
+                                    }
                                 }
 
                                 // 移除旧业务图层和覆盖层

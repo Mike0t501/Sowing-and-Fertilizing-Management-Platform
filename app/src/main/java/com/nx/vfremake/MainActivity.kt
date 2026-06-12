@@ -68,6 +68,8 @@ import com.esri.arcgisruntime.mapping.view.MapView
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
 import com.nx.vfremake.coroutine.DB9reCANseCoroutine
 import com.nx.vfremake.coroutine.MyWriteSaveFun
+import com.nx.vfremake.coroutine.SowingDepthCoroutine
+import com.nx.vfremake.data.depthControlReadinessWarning
 import com.nx.vfremake.coroutine.TestModeCoroutine
 import com.nx.vfremake.funClass.ConvAndCtrlFun
 import com.nx.vfremake.funClass.DocuAndManageFun
@@ -98,6 +100,9 @@ class MainActivity : AppCompatActivity() {
     // 因为需要rowNumber初始化参数，必须mSPParamData初始化完成才初始化
     private lateinit var mDB9reCANseCoroutine: DB9reCANseCoroutine
     private var mCanReceiveCoroutine = CanReceiveCoroutine()
+
+    // 处方图控深模式：作业期间由 MainActivity 独占持有，避免与 SowingDepthScreen 双实例写 CAN
+    private var mSowingDepthCoroutine = SowingDepthCoroutine()
 
     // 定义ActivityResultLauncher用于对象选择
     private lateinit var selectWriteDirectoryLauncher: ActivityResultLauncher<Uri?>
@@ -246,9 +251,10 @@ class MainActivity : AppCompatActivity() {
                         onClick = {
                             if (!isRunningState.value) {
                                 val isTestMode = MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1"
+                                val simGnss = MySharedPreFun(context).getSpecificValue(R.string.simGnss_Switch_name) == "1"
 
-                                // 1. 【修复】：测试模式下跳过申请文件夹，不要弹出文件选择器！
-                                if (!isTestMode) {
+                                // 1. 【修复】：测试模式 / 模拟GNSS 模式下跳过申请文件夹，不要弹出文件选择器！
+                                if (!isTestMode && !simGnss) {
                                     DocuAndManageFun().cheekDirectoryUriPermission(
                                         R.string.myWriteDir_DocumentUri_name, selectWriteDirectoryLauncher, context
                                     )
@@ -287,8 +293,8 @@ class MainActivity : AppCompatActivity() {
                                     enqueueErrorSound(R.raw.fail6)
                                 }
 
-                                // 4b. 开始前提示：非测试模式下没有 RTK 数据
-                                if (soundEnabledAtStart && !isTestMode && mRmcData.latitude == 0.0 && mRmcData.longitude == 0.0) {
+                                // 4b. 开始前提示：非测试 / 非模拟GNSS 模式下没有 RTK 数据
+                                if (soundEnabledAtStart && !isTestMode && !simGnss && mRmcData.latitude == 0.0 && mRmcData.longitude == 0.0) {
                                     enqueueErrorSound(R.raw.fail7)
                                 }
 
@@ -301,8 +307,41 @@ class MainActivity : AppCompatActivity() {
                                     // 【修复】：测试模式必须也打开接收，这样底部图表才能收到反馈发生变化！
                                     if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel)
                                 } else {
-                                    if (!mDB9reCANseCoroutine.isRunning) mDB9reCANseCoroutine.start1(context, mVariableFertViewModel)
+                                    if (!mDB9reCANseCoroutine.isRunning) {
+                                        if (simGnss) mDB9reCANseCoroutine.start1Simulated(context, mVariableFertViewModel)
+                                        else         mDB9reCANseCoroutine.start1(context, mVariableFertViewModel)
+                                    }
                                     if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel)
+                                }
+
+                                // 5b. 处方图控深模式：作业期间由 MainActivity 独占启动深度控制协程。
+                                // 单次原子恢复持久化状态并置 masterEnabled=true，避免
+                                // restoreSowingDepthState 与 updateMasterEnabled 的 LiveData 顺序竞态；
+                                // 按"开始"即显式使能深度伺服（已与用户确认）。
+                                if (mVariableFertViewModel.depthPrescriptionMode.value == true) {
+                                    mVariableFertViewModel.restoreSowingDepthState(
+                                        MySharedPreFun(context).loadSowingDepthState()
+                                            .copy(masterEnabled = true)
+                                    )
+                                    if (!mSowingDepthCoroutine.isRunning) {
+                                        mSowingDepthCoroutine = SowingDepthCoroutine()
+                                        mSowingDepthCoroutine.start(mVariableFertViewModel, context)
+                                    }
+
+                                    // 5c. 控深就绪诊断：留出上线检测窗口后评估一次，
+                                    // 若仍无电机可下发位置命令则在主界面弹一次提示。
+                                    coroutineScope.launch {
+                                        delay(3000)   // 等心跳/TPDO + 2s 离线看门狗判定
+                                        if (isSystemRunning &&
+                                            mVariableFertViewModel.depthPrescriptionMode.value == true
+                                        ) {
+                                            val warn = mVariableFertViewModel.sowingDepthState.value
+                                                ?.depthControlReadinessWarning()
+                                            if (warn != null) {
+                                                mVariableFertViewModel.depthControlNotice.postValue(warn)
+                                            }
+                                        }
+                                    }
                                 }
 
                                 // 6. 启动 CAN 看门狗（测试模式和正常模式都启动）
@@ -420,6 +459,15 @@ class MainActivity : AppCompatActivity() {
                                 if (myTestModeCoroutine.isRunning) myTestModeCoroutine.shutdown()
                                 if (myWriteSaveFun.isRunning) myWriteSaveFun.shutdown()
 
+                                // 1b. 处方图控深模式：先断使能，让 SowingDepthCoroutine 的
+                                // Phase2 ON→OFF 跳变发 Shutdown(0x6040=0x0006) 减速退使能，
+                                // 等至少一个 500ms 周期后再关协程（否则伺服停在原位仍带电）。
+                                if (mSowingDepthCoroutine.isRunning) {
+                                    mVariableFertViewModel.updateMasterEnabled(false)
+                                    kotlinx.coroutines.delay(600)
+                                    mSowingDepthCoroutine.shutdown()
+                                }
+
                                 // 2. 稍作延迟，避开总线最高峰
                                 kotlinx.coroutines.delay(100)
 
@@ -486,8 +534,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initFittingCoefficient() {
-        fittingCoefficientA = Array(mSPParamData.rowNumber) { 0.0 }
-        fittingCoefficientB = Array(mSPParamData.rowNumber) { 0.0 }
+        // 固定按最大行数 8 分配，避免运行中机型行数增大时（应用/开始仅重载参数、不重建本数组）下标越界
+        fittingCoefficientA = Array(8) { 0.0 }
+        fittingCoefficientB = Array(8) { 0.0 }
 
         val tableRows = MydantiFertSharedPre(this).getTableRows()
         tableRows.forEach { row ->
@@ -574,6 +623,7 @@ class MainActivity : AppCompatActivity() {
             mDB9reCANseCoroutine.shutdown()
             mCanReceiveCoroutine.shutdown()
         }
+        if (mSowingDepthCoroutine.isRunning) mSowingDepthCoroutine.shutdown()
         if (viewModel.serialPortIsRunning.value == true) {
             MySerialPortFun().releaseSerialPort(mVariableFertViewModel)
         }
