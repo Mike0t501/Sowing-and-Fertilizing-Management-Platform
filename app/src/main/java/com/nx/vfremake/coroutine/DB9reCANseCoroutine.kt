@@ -10,6 +10,7 @@ import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.funClass.MyArcGisFun
 import com.nx.vfremake.funClass.MyGNSSFun
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.funClass.RmcData
 import com.nx.vfremake.mRmcData
 import com.nx.vfremake.mSPParamData
 import com.nx.vfremake.mSerialPortDB9
@@ -295,27 +296,33 @@ class DB9reCANseCoroutine {
 
         // 绘制已施肥区域：只画开启的单体、按真实位置；关闭的单体留空
         // （不再绘制整幅绿色带，避免只开部分单体时仍铺满整机宽度）
+        // 停车/低速门控：近零速时 RTK 航向角不可靠，幅宽横排会绕定位点旋转，逐帧缝合会把
+        // 条形带画成发散的圆疙瘩。此时暂停绘制——polyPointExport 保持上次末端不变，恢复前进后
+        // 下一次绘制自然从"上次末端 → 新位置"桥接续上，无空洞；同时避免停车时图层无限累积退化四边形。
+        // 控制逻辑（dantiPositionAndCtrl 的施肥/控深下发）已在前面照常运行，这里只门控绘制。
         val fertApplied = mVariableFertViewModel.fertApplied.value
-        for (i in 0 until mSPParamData.rowNumber) {
-            if (!(mSPParamData.activeMotors.getOrNull(i) ?: true)) continue // 关闭的单体不绘制
-            Log.d(
-                "DB9reCANseCoroutine",
-                "$i: " + fertApplied?.get(i).toString()
-            )
-            val exportMsg = doubleArrayOf(
-                mVariableFertViewModel.fertApplied.value?.get(i) ?: 0.0,
-                mVariableFertViewModel.confertflow.value?.get(i) ?: 0.0,
-                mVariableFertViewModel.monfertflow.value?.get(i) ?: 0.0,
-                mVariableFertViewModel.forwardspeed.value ?: 0.0
-            )
-            MyArcGisFun().drawPolyExport(
-                polyPoint = polyPointExport[i],
-                point = arrayOf(pointi[1][i], pointi[1][i + 1]),
-                exportMsg = exportMsg,
-                fertGraphicsOverlay = fertGraphicsOverlayExport,
-                mVariableFertViewModel = mVariableFertViewModel,
-                context = context
-            )
+        if (mRmcData.gnssRawSpeed >= RmcData.STANDSTILL_SPEED_KMH) {
+            for (i in 0 until mSPParamData.rowNumber) {
+                if (!(mSPParamData.activeMotors.getOrNull(i) ?: true)) continue // 关闭的单体不绘制
+                Log.d(
+                    "DB9reCANseCoroutine",
+                    "$i: " + fertApplied?.get(i).toString()
+                )
+                val exportMsg = doubleArrayOf(
+                    mVariableFertViewModel.fertApplied.value?.get(i) ?: 0.0,
+                    mVariableFertViewModel.confertflow.value?.get(i) ?: 0.0,
+                    mVariableFertViewModel.monfertflow.value?.get(i) ?: 0.0,
+                    mVariableFertViewModel.forwardspeed.value ?: 0.0
+                )
+                MyArcGisFun().drawPolyExport(
+                    polyPoint = polyPointExport[i],
+                    point = arrayOf(pointi[1][i], pointi[1][i + 1]),
+                    exportMsg = exportMsg,
+                    fertGraphicsOverlay = fertGraphicsOverlayExport,
+                    mVariableFertViewModel = mVariableFertViewModel,
+                    context = context
+                )
+            }
         }
         mVariableFertViewModel.fertAppliedLast.postValue(fertApplied)
     }
