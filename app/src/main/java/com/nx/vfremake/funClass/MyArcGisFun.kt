@@ -813,26 +813,32 @@ class MyArcGisFun {
                     val shapefileFuture = table.queryFeaturesAsync(queryParameters)
                     shapefileFuture?.addDoneListener {
                         try {
-                            var fert = 0.0
+                            // 施肥量字段 null 安全解析，与播深字段读取保持一致：
+                            // 浮点/双精度列 toDoubleOrNull 完整保留小数（如 "12.5" -> 12.5）；
+                            // 字段缺失/非法 -> NaN -> 跳过更新与下发，电机保持上次指令。
+                            var fert = Double.NaN
                             shapefileFuture.get().forEach { feature ->
-                                fert = feature.attributes[fertQueryField].toString().toDouble()
+                                fert = feature.attributes[fertQueryField]
+                                    ?.toString()?.toDoubleOrNull() ?: Double.NaN
                             }
-                            fertApplied[idx] = fert
-                            Log.d(
-                                "fertQueryField",
-                                dantiLLGeo[idx].x.toString() + "  " + dantiLLGeo[idx].y.toString() + "  " + fert.toString() + "  " + mRmcData.forwardSpeed.toString() + "  " + mRmcData.forwardSpeedCalculate.toString()
-                            )
-                            if (fert >= 0 && isSystemRunning) {
-                                val motorSpeedrpm = ConvAndCtrlFun().fertToMotorSpeed(
-                                    fert,
-                                    mRmcData.forwardSpeedCalculate,
-                                    mSPParamData.rowSize,
-                                    fittingCoefficientA[idx],
-                                    fittingCoefficientB[idx]
+                            if (!fert.isNaN()) {
+                                fertApplied[idx] = fert
+                                Log.d(
+                                    "fertQueryField",
+                                    dantiLLGeo[idx].x.toString() + "  " + dantiLLGeo[idx].y.toString() + "  " + fert.toString() + "  " + mRmcData.forwardSpeed.toString() + "  " + mRmcData.forwardSpeedCalculate.toString()
                                 )
-                                ConvAndCtrlFun().motorSpeedrpmSend(
-                                    motorSpeedrpm, idx
-                                )
+                                if (fert >= 0 && isSystemRunning) {
+                                    val motorSpeedrpm = ConvAndCtrlFun().fertToMotorSpeed(
+                                        fert,
+                                        mRmcData.forwardSpeedCalculate,
+                                        mSPParamData.rowSize,
+                                        fittingCoefficientA[idx],
+                                        fittingCoefficientB[idx]
+                                    )
+                                    ConvAndCtrlFun().motorSpeedrpmSend(
+                                        motorSpeedrpm, idx
+                                    )
+                                }
                             }
                         } catch (e: Exception) {
                             e.printStackTrace()
