@@ -814,30 +814,50 @@ class MyArcGisFun {
                     shapefileFuture?.addDoneListener {
                         try {
                             // 施肥量字段 null 安全解析，与播深字段读取保持一致：
-                            // 浮点/双精度列 toDoubleOrNull 完整保留小数（如 "12.5" -> 12.5）；
-                            // 字段缺失/非法 -> NaN -> 跳过更新与下发，电机保持上次指令。
+                            // 浮点/双精度列 toDoubleOrNull 完整保留小数（如 "12.5" -> 12.5）。
+                            // featureFound 区分「定位点落在图斑之外」与「查到要素但字段缺失/非法」：
+                            //   · 图斑之外（无要素）          -> 不施肥区，停机（转速 0）
+                            //   · 字段值 ≤0（合法的 0 值图斑）-> 不施肥区，停机（转速 0）
+                            //   · 字段值 >0                   -> 正常折算下发
+                            //   · 查到要素但字段缺失/非法(NaN)-> 数据异常，保持上次指令（沿用容错设计）
                             var fert = Double.NaN
+                            var featureFound = false
                             shapefileFuture.get().forEach { feature ->
+                                featureFound = true
                                 fert = feature.attributes[fertQueryField]
                                     ?.toString()?.toDoubleOrNull() ?: Double.NaN
                             }
-                            if (!fert.isNaN()) {
-                                fertApplied[idx] = fert
-                                Log.d(
-                                    "fertQueryField",
-                                    dantiLLGeo[idx].x.toString() + "  " + dantiLLGeo[idx].y.toString() + "  " + fert.toString() + "  " + mRmcData.forwardSpeed.toString() + "  " + mRmcData.forwardSpeedCalculate.toString()
-                                )
-                                if (fert >= 0 && isSystemRunning) {
-                                    val motorSpeedrpm = ConvAndCtrlFun().fertToMotorSpeed(
-                                        fert,
-                                        mRmcData.forwardSpeedCalculate,
-                                        mSPParamData.rowSize,
-                                        fittingCoefficientA[idx],
-                                        fittingCoefficientB[idx]
-                                    )
-                                    ConvAndCtrlFun().motorSpeedrpmSend(
-                                        motorSpeedrpm, idx
-                                    )
+                            if (isSystemRunning) {
+                                when {
+                                    // ① 图斑之外：该处不施肥 -> 停机
+                                    !featureFound -> {
+                                        fertApplied[idx] = 0.0
+                                        ConvAndCtrlFun().motorSpeedrpmSend(0.0, idx)
+                                    }
+                                    // ② 字段值 ≤0（合法不施肥区）-> 停机
+                                    !fert.isNaN() && fert <= 0.0 -> {
+                                        fertApplied[idx] = 0.0
+                                        ConvAndCtrlFun().motorSpeedrpmSend(0.0, idx)
+                                    }
+                                    // ③ 正常施肥量 -> 按拟合折算下发
+                                    !fert.isNaN() -> {
+                                        fertApplied[idx] = fert
+                                        Log.d(
+                                            "fertQueryField",
+                                            dantiLLGeo[idx].x.toString() + "  " + dantiLLGeo[idx].y.toString() + "  " + fert.toString() + "  " + mRmcData.forwardSpeed.toString() + "  " + mRmcData.forwardSpeedCalculate.toString()
+                                        )
+                                        val motorSpeedrpm = ConvAndCtrlFun().fertToMotorSpeed(
+                                            fert,
+                                            mRmcData.forwardSpeedCalculate,
+                                            mSPParamData.rowSize,
+                                            fittingCoefficientA[idx],
+                                            fittingCoefficientB[idx]
+                                        )
+                                        ConvAndCtrlFun().motorSpeedrpmSend(
+                                            motorSpeedrpm, idx
+                                        )
+                                    }
+                                    // ④ 查到要素但字段缺失/非法：保持上次指令，不更新、不下发
                                 }
                             }
                         } catch (e: Exception) {
