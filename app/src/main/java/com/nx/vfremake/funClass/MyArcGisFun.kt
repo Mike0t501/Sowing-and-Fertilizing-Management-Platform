@@ -801,9 +801,22 @@ class MyArcGisFun {
             }
         } else {
             // ── 施肥模式：与改动前 fert 行为逐字一致（auto 查询 / manual 定额）──
+            // 停车门控（田间实测修复：停车时 3 号电机空转不停）：以真实对地速度 gnssRawSpeed 判停。
+            // 近零速时一律对所有排肥电机发 0 并跳过本帧查询/下发——forwardSpeed→0 时 fertToMotorSpeed
+            // 返回 -B/A，某路标定 B 与 A 异号时是正的低转速，会让该电机停车空转；固定前进速度模式下
+            // forwardSpeedCalculate 恒为定值更会让全部电机停不下来；且停车继续排肥会原地堆肥。
+            // 用 gnssRawSpeed 判停不受“固定前进速度”覆盖影响。
+            val standstill = mRmcData.gnssRawSpeed < RmcData.STANDSTILL_SPEED_KMH
             // 如果用户设置的参数为-1，则说明需要自动查询施肥量，>=0，手动设置
             val fertAuto = mSPParamData.fertApplied == -1.0 || mSPParamData.fertApplied <= 0.0
-            if (fertAuto && table != null) {
+            if (standstill) {
+                for (i in 0 until n) {
+                    if (!isSystemRunning) break
+                    ConvAndCtrlFun().motorSpeedrpmSend(0.0, i)
+                }
+                fertApplied = DoubleArray(n) { 0.0 }
+                mVariableFertViewModel.fertApplied.postValue(fertApplied)
+            } else if (fertAuto && table != null) {
                 for (i in 0 until n) {
                     val idx = i // 捕获，避免 addDoneListener 闭包错位
                     val queryParameters = QueryParameters().apply {
