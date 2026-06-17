@@ -524,7 +524,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         sharedPreHelper.initSettingsParam()
-        mDB9reCANseCoroutine = DB9reCANseCoroutine()
+        // 仅首次创建，绝不在回到前台时重建：旧实例协程作用域独立于生命周期，重建会泄漏仍在发 CAN
+        // 的旧协程，并使“停止”作用到新空实例上导致电机停不下来。构造不依赖 rowNumber（polyPointExport
+        // 固定 8 路），start1/start1Simulated 每次启动已重建内部 scope，单实例复用安全。
+        if (!::mDB9reCANseCoroutine.isInitialized) {
+            mDB9reCANseCoroutine = DB9reCANseCoroutine()
+        }
         initFittingCoefficient()
         Log.d(
             "Coefficient",

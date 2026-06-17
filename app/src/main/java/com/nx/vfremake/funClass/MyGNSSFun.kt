@@ -42,7 +42,9 @@ class MyGNSSFun {
         // 对于过滤得到的RMC语句进行解析
         rmcLines.forEach { rmcSentence ->
             val parts = rmcSentence.split(",")
-            if (parts.size > 9 && parts[0].endsWith("RMC") && parts[2] == "D" ||  parts.size > 9 && parts[0].endsWith("RMC") && parts[2] == "A") {
+            // 必须 ≥12 段：后面会访问 parts[10](磁偏角)/parts[11](校验和)。原守卫只查 size>9，
+            // 截断/畸形且状态恰为 A/D 的 RMC 会越界抛 IndexOutOfBoundsException 杀死控制协程。
+            if (parts.size >= 12 && parts[0].endsWith("RMC") && (parts[2] == "A" || parts[2] == "D")) {
                 mVariableFertViewModel.gnssIsGood.postValue(false)
                 mRmcData.timeStamp = parts[1]
                 mRmcData.status = parts[2]
@@ -83,9 +85,11 @@ class MyGNSSFun {
         }
 
         // 前进速度滑动窗口平均：每条 RMC 立即更新，解决冷启动延迟与停车延迟
+        // 安全解析：值损坏时回退 5，并保证 ≥1（下方用作环形缓冲区大小与取模，0 会除零崩溃）
         val cntCompare =
-            (MySharedPreFun(context).getSpecificValue(R.string.forwardSpeedAverageNum_name)
-                ?: context.getString(R.string.forwardSpeedAverageNum_defeatValue)).toInt()
+            ((MySharedPreFun(context).getSpecificValue(R.string.forwardSpeedAverageNum_name)
+                ?: context.getString(R.string.forwardSpeedAverageNum_defeatValue))
+                .toIntOrNull() ?: 5).coerceAtLeast(1)
         // 窗口大小与设置不符时重置缓冲区（用户修改了设置）
         if (mRmcData.speedBuffer.size != cntCompare) {
             mRmcData.speedBuffer = DoubleArray(cntCompare) { 0.0 }

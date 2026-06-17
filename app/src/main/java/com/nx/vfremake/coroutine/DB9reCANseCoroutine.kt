@@ -31,7 +31,6 @@ import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
-import kotlin.system.measureTimeMillis
 
 /**
  * 接收RMC解析存储并查询单体施肥量发送控制信息协程
@@ -111,13 +110,13 @@ class DB9reCANseCoroutine {
                             // 检查行是否以RMC开头，若是，则处理
                             if (line.startsWith("\$GPRMC") || line.startsWith("\$GNRMC")) {
                                 Log.d("GNSS", line)
-                                measureTimeMillis(
-                                ) {
-                                    onGNSSMsgReceived(
-                                        line,
-                                        context,
-                                        mVariableFertViewModel
-                                    )
+                                // 兜底：任何单条坏报文/越界等异常都不得杀死控制协程；CancellationException 须放行
+                                try {
+                                    onGNSSMsgReceived(line, context, mVariableFertViewModel)
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (t: Throwable) {
+                                    Log.e("DB9reCANseCoroutine", "onGNSSMsgReceived 异常（已跳过该帧）: ${t.message}", t)
                                 }
                             }
                             sb.delete(0, endOfLineIndex + 1) // 从StringBuilder中删除这行
@@ -227,7 +226,13 @@ class DB9reCANseCoroutine {
                         speedKnots
                     )
                     Log.d("GNSS", line)
-                    onGNSSMsgReceived(line, context, mVariableFertViewModel)
+                    try {
+                        onGNSSMsgReceived(line, context, mVariableFertViewModel)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (t: Throwable) {
+                        Log.e("DB9reCANseCoroutine", "onGNSSMsgReceived 异常（已跳过该帧）: ${t.message}", t)
+                    }
                     delay(interval)
                 }
             } while (loop && isActive)
