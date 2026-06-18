@@ -530,6 +530,9 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
     val sharedPre = MySharedPreFun(context).getMySharedPre()
 
     val writeSaveDataSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.writeSaveData_Switch_name) == "1") }
+    // 保存实验数据的分组开关：施肥数据组默认开（!= "0"），播深数据组默认关
+    val saveGroupFertSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.saveGroupFert_Switch_name) != "0") }
+    val saveGroupDepthSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.saveGroupDepth_Switch_name) == "1") }
     val navMarkCompensatedSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.navMarkCompensated_Switch_name) == "1") }
     val testModeSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1") }
     val simGnssSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.simGnss_Switch_name) == "1") }
@@ -738,7 +741,7 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
 
                     Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
 
-                    AnimatedSettingRow(title = "保存实验数据") {
+                    AnimatedSettingRow(title = "保存实验数据", subtitle = "开启后可在下方选择保存的数据分组") {
                         Switch(
                             checked = writeSaveDataSwitchIsOnState.value,
                             onCheckedChange = { newValue ->
@@ -747,6 +750,45 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                             },
                             colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF4CAF50))
                         )
+                    }
+
+                    AnimatedVisibility(
+                        visible = writeSaveDataSwitchIsOnState.value,
+                        enter = expandVertically(animationSpec = spring(stiffness = Spring.StiffnessLow)),
+                        exit = shrinkVertically(animationSpec = spring(stiffness = Spring.StiffnessLow))
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth().background(Color(0xFFF0FDF4)).padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = "施肥数据", fontSize = 14.sp, color = Color(0xFF333333))
+                                Switch(
+                                    checked = saveGroupFertSwitchIsOnState.value,
+                                    onCheckedChange = { newValue ->
+                                        saveGroupFertSwitchIsOnState.value = newValue
+                                        sharedPre.edit().putString(context.getString(R.string.saveGroupFert_Switch_name), if (newValue) "1" else "0").apply()
+                                    },
+                                    colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF4CAF50))
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = "播深数据", fontSize = 14.sp, color = Color(0xFF333333))
+                                Switch(
+                                    checked = saveGroupDepthSwitchIsOnState.value,
+                                    onCheckedChange = { newValue ->
+                                        saveGroupDepthSwitchIsOnState.value = newValue
+                                        sharedPre.edit().putString(context.getString(R.string.saveGroupDepth_Switch_name), if (newValue) "1" else "0").apply()
+                                    },
+                                    colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF4CAF50))
+                                )
+                            }
+                        }
                     }
 
                     Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))

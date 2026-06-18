@@ -248,6 +248,14 @@ class MySharedPreFun(private val context: Context) {
             context.getString(R.string.writeSaveData_Switch_defeatValue)
         )
         setDefaultValueIfNullOrEmpty(
+            R.string.saveGroupFert_Switch_name,
+            context.getString(R.string.saveGroupFert_Switch_defeatValue)
+        )
+        setDefaultValueIfNullOrEmpty(
+            R.string.saveGroupDepth_Switch_name,
+            context.getString(R.string.saveGroupDepth_Switch_defeatValue)
+        )
+        setDefaultValueIfNullOrEmpty(
             R.string.testMode_Switch_name,
             context.getString(R.string.testMode_Switch_defeatValue)
         )
