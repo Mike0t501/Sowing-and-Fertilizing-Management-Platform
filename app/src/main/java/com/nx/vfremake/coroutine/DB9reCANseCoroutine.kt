@@ -27,6 +27,7 @@ import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -41,8 +42,11 @@ class DB9reCANseCoroutine {
     // 固定按最大行数 8 分配，避免运行中机型行数增大时下标越界（rowNumber 上限为 8）
     private val polyPointExport = Array(8) { arrayOfNulls<Point>(4) }
 
-    // 绘制抽稀锚点（投影坐标，米）：上次落笔位置，按行进距离节流绘制，避免多边形随 RMC 频率无界累积
-    private var lastDrawAnchorXY: Point? = null
+    // 每单体已落笔网格集合：键为按 ~DRAW_GRID_M 米量化的网格 id（经纬度空间哈希）。
+    // 某单体只在首次进入某网格时落笔，重复压线/来回作业不再叠加多边形——把绘制量级从
+    // 「随里程/时间线性、无上限」收敛到「= 实际驶过的网格数」，与车速、作业时长、重叠压线全部无关，
+    // 彻底消除长时间作业越画越多最终 OOM/ANR 的隐患。固定按最大行数 8 分配，防越界。
+    private val drawnCells = Array(8) { HashSet<Long>() }
 
     // 绘制图形需要持续调用函数，这个得放函数外面，才可以持续 add(Graphic)
     private val navMarkGraphicsOverlay = GraphicsOverlay() // 该图层只用于navMark，因为每次更新需要清除图层，便于管理
@@ -60,14 +64,31 @@ class DB9reCANseCoroutine {
     var isRunning = false
 
     companion object {
-        // 绘制抽稀最小行进距离（米）：处方图渔网 2.4×4m，~1.5m 落笔已足够细腻，且让多边形数量只与
-        // 作业里程相关、与 RMC 频率无关，数量级降低累积，配合 STATIC 渲染消除约 10 分钟卡死问题。
-        private const val MIN_DRAW_DISTANCE_M = 1.5
+        // 绘制去重网格边长（米）：处方图渔网 2.4×4m，2m 量化既够细腻又与之相称。落笔按此网格去重，
+        // 使已施肥多边形数量只与「实际驶过的网格数」相关，与 RMC 频率、车速、作业时长、重叠压线均无关，
+        // 配合 STATIC 渲染从根本上消除长时间作业多边形无界累积导致的卡死/崩溃问题。
+        private const val DRAW_GRID_M = 2.0
+
+        // 纬度 1° 对应的米数（用于经纬度→米的网格量化）
+        private const val METERS_PER_DEG_LAT = 111320.0
+
+        // 由一条绘制带的两端点（WGS84 经纬度）算出其中点所在网格的唯一键。
+        // 纬向按定值换算，经向乘 cos(lat) 修正；gx/gy 各取 32 位打包成 Long。
+        private fun cellKeyOf(p0: Point, p1: Point): Long {
+            val midLon = (p0.x + p1.x) / 2.0
+            val midLat = (p0.y + p1.y) / 2.0
+            val gy = floor(midLat * METERS_PER_DEG_LAT / DRAW_GRID_M).toLong()
+            val gx = floor(
+                midLon * METERS_PER_DEG_LAT * cos(Math.toRadians(midLat)) / DRAW_GRID_M
+            ).toLong()
+            return (gx shl 32) xor (gy and 0xffffffffL)
+        }
     }
 
     fun shutdown() {
         scope.cancel() // 取消整个作用域，包括任何卡在 read() 里的 job
         jobs.clear()
+        drawnCells.forEach { it.clear() } // 释放去重集，下次作业从空覆盖开始
         isRunning = false
     }
 
@@ -81,8 +102,8 @@ class DB9reCANseCoroutine {
         // 重置速度滑动窗口，避免上次运行的残留速度值影响本次冷启动
         mRmcData.speedBufCount = 0
         mRmcData.speedBufHead = 0
-        // 重置绘制抽稀锚点，新作业从当前位置重新开始落笔
-        lastDrawAnchorXY = null
+        // 清空绘制去重集，新作业从空覆盖重新开始落笔
+        drawnCells.forEach { it.clear() }
 
         // 在协程作用域内启动协程
         jobs.add(scope.launch {
@@ -153,7 +174,7 @@ class DB9reCANseCoroutine {
         scope = CoroutineScope(Dispatchers.Default)
         mRmcData.speedBufCount = 0
         mRmcData.speedBufHead = 0
-        lastDrawAnchorXY = null
+        drawnCells.forEach { it.clear() }
 
         // 十进制度 → RMC 的「度分」格式（纬度2位度 / 经度3位度），沿用旧实现
         fun decimalToRMCFormat(coordinate: Double, isLatitude: Boolean): String {
@@ -322,17 +343,23 @@ class DB9reCANseCoroutine {
         // 下一次绘制自然从"上次末端 → 新位置"桥接续上，无空洞；同时避免停车时图层无限累积退化四边形。
         // 控制逻辑（dantiPositionAndCtrl 的施肥/控深下发）已在前面照常运行，这里只门控绘制。
         val fertApplied = mVariableFertViewModel.fertApplied.value
-        // 绘制抽稀：按行进距离节流（移动 >= MIN_DRAW_DISTANCE_M 才落笔）。原绘制频率与 RMC 频率挂钩，
-        // 高频/慢速时同一处堆叠上万个多边形，约 10 分钟拖垮地图渲染导致卡死。按距离落笔后多边形数量
-        // 只与里程相关；polyPointExport 仍从上次末端桥接，跳过的帧不会留空洞。
-        val movedEnoughToDraw = lastDrawAnchorXY?.let { last ->
-            val dx = wgsCompensatedPoint.x - last.x
-            val dy = wgsCompensatedPoint.y - last.y
-            sqrt(dx * dx + dy * dy) >= MIN_DRAW_DISTANCE_M
-        } ?: true
-        if (mRmcData.gnssRawSpeed >= RmcData.STANDSTILL_SPEED_KMH && movedEnoughToDraw) {
+        // 绘制去重：每单体只在首次进入某网格（~DRAW_GRID_M 米）时落笔。原绘制频率与 RMC 频率挂钩，
+        // 高频/慢速时同一处堆叠上万个多边形，约 10 分钟拖垮地图渲染导致卡死；即便按里程抽稀，反复压线/
+        // 来回作业仍会随面积无界累积。改为按网格去重后，多边形数量上界 = 实际驶过的网格数，与车速、
+        // 作业时长、重叠压线全部无关，从根本上消除长时间作业崩溃隐患。
+        if (mRmcData.gnssRawSpeed >= RmcData.STANDSTILL_SPEED_KMH) {
             for (i in 0 until mSPParamData.rowNumber) {
                 if (!(mSPParamData.activeMotors.getOrNull(i) ?: true)) continue // 关闭的单体不绘制
+                val p0 = pointi[1][i]
+                val p1 = pointi[1][i + 1]
+                // 该单体本帧绘制带的网格键；已画过则跳过，但仍把 polyPointExport 起点推进到当前条末端，
+                // 避免下一次落笔从旧覆盖区跨越式拉出一条长四边形。
+                val key = cellKeyOf(p0, p1)
+                if (!drawnCells[i].add(key)) {
+                    polyPointExport[i][0] = p0
+                    polyPointExport[i][1] = p1
+                    continue
+                }
                 val exportMsg = doubleArrayOf(
                     mVariableFertViewModel.fertApplied.value?.get(i) ?: 0.0,
                     mVariableFertViewModel.confertflow.value?.get(i) ?: 0.0,
@@ -341,15 +368,13 @@ class DB9reCANseCoroutine {
                 )
                 MyArcGisFun().drawPolyExport(
                     polyPoint = polyPointExport[i],
-                    point = arrayOf(pointi[1][i], pointi[1][i + 1]),
+                    point = arrayOf(p0, p1),
                     exportMsg = exportMsg,
                     fertGraphicsOverlay = fertGraphicsOverlayExport,
                     mVariableFertViewModel = mVariableFertViewModel,
                     context = context
                 )
             }
-            // 本帧已落笔：更新抽稀锚点为当前补偿位置
-            lastDrawAnchorXY = wgsCompensatedPoint
         }
         mVariableFertViewModel.fertAppliedLast.postValue(fertApplied)
     }
