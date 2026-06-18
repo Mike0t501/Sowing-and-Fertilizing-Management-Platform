@@ -44,6 +44,11 @@
     <string name="writeSaveData_Switch_name">writeSaveSwitch</string>
     <!--    Switch 0 关-->
     <string name="writeSaveData_Switch_defeatValue">0</string>
+    <!--    保存实验数据分组开关：施肥数据组默认开，播深数据组默认关-->
+    <string name="saveGroupFert_Switch_name">saveGroupFertSwitch</string>
+    <string name="saveGroupFert_Switch_defeatValue">1</string>
+    <string name="saveGroupDepth_Switch_name">saveGroupDepthSwitch</string>
+    <string name="saveGroupDepth_Switch_defeatValue">0</string>
     <string name="navMarkCompensated_Switch_name">navMarkCompensatedSwitch</string>
     <string name="navMarkCompensated_Switch_defeatValue">1</string>
     <string name="testMode_Switch_name">testModeSwitch</string>

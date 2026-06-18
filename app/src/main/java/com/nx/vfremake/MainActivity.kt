@@ -259,9 +259,16 @@ class MainActivity : AppCompatActivity() {
                                         R.string.myWriteDir_DocumentUri_name, selectWriteDirectoryLauncher, context
                                     )
                                     if (MySharedPreFun(context).getSpecificValue(R.string.writeSaveData_Switch_name) == "1") {
-                                        myWriteSaveFun.start(context = context, getData = {
-                                            myWriteSaveFun.getMySaveData(mSPParamData.rowNumber, mVariableFertViewModel)
-                                        })
+                                        val spf = MySharedPreFun(context)
+                                        val includeFert = spf.getSpecificValue(R.string.saveGroupFert_Switch_name) != "0"   // 默认开
+                                        val includeDepth = spf.getSpecificValue(R.string.saveGroupDepth_Switch_name) == "1"
+                                        myWriteSaveFun.start(
+                                            context = context,
+                                            header = myWriteSaveFun.buildSaveHeader(includeFert, includeDepth),
+                                            getData = {
+                                                myWriteSaveFun.getMySaveData(mSPParamData.rowNumber, mVariableFertViewModel, includeFert, includeDepth)
+                                            }
+                                        )
                                     }
                                 }
 
