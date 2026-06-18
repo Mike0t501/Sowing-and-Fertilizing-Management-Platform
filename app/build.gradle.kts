@@ -14,7 +14,7 @@ android {
         minSdk = 29
         targetSdk = 34
         versionCode = 2
-        versionName = "3.0.0"
+        versionName = "3.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -22,16 +22,6 @@ android {
             abiFilters.addAll(arrayOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64"))
         }
 
-        kotlinOptions {
-            jvmTarget = "1.8"
-        }
-        buildFeatures {
-            buildConfig = true
-            compose = true
-        }
-        composeOptions {
-            kotlinCompilerExtensionVersion = "1.5.3"
-        }
         buildConfigField(
             "String",
             "API_KEY",
@@ -63,7 +53,12 @@ android {
     }
 
     buildFeatures {
+        buildConfig = true
+        compose = true
         viewBinding = true
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.3"
     }
     packaging {
         resources.excludes.add("META-INF/DEPENDENCIES")
