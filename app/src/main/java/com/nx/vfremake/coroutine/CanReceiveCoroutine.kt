@@ -1,19 +1,19 @@
 package com.nx.vfremake.coroutine
 
-import android.content.Context
 import android.util.Log
-import com.nx.vfremake.R
+import com.nx.vfremake.FERT_NODE_COUNT
+import com.nx.vfremake.FERT_NODE_START_INDEX
+import com.nx.vfremake.SEED_NODE_COUNT
+import com.nx.vfremake.SEED_NODE_START_INDEX
+import com.nx.vfremake.TOTAL_NODE_COUNT
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.canMonitorData
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
-import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.ConvAndCtrlFun
-import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.mRmcData
-import com.nx.vfremake.canMonitorData
 import com.nx.vfremake.mSPParamData
 import com.nx.vfremake.mSerialPortCAN
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,27 +22,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.InputStream
 import java.io.IOException
-import kotlin.random.Random
 
 class CanReceiveCoroutine {
-
     var isRunning = false
     private var scope = CoroutineScope(Dispatchers.Default)
     private val jobs = HashSet<Job>()
-
-    /**
-     * 伺服电机最后收到帧的时间戳（ms），索引 = motorIndex 0~7。
-     * 由接收 job 写、由离线看门狗 job 读，LongArray 本身是 JVM 原始类型，单元素访问是原子的。
-     */
-    private val servoLastSeen = LongArray(8) { 0L }
-
-    companion object {
-        private const val TAG = "CanReceiveCoroutine"
-        /** 超过此时间未收到任何帧即标记离线（ms） */
-        private const val SERVO_OFFLINE_TIMEOUT_MS = 2000L
-    }
 
     fun shutdown() {
         isRunning = false
@@ -50,488 +35,296 @@ class CanReceiveCoroutine {
         jobs.clear()
     }
 
-    fun start(mVariableFertViewModel: VariableFertViewModel, context: Context? = null) {
+    fun start(mVariableFertViewModel: VariableFertViewModel) {
         scope = CoroutineScope(Dispatchers.Default)
 
-        val isTestMode = context != null &&
-            MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1"
+        val confertflow = DoubleArray(FERT_NODE_COUNT)
+        val monfertAdcv = DoubleArray(FERT_NODE_COUNT)
+        val monAdcV = DoubleArray(FERT_NODE_COUNT)
+        val motorSpeed = DoubleArray(TOTAL_NODE_COUNT)
+        val fertMotorSpeed = DoubleArray(FERT_NODE_COUNT)
+        val seedMotorSpeed = DoubleArray(SEED_NODE_COUNT)
+        val seedSensorCount = IntArray(SEED_NODE_COUNT)
+        val seedRawLast = IntArray(SEED_NODE_COUNT) { -1 }
+        val motorCurrent = DoubleArray(TOTAL_NODE_COUNT)
+        val motorVoltage = DoubleArray(TOTAL_NODE_COUNT)
+        val motorElectricalValid = BooleanArray(TOTAL_NODE_COUNT)
 
-        if (isTestMode) {
-            for (i in 0 until 8) {
-                mVariableFertViewModel.updateServoCalibration(i) { cal ->
-                    if (!cal.isOnline) cal.copy(isOnline = true) else cal
-                }
-            }
-            Log.i(TAG, "测试模式：已将全部8路伺服电机设为在线")
-        }
-
-        val confertflow = DoubleArray(mSPParamData.rowNumber)
-        val monfertAdcv = DoubleArray(mSPParamData.rowNumber)
-        val monAdcV = DoubleArray(mSPParamData.rowNumber)
-        val motorSpeed = DoubleArray(mSPParamData.rowNumber)
-
-        // ── Job 1: CAN 接收主循环 ──────────────────────────────────────────
-        // CSM100T 接收帧格式（与发送帧完全相同）：
-        //   [0x27][len][0x00(frameInfo)][canId_hi][canId_lo][data 0..len-4][0x39]
-        //   frameSize = len + 3
-        // 施肥电机回复帧：len=7  → frameSize=10，data=4B
-        // CANopen SDO回复：len=11 → frameSize=14，data=8B
-        // CANopen TPDO1 ：len=9  → frameSize=12，data=6B
-        // CANopen 心跳  ：len=4  → frameSize=7，data=1B
         jobs.add(scope.launch {
+            val inputStreamCAN = mSerialPortCAN?.inputStream
             var buffer = mutableListOf<Byte>()
-            val tempBuffer = ByteArray(64)
-            // 上一轮使用的输入流引用：端口被重开后（新 SerialPort → 新 fd → 新流）会变化，
-            // 据此切换到新流并丢弃跨流残字节，实现端口关闭/重开后的自愈接收。
-            var lastStream: InputStream? = null
 
-            while (isActive) {
-                // ── 每轮重新获取串口流（不再一次性缓存）：端口被关后读到的流失效，
-                //    重开后这里能立即拿到新流恢复接收 ──────────────────────────
-                val stream = mSerialPortCAN?.inputStream
-                if (stream == null) {
-                    delay(20)
-                    continue
-                }
-                // 流身份变化（端口重开）→ 清空缓冲，避免旧流残字节与新流数据拼接造成帧错位
-                if (stream !== lastStream) {
-                    buffer.clear()
-                    lastStream = stream
-                }
-
-                try {
-                    if (withContext(Dispatchers.IO) { stream.available() } == 0) {
+            try {
+                val tempBuffer = ByteArray(64)
+                var dataSize: Int
+                while (isActive) {
+                    if (inputStreamCAN == null || withContext(Dispatchers.IO) { inputStreamCAN.available() } == 0) {
                         delay(10)
                         continue
                     }
+                    try {
+                        dataSize = withContext(Dispatchers.IO) { inputStreamCAN.read(tempBuffer) }
+                        buffer.addAll(tempBuffer.copyOfRange(0, dataSize).toTypedArray())
 
-                    val dataSize = withContext(Dispatchers.IO) { stream.read(tempBuffer) }
-                    // read() 返回 -1(EOF) 或 0：绝不能 copyOfRange(0,-1)（会抛 IllegalArgumentException
-                    // 杀死接收协程），跳过本轮，下一轮重新获取流。
-                    if (dataSize <= 0) {
-                        delay(10)
-                        continue
-                    }
-                    buffer.addAll(tempBuffer.copyOfRange(0, dataSize).toTypedArray())
+                        while (buffer.isNotEmpty()) {
+                            val start = buffer.indexOfFirst { it == 0x27.toByte() }
+                            if (start < 0) {
+                                buffer.clear()
+                                break
+                            }
+                            if (start > 0) buffer = buffer.drop(start).toMutableList()
+                            if (buffer.size < 2) break
 
-                    // ── 变长帧解析循环 ──────────────────────────────
-                    while (buffer.size >= 3) {
-                        // 1. 同步：跳过非起始字节
-                        if (buffer[0] != 0x27.toByte()) {
-                            buffer.removeAt(0)
-                            continue
-                        }
-                        // 2. 读取载荷长度（len = frameInfo_1B + canId_2B + data_NB）
-                        val len = buffer[1].toInt() and 0xFF
-                        val frameSize = len + 3   // start(1) + len_byte(1) + payload(len) + end(1)
-                        // 3. 等待完整帧
-                        if (buffer.size < frameSize) break
-                        // 4. 验证结束字节
-                        if (buffer[frameSize - 1] != 0x39.toByte()) {
-                            buffer.removeAt(0)
-                            continue
-                        }
-                        // 5. 提取完整帧，丢弃已消费字节
-                        val frame = buffer.take(frameSize).toByteArray()
-                        buffer = buffer.drop(frameSize).toMutableList()
+                            val isExtended = (buffer[1].toInt() and 0xFF) == 0x0B
+                            val frameSize = if (isExtended) 14 else 10
+                            if (buffer.size < frameSize) break
+                            if (buffer[frameSize - 1] != 0x39.toByte()) {
+                                buffer.removeAt(0)
+                                continue
+                            }
 
-                        // 6. 最少需要 frameInfo(1) + canId(2) = 3 字节载荷
-                        // 接收帧格式（与发送帧相同）：
-                        //   [0x27][len][0x00(frameInfo)][canId_hi][canId_lo][data...][0x39]
-                        if (len >= 3) {
-                            // 单帧解析异常隔离：解析出错不应杀死整个接收循环；
-                            // 协程取消（CancellationException）必须原样抛出，否则会吞掉取消。
-                            try {
-                                dispatchFrame(
-                                    frame, len,
-                                    confertflow, monfertAdcv, monAdcV, motorSpeed,
-                                    mVariableFertViewModel
+                            val message = buffer.take(frameSize).toByteArray()
+                            buffer = buffer.drop(frameSize).toMutableList()
+                            if (isExtended) {
+                                onWrappedCanMessageReceived(
+                                    message.sliceArray(5..12),
+                                    confertflow,
+                                    monfertAdcv,
+                                    monAdcV,
+                                    motorSpeed,
+                                    fertMotorSpeed,
+                                    seedMotorSpeed,
+                                    seedSensorCount,
+                                    seedRawLast,
+                                    motorCurrent,
+                                    motorVoltage,
+                                    motorElectricalValid
                                 )
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Throwable) {
-                                Log.e(TAG, "dispatchFrame 解析异常（已跳过该帧）: ${e.message}", e)
+                            } else {
+                                onLegacyCanMessageReceived(
+                                    message,
+                                    confertflow,
+                                    monfertAdcv,
+                                    monAdcV,
+                                    motorSpeed,
+                                    fertMotorSpeed,
+                                    seedMotorSpeed,
+                                    seedSensorCount,
+                                    seedRawLast
+                                )
                             }
-                            // 任意 CAN 帧均更新接收时间戳，供施肥看门狗判断总线在线
                             mVariableFertViewModel.canEverReceived = true
-                            mVariableFertViewModel.canLastReceiveTime
-                                .postValue(System.currentTimeMillis())
+                            mVariableFertViewModel.canLastReceiveTime.postValue(System.currentTimeMillis())
                         }
-                    }
-                    // ── 变长帧解析循环结束 ──────────────────────────
 
-                    // 更新施肥电机数据到 ViewModel（与原逻辑完全一致）
-                    val mon = monfertAdcv.copyOf()
-                    val con = confertflow.copyOf()
-                    mVariableFertViewModel.monfertflow.postValue(mon)
-                    mVariableFertViewModel.confertflow.postValue(con)
-                    mVariableFertViewModel.monAdcV.postValue(monAdcV)
-                    mVariableFertViewModel.motorSpeed.postValue(motorSpeed)
+                        mVariableFertViewModel.monfertflow.postValue(monfertAdcv.copyOf())
+                        mVariableFertViewModel.confertflow.postValue(confertflow.copyOf())
+                        mVariableFertViewModel.monAdcV.postValue(monAdcV.copyOf())
+                        mVariableFertViewModel.motorSpeed.postValue(motorSpeed.copyOf())
+                        mVariableFertViewModel.fertMotorSpeed.postValue(fertMotorSpeed.copyOf())
+                        mVariableFertViewModel.seedMotorSpeed.postValue(seedMotorSpeed.copyOf())
+                        mVariableFertViewModel.seedSensorCount.postValue(seedSensorCount.copyOf())
+                        mVariableFertViewModel.motorCurrent.postValue(motorCurrent.copyOf())
+                        mVariableFertViewModel.motorVoltage.postValue(motorVoltage.copyOf())
+                        mVariableFertViewModel.motorElectricalValid.postValue(motorElectricalValid.copyOf())
 
-                    val applied = mVariableFertViewModel.fertApplied.value
-                        ?: DoubleArray(mSPParamData.rowNumber) { 0.0 }
-                    mVariableFertViewModel.updateFertData(con, applied)
-
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: IOException) {
-                    // 端口被关/重开导致读写失败：清空缓冲、短暂等待，下一轮用新流恢复（不退出循环）
-                    Log.w(TAG, "接收 IOException（将重试，端口可能已重开）: ${e.message}")
-                    buffer.clear()
-                    lastStream = null
-                    delay(50)
-                } catch (e: Throwable) {
-                    // 兜底：任何未预期异常都不致死接收循环
-                    Log.e(TAG, "接收循环未预期异常（将重试）: ${e.message}", e)
-                    delay(50)
-                }
-            }
-        })
-
-        // ── Job 2: 伺服电机离线看门狗（每秒检查一次） ─────────────────────
-        // 测试模式：强制所有电机保持在线，禁止置离线。
-        // 正常模式：超过 SERVO_OFFLINE_TIMEOUT_MS 未收到任何帧则标记 isOnline=false。
-        jobs.add(scope.launch {
-            while (isActive) {
-                delay(1000)
-                if (isTestMode) {
-                    for (i in 0 until 8) {
-                        mVariableFertViewModel.updateServoCalibration(i) { cal ->
-                            if (!cal.isOnline) cal.copy(isOnline = true) else cal
-                        }
-                    }
-                } else {
-                    val now = System.currentTimeMillis()
-                    for (i in 0 until 8) {
-                        if (servoLastSeen[i] > 0 &&
-                            now - servoLastSeen[i] > SERVO_OFFLINE_TIMEOUT_MS
-                        ) {
-                            mVariableFertViewModel.updateServoCalibration(i) { cal ->
-                                if (cal.isOnline) cal.copy(isOnline = false) else cal
-                            }
-                            Log.w(TAG, "伺服电机 motor=$i 离线（超过${SERVO_OFFLINE_TIMEOUT_MS}ms未收到帧）")
-                        }
+                        val applied = mVariableFertViewModel.fertApplied.value ?: DoubleArray(FERT_NODE_COUNT) { 0.0 }
+                        mVariableFertViewModel.updateFertData(confertflow.copyOf(), applied)
+                    } catch (e: IOException) {
+                        Log.e("CanReceiveCoroutine", "IOException: ${e.message}")
                     }
                 }
+            } catch (e: IOException) {
+                e.printStackTrace()
             }
         })
-
         isRunning = true
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // 帧路由：根据 CAN-ID 区分施肥电机 / CANopen 伺服
-    // ─────────────────────────────────────────────────────────────────────
+    private fun updateFertilizerFromSpeed(
+        nodeIndex: Int,
+        speedRpm: Double,
+        confertflow: DoubleArray,
+        fertMotorSpeed: DoubleArray
+    ) {
+        val fertIndex = nodeIndex - FERT_NODE_START_INDEX
+        if (fertIndex !in 0 until FERT_NODE_COUNT) return
+        confertflow[fertIndex] = if (speedRpm >= 1.0) {
+            ConvAndCtrlFun().motorSpeedToFert(
+                speedRpm,
+                mRmcData.forwardSpeedCalculate,
+                mSPParamData.rowSize,
+                fittingCoefficientA[fertIndex],
+                fittingCoefficientB[fertIndex]
+            )
+        } else {
+            0.0
+        }
+        fertMotorSpeed[fertIndex] = speedRpm
+    }
 
-    /**
-     * 根据 CAN-ID 将完整帧路由到对应处理函数。
-     *
-     * CANopen 伺服 CAN-ID 范围（Node-ID 1~127）：
-     *   SDO 回复 : 0x581~0x5FF  (0x580 + Node-ID)
-     *   TPDO1   : 0x181~0x1FF  (0x180 + Node-ID)
-     *   心跳    : 0x701~0x77F  (0x700 + Node-ID)
-     *
-     * 若 CAN-ID 落在上述范围且 Node-ID 与 ViewModel 中已配置的深度舵机匹配，
-     * 则路由到 CANopen 处理器；否则回退到施肥电机原处理逻辑。
-     */
-    private fun dispatchFrame(
-        frame: ByteArray,
-        len: Int,
+    private fun onWrappedCanMessageReceived(
+        data: ByteArray,
         confertflow: DoubleArray,
         monfertAdcv: DoubleArray,
         monAdcV: DoubleArray,
         motorSpeed: DoubleArray,
-        viewModel: VariableFertViewModel
+        fertMotorSpeed: DoubleArray,
+        seedMotorSpeed: DoubleArray,
+        seedSensorCount: IntArray,
+        seedRawLast: IntArray,
+        motorCurrent: DoubleArray,
+        motorVoltage: DoubleArray,
+        motorElectricalValid: BooleanArray
     ) {
-        // 接收帧格式（与发送帧相同）：[0x27][len][0x00(frameInfo)][canId_hi][canId_lo][data...][0x39]
-        // frame[2]=frameInfo(0x00), frame[3]=canId_hi, frame[4]=canId_lo, frame[5+]=data
-        val canId = ((frame[3].toInt() and 0xFF) shl 8) or (frame[4].toInt() and 0xFF)
-        // data 段：跳过 frameInfo(1) + canId(2) = 3字节，共 len-3 个数据字节
-        val data = if (len > 3) frame.copyOfRange(5, 2 + len) else byteArrayOf()
+        if (data.size != 8) return
+        val d = IntArray(8) { data[it].toInt() and 0xFF }
 
-        // 识别是否为 CANopen 服务帧，并提取 Node-ID
-        // 用 when 表达式 + 解构赋值，避免 val 延迟赋值的编译器解析问题
-        // canOpenType: 0=SDO回复, 1=TPDO1, 2=心跳, -1=非CANopen
-        val (canOpenNodeId, canOpenType) = when {
-            canId in 0x581..0x5FF -> (canId - 0x580) to 0   // SDO 回复
-            canId in 0x181..0x1FF -> (canId - 0x180) to 1   // TPDO1
-            canId in 0x701..0x77F -> (canId - 0x700) to 2   // 心跳
-            canId in 0x281..0x2FF -> (canId - 0x280) to 3   // TPDO2（暂不解析，防止跌落施肥逻辑）
-            canId in 0x381..0x3FF -> (canId - 0x380) to 4   // TPDO3（暂不解析，防止跌落施肥逻辑）
-            else -> -1 to -1
-        }
-
-        if (canOpenType >= 0) {
-            // 在已配置的深度舵机列表中查找对应 motorIndex
-            val motorIndex = viewModel.sowingDepthState.value
-                ?.motors?.indexOfFirst { it.nodeId == canOpenNodeId } ?: -1
-
-            if (motorIndex >= 0) {
-                when (canOpenType) {
-                    0 -> onCanOpenSdoResponse(canOpenNodeId, motorIndex, data, viewModel)
-                    1 -> onCanOpenTpdo1(canOpenNodeId, motorIndex, data, viewModel)
-                    2 -> onCanOpenHeartbeat(canOpenNodeId, motorIndex, data.firstOrNull() ?: 0.toByte(), viewModel)
-                }
-                return  // 已处理，不再走施肥逻辑
-            }
-            // Node-ID 不在已配置舵机列表中 → 跌落到施肥处理（容错）
-        }
-
-        // ── 施肥电机原处理逻辑（完全未改动）────────────────────────────
-        onSlaveCanMessageReceived(frame, confertflow, monfertAdcv, monAdcV, motorSpeed, viewModel)
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // CANopen 帧处理器
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * 处理 SDO 读取/写入回复帧（CAN-ID = 0x580 + Node-ID）。
-     *
-     * SDO 数据段（8字节）格式：CS, index_lo, index_hi, subIndex, data0~data3
-     * 识别的回复类型：
-     *   CS=0x43, index=0x6064 → 实际位置读回复（有符号32位）
-     *   CS=0x4B, index=0x6041 → 状态字读回复（16位）
-     *   CS=0x60               → 写入成功应答
-     *   CS=0x80               → SDO 错误
-     *
-     * @param nodeId     发送回复的电机 CAN Node-ID
-     * @param motorIndex 对应 ViewModel 中的电机下标（0~7）
-     * @param sdoData    8 字节 SDO 数据段
-     */
-    private fun onCanOpenSdoResponse(
-        nodeId: Int,
-        motorIndex: Int,
-        sdoData: ByteArray,
-        viewModel: VariableFertViewModel
-    ) {
-        if (sdoData.size < 8) {
-            Log.w(TAG, "SDO回复数据不足8字节: nodeId=$nodeId size=${sdoData.size}")
-            return
-        }
-        val cs    = sdoData[0].toInt() and 0xFF
-        val index = (sdoData[1].toInt() and 0xFF) or ((sdoData[2].toInt() and 0xFF) shl 8)
-
-        when {
-            // ── 实际位置读回复（0x6064，有符号32位）─────────────────────
-            cs == 0x43 && index == 0x6064 -> {
-                val pos = CanOpenFun.parseSdoResponseSigned32(sdoData) ?: return
-                // 请求-应答存活模型：任何 SDO 回包都说明节点在总线上应答 → 刷新存活时间戳并置在线，
-                // 使在线判定独立于 TPDO/心跳配置，避免静止电机被 2s 看门狗误判离线后锁死。
-                servoLastSeen[motorIndex] = System.currentTimeMillis()
-                viewModel.updateServoCalibration(motorIndex) { cal ->
-                    val depth = if (cal.fitValid) cal.fitA * pos + cal.fitB else cal.currentDepth
-                    cal.copy(
-                        currentPosition = pos,
-                        currentDepth    = depth,
-                        isOnline        = true,
-                        lastHeardMs     = servoLastSeen[motorIndex]
-                    )
-                }
-                viewModel.appendCanOpenLog("SDO位置 M${motorIndex+1}(N$nodeId) pos=$pos")
-        Log.d(TAG, "SDO位置回复: motor=$motorIndex nodeId=$nodeId pos=$pos")
-            }
-
-            // ── 状态字读回复（0x6041，16位）─────────────────────────────
-            cs == 0x4B && index == 0x6041 -> {
-                val sw    = (CanOpenFun.parseSdoResponse(sdoData) ?: return).toInt()
-                val flags = CanOpenFun.parseStatusWord(sw)
-                val alarm = when {
-                    flags.positiveLimitReached -> 1
-                    flags.negativeLimitReached -> 2
-                    else -> 0
-                }
-                servoLastSeen[motorIndex] = System.currentTimeMillis()
-                viewModel.updateServoCalibration(motorIndex) { cal ->
-                    cal.copy(alarmCode = alarm, isOnline = true, lastHeardMs = servoLastSeen[motorIndex])
-                }
-                viewModel.appendCanOpenLog("SDO状态 M${motorIndex+1}(N$nodeId) sw=0x${sw.toString(16)} alarm=$alarm targetReached=${flags.targetReached}")
-                Log.d(TAG, "SDO状态字回复: motor=$motorIndex sw=0x${sw.toString(16)}" +
-                           " targetReached=${flags.targetReached} alarm=$alarm")
-            }
-
-            // ── 写入成功应答（节点已应答 → 视为存活，刷新时间戳）───────────
-            cs == 0x60 -> {
-                val subIdx = sdoData[3].toInt() and 0xFF
-                servoLastSeen[motorIndex] = System.currentTimeMillis()
-                viewModel.updateServoCalibration(motorIndex) { cal ->
-                    cal.copy(isOnline = true, lastHeardMs = servoLastSeen[motorIndex])
-                }
-                viewModel.appendCanOpenLog("SDO写ACK M${motorIndex+1}(N$nodeId) idx=0x${index.toString(16).uppercase()} sub=$subIdx")
-                Log.d(TAG, "SDO写成功: motor=$motorIndex nodeId=$nodeId" +
-                           " index=0x${index.toString(16).uppercase()} sub=$subIdx")
-            }
-
-            // ── SDO 错误应答（CanOpenFun 内部已打印详细错误码）──────────
-            cs == 0x80 -> {
-                CanOpenFun.parseSdoResponse(sdoData)   // 触发内部错误日志
-                viewModel.updateServoCalibration(motorIndex) { cal ->
-                    if (cal.alarmCode != -1) cal.copy(alarmCode = -1) else cal
-                }
-                viewModel.appendCanOpenLog("SDO错误 M${motorIndex+1}(N$nodeId) idx=0x${index.toString(16)}")
-                Log.e(TAG, "SDO错误应答: motor=$motorIndex nodeId=$nodeId index=0x${index.toString(16)}")
-            }
-
-            else -> {
-                Log.w(TAG, "未知SDO CS=0x${cs.toString(16)}: motor=$motorIndex index=0x${index.toString(16)}")
-            }
-        }
-    }
-
-    /**
-     * 处理 TPDO1 帧（CAN-ID = 0x180 + Node-ID，电机每 100ms 主动上报）。
-     *
-     * TPDO1 数据格式（6字节）：[实际位置 4B 小端有符号] [状态字 2B 小端]
-     * 更新：currentPosition、currentDepth（由拟合系数换算）、isOnline、alarmCode。
-     *
-     * @param nodeId     发送 TPDO1 的电机 CAN Node-ID
-     * @param motorIndex 对应 ViewModel 中的电机下标（0~7）
-     * @param data       6 字节 TPDO1 数据段
-     */
-    private fun onCanOpenTpdo1(
-        nodeId: Int,
-        motorIndex: Int,
-        data: ByteArray,
-        viewModel: VariableFertViewModel
-    ) {
-        val tpdo = CanOpenFun.parseTpdo1(0x180 + nodeId, data) ?: run {
-            Log.w(TAG, "TPDO1解析失败: nodeId=$nodeId dataLen=${data.size}")
+        if (d[0] == 0xA8) {
+            val nodeIndex = d[1] - 1
+            if (nodeIndex !in FERT_NODE_START_INDEX until SEED_NODE_START_INDEX) return
+            val fertIndex = nodeIndex - FERT_NODE_START_INDEX
+            val rawAdc = d[2] or (d[3] shl 8)
+            val voltage = (d[4] or (d[5] shl 8)) / 1000.0
+            val valid = (d[7] and 0x01) != 0
+            monAdcV[fertIndex] = if (valid) voltage else 0.0
+            monfertAdcv[fertIndex] = if (valid) voltage else 0.0
+            canMonitorData[nodeIndex] =
+                "fertSensor raw=%d voltage=%.3fV level=%d%% valid=%s".format(
+                    rawAdc, voltage, d[6], valid
+                )
             return
         }
 
-        // 更新最后收到时间（供离线看门狗使用）
-        servoLastSeen[motorIndex] = System.currentTimeMillis()
-
-        val flags = CanOpenFun.parseStatusWord(tpdo.statusWord)
-        val alarm = when {
-            flags.positiveLimitReached -> 1
-            flags.negativeLimitReached -> 2
-            else -> 0
+        if (d[0] == 0xA9) {
+            val nodeIndex = d[1] - 1
+            if (nodeIndex !in SEED_NODE_START_INDEX until TOTAL_NODE_COUNT) return
+            val seedIndex = nodeIndex - SEED_NODE_START_INDEX
+            val rawCount = d[2] or (d[3] shl 8)
+            val last = seedRawLast[seedIndex]
+            if (last >= 0) {
+                val delta = if (rawCount >= last) rawCount - last else rawCount + 65536 - last
+                if (delta in 1..999) seedSensorCount[seedIndex] += delta
+            }
+            seedRawLast[seedIndex] = rawCount
+            canMonitorData[nodeIndex] =
+                "seedCount=%d total=%d valid=%s".format(
+                    rawCount, seedSensorCount[seedIndex], (d[4] and 0x01) != 0
+                )
+            return
         }
 
-        viewModel.updateServoCalibration(motorIndex) { cal ->
-            val depth = if (cal.fitValid) {
-                cal.fitA * tpdo.actualPos + cal.fitB
+        if (d[0] == 0xA7) {
+            val nodeIndex = d[1] - 1
+            if (nodeIndex !in 0 until TOTAL_NODE_COUNT) return
+            val currentMilliAmp = d[2] or (d[3] shl 8)
+            val voltageCentiVolt = d[4] or (d[5] shl 8)
+            motorCurrent[nodeIndex] = currentMilliAmp / 1000.0
+            motorVoltage[nodeIndex] = voltageCentiVolt / 100.0
+            motorElectricalValid[nodeIndex] = true
+            canMonitorData[nodeIndex] =
+                "current=%.3fA voltage=%.2fV flags=0x%02X".format(
+                    motorCurrent[nodeIndex], motorVoltage[nodeIndex], d[6]
+                )
+            return
+        }
+
+        if (d[0] == 0xA6) {
+            val nodeIndex = d[1] - 1
+            if (nodeIndex !in 0 until TOTAL_NODE_COUNT) return
+            val pwm = d[2] + (d[3] shl 8)
+            val speedRpm = (d[4] + (d[5] shl 8)) / 100.0
+            val mode = d[6] and 0x0F
+            val direction = (d[6] shr 4) and 0x0F
+            val running = (d[7] and 0x01) != 0
+            val encoderValid = (d[7] and 0x02) != 0
+            val fault = (d[7] and 0x04) != 0
+
+            motorSpeed[nodeIndex] = speedRpm
+            if (nodeIndex < SEED_NODE_START_INDEX) {
+                updateFertilizerFromSpeed(nodeIndex, speedRpm, confertflow, fertMotorSpeed)
             } else {
-                cal.currentDepth
+                seedMotorSpeed[nodeIndex - SEED_NODE_START_INDEX] = speedRpm
             }
-            cal.copy(
-                currentPosition = tpdo.actualPos,
-                currentDepth    = depth,
-                isOnline        = true,
-                alarmCode       = alarm,
-                lastHeardMs     = servoLastSeen[motorIndex]
-            )
+            canMonitorData[nodeIndex] =
+                "rpm=%.2f pwm=%d mode=%d dir=%d run=%s enc=%s fault=%s".format(
+                    speedRpm, pwm, mode, direction, running, encoderValid, fault
+                )
+            return
         }
 
-        viewModel.appendCanOpenLog("TPDO1 M${motorIndex+1}(N$nodeId) pos=${tpdo.actualPos} sw=0x${tpdo.statusWord.toString(16)} alarm=$alarm")
-        Log.d(
-            TAG, "TPDO1: motor=$motorIndex nodeId=$nodeId" +
-                 " pos=${tpdo.actualPos} sw=0x${tpdo.statusWord.toString(16)}" +
-                 " targetReached=${flags.targetReached} alarm=$alarm"
+        // New PID firmware also sends a legacy-format status payload inside a 14-byte wrapper.
+        val nodeIndex = d[3] - 1
+        if (nodeIndex !in 0 until TOTAL_NODE_COUNT || d[4] !in 0..1) return
+        val speedRpm = d[0] + d[1] / 100.0
+        motorSpeed[nodeIndex] = speedRpm
+        if (nodeIndex < SEED_NODE_START_INDEX) {
+            updateFertilizerFromSpeed(nodeIndex, speedRpm, confertflow, fertMotorSpeed)
+        } else {
+            seedMotorSpeed[nodeIndex - SEED_NODE_START_INDEX] = speedRpm
+        }
+        canMonitorData[nodeIndex] = "rpm=%.2f target=%d run=%d dir=%d".format(
+            speedRpm, d[2], d[4], d[5]
         )
     }
 
-    /**
-     * 处理心跳帧（CAN-ID = 0x700 + Node-ID）。
-     *
-     * 心跳数据（1字节）NMT 状态：
-     *   0x05 = Operational（正常运行，PDO/SDO 均可用）
-     *   0x7F = Pre-Operational（仅 SDO 可用）
-     *   0x04 = Stopped（所有通信停止）
-     *
-     * 更新：isOnline=true、isEnabled（仅 Operational 时为 true）。
-     *
-     * @param nodeId     发送心跳的电机 CAN Node-ID
-     * @param motorIndex 对应 ViewModel 中的电机下标（0~7）
-     * @param stateByte  NMT 状态字节
-     */
-    private fun onCanOpenHeartbeat(
-        nodeId: Int,
-        motorIndex: Int,
-        stateByte: Byte,
-        viewModel: VariableFertViewModel
-    ) {
-        // 更新最后收到时间
-        servoLastSeen[motorIndex] = System.currentTimeMillis()
-
-        val stateVal      = stateByte.toInt() and 0xFF
-        val isOperational = stateVal == 0x05
-
-        viewModel.updateServoCalibration(motorIndex) { cal ->
-            cal.copy(isOnline = true, isEnabled = isOperational, lastHeardMs = servoLastSeen[motorIndex])
-        }
-
-        val nmtStateStr = when (stateVal) {
-            0x05 -> "Operational"; 0x7F -> "PreOp"; 0x04 -> "Stopped"
-            else -> "state=0x${stateVal.toString(16)}"
-        }
-        viewModel.appendCanOpenLog("心跳 M${motorIndex+1}(N$nodeId) $nmtStateStr")
-        Log.d(TAG, "心跳: motor=$motorIndex nodeId=$nodeId" +
-                   " state=0x${stateVal.toString(16)} operational=$isOperational")
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // 施肥电机原处理逻辑（完全未改动）
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * 解析施肥电机 CAN 回复帧并更新本地监控数组。
-     *
-     * 帧结构（frameSize=10）：
-     *   [0x27][len=7][canId_lo][canId_hi][hardwareId][d0][d1][d2][d3][0x39]
-     *   byte[4] = hardwareId（0~7），byte[5..8] = 4字节数据
-     *
-     * 注：此函数签名和内部逻辑与原始版本完全一致，未做任何改动。
-     */
-    private fun onSlaveCanMessageReceived(
+    private fun onLegacyCanMessageReceived(
         message: ByteArray,
         confertflow: DoubleArray,
         monfertAdcv: DoubleArray,
         monAdcV: DoubleArray,
         motorSpeed: DoubleArray,
-        mVariableFertViewModel: VariableFertViewModel
+        fertMotorSpeed: DoubleArray,
+        seedMotorSpeed: DoubleArray,
+        seedSensorCount: IntArray,
+        seedRawLast: IntArray
     ) {
         if (message.first() != 0x27.toByte() || message.last() != 0x39.toByte()) return
 
-        // 【真相大白】：硬件回传的也是 0~7 号，接收时直接用，千万不能减 1！
-        val hardwareId = message[4].toInt()
-        val slaveId = hardwareId
-
-        // 【超级护城河】：如果硬件发来了不在 0~7 范围的非法数据，直接抛弃，绝对防止数组越界闪退！
-        if (slaveId < 0 || slaveId >= mSPParamData.rowNumber) {
-            return
-        }
+        val slaveId = message[4].toInt() and 0xFF
+        if (slaveId !in 0 until TOTAL_NODE_COUNT) return
 
         val canDataField = message.sliceArray(5..8)
-        val speedrpm = canDataField[0].toUByte().toInt() + (canDataField[1].toUByte().toInt()) * 0.01
-        // 写入 CAN 实时监控：同时记录无符号值和有符号值，方便判断反转编码
+        val speedrpm = (canDataField[0].toInt() and 0xFF) + (canDataField[1].toInt() and 0xFF) * 0.01
         val b0u = canDataField[0].toInt() and 0xFF
         val b0s = canDataField[0].toInt().toByte().toInt()
         val b1u = canDataField[1].toInt() and 0xFF
         canMonitorData[slaveId] = "b0=%02X(u:%d s:%d) b1=%02X(u:%d)  rpm=%.1f".format(b0u, b0u, b0s, b1u, b1u, speedrpm)
-
-        if (speedrpm >= 1.0) {
-            var rawFert = ConvAndCtrlFun().motorSpeedToFert(
-                speedrpm, mRmcData.forwardSpeedCalculate, mSPParamData.rowSize,
-                fittingCoefficientA[slaveId], fittingCoefficientB[slaveId]
-            )
-
-            val appliedArray = mVariableFertViewModel.fertApplied.value
-            val target = if (appliedArray != null && appliedArray.size > slaveId && appliedArray[slaveId] > 0) appliedArray[slaveId] else 30.0
-
-            val errorLimit = target * 0.05
-            if (Math.abs(rawFert - target) > errorLimit) {
-                rawFert = target + target * Random.nextDouble(-0.03, 0.03)
-            }
-            confertflow[slaveId] = rawFert
-        } else {
-            confertflow[slaveId] = 0.0
-        }
         motorSpeed[slaveId] = speedrpm
 
-        val fertadcV = (canDataField[2].toUByte().toInt() * 100 + canDataField[3].toUByte().toInt()) / 4095.0 * 3.3
-        monAdcV[slaveId] = fertadcV
-        monfertAdcv[slaveId] = fertadcV
+        if (slaveId >= SEED_NODE_START_INDEX) {
+            val seedIndex = slaveId - SEED_NODE_START_INDEX
+            seedMotorSpeed[seedIndex] = speedrpm
+            val rawCount = ((canDataField[2].toInt() and 0xFF) shl 8) or (canDataField[3].toInt() and 0xFF)
+            val last = seedRawLast[seedIndex]
+            if (last >= 0) {
+                val delta = if (rawCount >= last) rawCount - last else rawCount + 65536 - last
+                if (delta in 1..999) seedSensorCount[seedIndex] += delta
+            }
+            seedRawLast[seedIndex] = rawCount
+            return
+        }
+
+        val fertIndex = slaveId - FERT_NODE_START_INDEX
+        if (fertIndex !in 0 until FERT_NODE_COUNT) return
+
+        if (speedrpm >= 1.0) {
+            val rawFert = ConvAndCtrlFun().motorSpeedToFert(
+                speedrpm,
+                mRmcData.forwardSpeedCalculate,
+                mSPParamData.rowSize,
+                fittingCoefficientA[fertIndex],
+                fittingCoefficientB[fertIndex]
+            )
+
+            confertflow[fertIndex] = rawFert
+        } else {
+            confertflow[fertIndex] = 0.0
+        }
+        fertMotorSpeed[fertIndex] = speedrpm
+
+        val fertadcV = ((canDataField[2].toInt() and 0xFF) * 100 + (canDataField[3].toInt() and 0xFF)) / 4095.0 * 3.3
+        monAdcV[fertIndex] = fertadcV
+        monfertAdcv[fertIndex] = fertadcV
     }
 }

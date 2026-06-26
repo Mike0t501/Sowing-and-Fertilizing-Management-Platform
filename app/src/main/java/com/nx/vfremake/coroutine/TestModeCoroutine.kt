@@ -3,6 +3,11 @@ package com.nx.vfremake.coroutine
 import android.content.Context
 import androidx.compose.runtime.MutableState
 import com.nx.vfremake.R
+import com.nx.vfremake.FERT_NODE_COUNT
+import com.nx.vfremake.SEED_NODE_COUNT
+import com.nx.vfremake.FERT_NODE_START_INDEX
+import com.nx.vfremake.SEED_NODE_START_INDEX
+import com.nx.vfremake.TOTAL_NODE_COUNT
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
 import com.nx.vfremake.funClass.ConvAndCtrlFun
@@ -53,29 +58,39 @@ class TestModeCoroutine {
                 delay(200) // 每200毫秒发送一次数据
                 elapsedTime += 200
                 if (testSendMode == "0") {
-                    for (i in 0 until mSPParamData.rowNumber) {
+                    for (i in 0 until TOTAL_NODE_COUNT) {
                         ConvAndCtrlFun().motorSpeedrpmSend(
                             testSend,
                             i
                         )
                     }
                 } else {
-                    for (i in 0 until mSPParamData.rowNumber) {
-                        val flowtoRpm =
-                            ConvAndCtrlFun().fertflowToMotorSpeed(
-                                testSend,
-                                fittingCoefficientA[i],
-                                fittingCoefficientB[i]
-                            )
+                    val simulatedSpeed = testSend.coerceIn(0.0, 30.0)
+                    val seedRpm = ConvAndCtrlFun().seedToMotorSpeed(simulatedSpeed)
+                    for (i in 0 until SEED_NODE_COUNT) {
+                        ConvAndCtrlFun().motorSpeedrpmSend(seedRpm, i + SEED_NODE_START_INDEX)
+                    }
+
+                    val targetFert = mSPParamData.fertApplied.coerceAtLeast(0.0)
+                    for (i in 0 until FERT_NODE_COUNT) {
+                        val a = runCatching { fittingCoefficientA[i] }.getOrDefault(0.0)
+                        val b = runCatching { fittingCoefficientB[i] }.getOrDefault(0.0)
+                        val flowtoRpm = ConvAndCtrlFun().fertToMotorSpeed(
+                            targetFert,
+                            simulatedSpeed,
+                            mSPParamData.rowSize,
+                            a,
+                            b
+                        )
                         ConvAndCtrlFun().motorSpeedrpmSend(
                             flowtoRpm,
-                            i
+                            i + FERT_NODE_START_INDEX
                         )
                     }
                 }
             }
             // 停止时电机也停止
-            for (i in 0 until mSPParamData.rowNumber) {
+            for (i in 0 until TOTAL_NODE_COUNT) {
                 ConvAndCtrlFun().motorSpeedrpmSend(
                     0.0,
                     i

@@ -12,7 +12,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
@@ -23,12 +22,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.dimensionResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.vfremake.R
 import com.nx.vfremake.funClass.MySharedPreFun
 import android.media.MediaPlayer
+import com.nx.vfremake.TOTAL_NODE_COUNT
 import com.nx.vfremake.canMonitorData
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
@@ -39,6 +38,7 @@ import com.nx.vfremake.mSerialPortDB9
 import com.nx.vfremake.mSPParamData
 import com.nx.vfremake.mTestSerialPortCAN
 import com.nx.vfremake.mTestSerialPortDB9
+import com.nx.vfremake.nodeDisplayName
 import java.io.File
 import java.io.IOException
 import kotlinx.coroutines.coroutineScope
@@ -50,7 +50,7 @@ import kotlinx.coroutines.withContext
 
 private var backPressedTime: Long = 0
 
-private fun scanSerialDevices(): List<String> {
+internal fun scanSerialDevices(): List<String> {
     // 方法1：/sys/class/tty 下有 device 子链接的才是真实硬件串口
     // 不依赖 /dev/ 读权限，SELinux 通常允许读 sysfs，适配所有设备
     val fromSysFs = try {
@@ -154,7 +154,7 @@ private fun scanSerialDevices(): List<String> {
     return probeResult.sorted()
 }
 
-private suspend fun runDiagnosticTest(
+internal suspend fun runDiagnosticTest(
     context: android.content.Context,
     onProgress: (String) -> Unit,
     onComplete: (report: String, isFailure: Boolean) -> Unit
@@ -176,7 +176,7 @@ private suspend fun runDiagnosticTest(
         }
     }
 
-    val motorCount = mSPParamData.rowNumber.coerceIn(1, 8)
+    val motorCount = TOTAL_NODE_COUNT
     val activeMotors = mSPParamData.activeMotors
     val canPort = mSerialPortCAN
     val db9Port = mSerialPortDB9
@@ -284,8 +284,8 @@ private suspend fun runDiagnosticTest(
                 launch {
                     for (i in 0 until motorCount) {
                         val isActive = activeMotors.getOrNull(i) ?: true
-                        if (!isActive) { onProgress("M${i + 1}：已禁用，跳过"); continue }
-                        onProgress("测试 M${i + 1} / ${motorCount}（10->55 rpm，4秒）...")
+                        if (!isActive) { onProgress("${nodeDisplayName(i)}：已禁用，跳过"); continue }
+                        onProgress("测试 ${nodeDisplayName(i)} / ${motorCount}（10->55 rpm，4秒）...")
                         for (step in 0..9) {
                             ConvAndCtrlFun().motorSpeedrpmSend(10.0 + 45.0 * step / 9.0, i)
                             delay(400)
@@ -374,11 +374,11 @@ private suspend fun runDiagnosticTest(
     if (canPort != null) {
         for (i in 0 until motorCount) {
             val isActive: Boolean = activeMotors.getOrNull(i) ?: true
-            if (!isActive) { report.appendLine("  M${i + 1}：已禁用"); continue }
+            if (!isActive) { report.appendLine("  ${nodeDisplayName(i)}：已禁用"); continue }
             if (motorResponded[i]) {
-                report.appendLine("  M${i + 1}：✓ 正常（最高回传 %.1f rpm）".format(motorMaxRpm[i]))
+                report.appendLine("  ${nodeDisplayName(i)}：✓ 正常（最高回传 %.1f rpm）".format(motorMaxRpm[i]))
             } else {
-                report.appendLine("  M${i + 1}：✗ 无回传")
+                report.appendLine("  ${nodeDisplayName(i)}：✗ 无回传")
                 noResponseCount++
             }
         }
@@ -429,7 +429,7 @@ private suspend fun runDiagnosticTest(
         val noRespList = (0 until motorCount).filter { i ->
             val isActive: Boolean = activeMotors.getOrNull(i) ?: true
             isActive && !motorResponded[i]
-        }.map { "M${it + 1}" }.joinToString(", ")
+        }.map { nodeDisplayName(it) }.joinToString(", ")
         report.appendLine("  [$noRespList 无回传（总线通信正常）]")
         report.appendLine("    可能原因：")
         report.appendLine("    1. 硬件反转电机不发送CAN回包，属正常设计，无需处理。")
@@ -525,14 +525,13 @@ private suspend fun runDiagnosticTest(
 }
 
 @Composable
-fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Unit = {}, onClickSimGnss: () -> Unit = {}, onReinitSerialPort: () -> Unit = {}) {
+fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Unit = {}, onReinitSerialPort: () -> Unit = {}) {
     val context = LocalContext.current
     val sharedPre = MySharedPreFun(context).getMySharedPre()
 
     val writeSaveDataSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.writeSaveData_Switch_name) == "1") }
     val navMarkCompensatedSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.navMarkCompensated_Switch_name) == "1") }
     val testModeSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1") }
-    val simGnssSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.simGnss_Switch_name) == "1") }
     val errorSoundSwitchIsOnState = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.errorSound_Switch_name) == "1") }
     val testModeDurationTime = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.testMode_testModeDurationTime_name) ?: context.getString(R.string.testMode_testModeDurationTime_defeatValue)) }
     val forwardSpeedAverageNum = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.forwardSpeedAverageNum_name) ?: context.getString(R.string.forwardSpeedAverageNum_defeatValue)) }
@@ -598,53 +597,17 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
         }
     }
 
-    // CAN 接收循环（帧解析版）
+    // CAN 接收循环
     LaunchedEffect(canIsOpen) {
         if (canIsOpen) {
-            val parseBuffer = mutableListOf<Byte>()
             while (isActive && canIsOpen) {
                 try {
-                    val available = withContext(Dispatchers.IO) {
-                        mTestSerialPortCAN?.inputStream?.available() ?: 0
-                    }
+                    val available = withContext(Dispatchers.IO) { mTestSerialPortCAN?.inputStream?.available() ?: 0 }
                     if (available > 0) {
                         val buf = ByteArray(available)
                         withContext(Dispatchers.IO) { mTestSerialPortCAN?.inputStream?.read(buf) }
-                        parseBuffer.addAll(buf.toList())
-
-                        // 从 parseBuffer 提取完整帧
-                        while (parseBuffer.size >= 4) {
-                            // 同步到帧头 0x27
-                            val startIdx = parseBuffer.indexOfFirst { it == 0x27.toByte() }
-                            if (startIdx < 0) { parseBuffer.clear(); break }
-                            if (startIdx > 0) { repeat(startIdx) { parseBuffer.removeAt(0) } }
-
-                            if (parseBuffer.size < 2) break
-                            val len = parseBuffer[1].toInt() and 0xFF
-                            val frameSize = 1 + 1 + len + 1  // 帧头 + 长度字节 + 载荷 + 帧尾
-                            if (parseBuffer.size < frameSize) break
-
-                            // 验证帧尾
-                            if (parseBuffer[frameSize - 1] == 0x39.toByte()) {
-                                val frame = parseBuffer.take(frameSize).toByteArray()
-                                if (len >= 3) {
-                                    // 接收帧格式（与发送帧相同）：[0x27][len][0x00(frameInfo)][canId_hi][canId_lo][data...][0x39]
-                                    val canId = ((frame[3].toInt() and 0xFF) shl 8) or
-                                                (frame[4].toInt() and 0xFF)
-                                    val data  = if (len > 3) frame.copyOfRange(5, 2 + len)
-                                                else byteArrayOf()
-                                    val decoded = decodeCanTestFrame(canId, data)
-                                    canRxText = (canRxText + decoded + "\n").takeLast(4000)
-                                } else {
-                                    val raw = frame.joinToString(" ") { "%02X".format(it) }
-                                    canRxText = (canRxText + "[短帧] $raw\n").takeLast(4000)
-                                }
-                                repeat(frameSize) { parseBuffer.removeAt(0) }
-                            } else {
-                                // 帧尾不匹配，丢弃帧头，继续搜索
-                                parseBuffer.removeAt(0)
-                            }
-                        }
+                        val hex = buf.joinToString(" ") { "%02X".format(it) }
+                        canRxText = (canRxText + hex + "\n").takeLast(3000)
                     } else {
                         delay(50)
                     }
@@ -721,19 +684,6 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                                 }
                             )
                         }
-                    }
-
-                    Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
-
-                    AnimatedSettingRow(title = "模拟GNSS定位", subtitle = "无 GNSS 时按设定航线模拟定位测试电机，点击进入配置", onClick = onClickSimGnss) {
-                        Switch(
-                            checked = simGnssSwitchIsOnState.value,
-                            onCheckedChange = { newValue ->
-                                simGnssSwitchIsOnState.value = newValue
-                                sharedPre.edit().putString(context.getString(R.string.simGnss_Switch_name), if (newValue) "1" else "0").apply()
-                            },
-                            colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF4CAF50))
-                        )
                     }
 
                     Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
@@ -1004,26 +954,6 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                             },
                             onClear = { canRxText = "" }
                         )
-
-                        Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp)
-
-                        // CANopen 快捷指令面板
-                        CanOpenQuickCommands(
-                            canIsOpen = canIsOpen,
-                            onSendBytes = { bytes, label ->
-                                val port = mTestSerialPortCAN
-                                if (port != null) {
-                                    try {
-                                        port.outputStream.write(bytes)
-                                        port.outputStream.flush()
-                                        val hex = bytes.joinToString(" ") { "%02X".format(it) }
-                                        canRxText = (canRxText + "→ $label  [$hex]\n").takeLast(4000)
-                                    } catch (e: Exception) {
-                                        canRxText += "[发送失败: ${e.message}]\n"
-                                    }
-                                }
-                            }
-                        )
                     }
                 }
             }
@@ -1062,7 +992,7 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                     Spacer(modifier = Modifier.height(10.dp))
 
                     // 每 500ms 刷新一次显示
-                    val snapshot by produceState(initialValue = Array(8) { "---" }) {
+                    val snapshot by produceState(initialValue = Array(TOTAL_NODE_COUNT) { "---" }) {
                         while (true) {
                             value = canMonitorData.copyOf()
                             delay(500)
@@ -1120,7 +1050,7 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                                                 )
                                                 Spacer(Modifier.width(5.dp))
                                                 Text(
-                                                    "M${motorIdx + 1}",
+                                                    nodeDisplayName(motorIdx),
                                                     fontSize = 11.sp,
                                                     fontWeight = FontWeight.Bold,
                                                     color = labelColor
@@ -1730,232 +1660,6 @@ fun CounterRow(prefix: String? = null, value: Int, onIncrement: () -> Unit, onDe
         Column {
             IconButton(onClick = onIncrement, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.KeyboardArrowUp, contentDescription = "+") }
             IconButton(onClick = onDecrement, modifier = Modifier.size(20.dp)) { Icon(Icons.Default.KeyboardArrowDown, contentDescription = "-") }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CANopen 快捷指令面板
-// ─────────────────────────────────────────────────────────────────────────────
-
-@Composable
-private fun CanOpenQuickCommands(
-    canIsOpen: Boolean,
-    onSendBytes: (ByteArray, String) -> Unit
-) {
-    var nodeId by remember { mutableStateOf(11) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-
-        // 标题行 + Node-ID 选择器
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                "CANopen 快捷指令",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color(0xFF555555)
-            )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text("Node-ID:", fontSize = 12.sp, color = Color.Gray)
-                OutlinedButton(
-                    onClick = { if (nodeId > 11) nodeId-- },
-                    modifier = Modifier.size(28.dp),
-                    contentPadding = PaddingValues(0.dp),
-                    shape = RoundedCornerShape(4.dp)
-                ) { Text("−", fontSize = 14.sp) }
-                Text(
-                    text = "$nodeId",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.width(28.dp)
-                )
-                OutlinedButton(
-                    onClick = { if (nodeId < 18) nodeId++ },
-                    modifier = Modifier.size(28.dp),
-                    contentPadding = PaddingValues(0.dp),
-                    shape = RoundedCornerShape(4.dp)
-                ) { Text("+", fontSize = 14.sp) }
-            }
-        }
-
-        // 快捷发送按钮行
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            // NMT 广播启动：CAN-ID=0x0000, data=[0x01,0x00], len=5
-            // 27 05 00 00 00 01 00 39
-            Button(
-                onClick = {
-                    onSendBytes(
-                        byteArrayOf(0x27, 0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x39.toByte()),
-                        "NMT广播启动"
-                    )
-                },
-                enabled = canIsOpen,
-                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1565C0)),
-                shape = RoundedCornerShape(6.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("NMT\n广播启动", color = Color.White, fontSize = 11.sp, textAlign = TextAlign.Center)
-            }
-
-            // SDO 读当前位置 (0x6064)：CAN-ID=0x600+N, data=[0x40,0x64,0x60,0x00,...], len=0x0B
-            // 27 0B 00 [hi] [lo] 40 64 60 00 00 00 00 00 39
-            Button(
-                onClick = {
-                    val canId = 0x600 + nodeId
-                    val hi = ((canId ushr 8) and 0xFF).toByte()
-                    val lo = (canId and 0xFF).toByte()
-                    onSendBytes(
-                        byteArrayOf(0x27, 0x0B, 0x00, hi, lo,
-                            0x40, 0x64, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x39.toByte()),
-                        "SDO读位置 N$nodeId"
-                    )
-                },
-                enabled = canIsOpen,
-                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF388E3C)),
-                shape = RoundedCornerShape(6.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("SDO读\n当前位置", color = Color.White, fontSize = 11.sp, textAlign = TextAlign.Center)
-            }
-
-            // SDO 读状态字 (0x6041)：同格式，索引改为 0x6041
-            Button(
-                onClick = {
-                    val canId = 0x600 + nodeId
-                    val hi = ((canId ushr 8) and 0xFF).toByte()
-                    val lo = (canId and 0xFF).toByte()
-                    onSendBytes(
-                        byteArrayOf(0x27, 0x0B, 0x00, hi, lo,
-                            0x40, 0x41, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x39.toByte()),
-                        "SDO读状态字 N$nodeId"
-                    )
-                },
-                enabled = canIsOpen,
-                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF455A64)),
-                shape = RoundedCornerShape(6.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("SDO读\n状态字", color = Color.White, fontSize = 11.sp, textAlign = TextAlign.Center)
-            }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CAN 帧解码（串口通信测试专用）
-// 接收帧格式：[0x27][len][canId_lo][canId_hi][data...][0x39]  ← 小端，无帧信息字节
-// ─────────────────────────────────────────────────────────────────────────────
-
-private fun decodeCanTestFrame(canId: Int, data: ByteArray): String {
-    val ts = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
-                .format(java.util.Date())
-    val nodeId = canId and 0x7F
-
-    return when {
-        // ── CANopen 心跳 (0x701~0x77F) ──────────────────────────────────────
-        canId in 0x701..0x77F -> {
-            val stateStr = if (data.isNotEmpty()) when (data[0].toInt() and 0x7F) {
-                0x00 -> "启动中(Boot-Up)"
-                0x04 -> "已停止(Stopped)"
-                0x05 -> "运行(Operational)"
-                0x7F -> "预操作(Pre-Op)"
-                else -> "未知(0x%02X)".format(data[0].toInt() and 0xFF)
-            } else "无数据"
-            "[$ts] 心跳  Node$nodeId  $stateStr"
-        }
-
-        // ── CANopen SDO 回复 (0x581~0x5FF) ──────────────────────────────────
-        canId in 0x581..0x5FF -> {
-            if (data.size < 4) {
-                "[$ts] SDO回复  Node$nodeId  [数据不足: ${data.joinToString(" ") { "%02X".format(it) }}]"
-            } else {
-                val cs    = data[0].toInt() and 0xFF
-                val index = ((data[2].toInt() and 0xFF) shl 8) or (data[1].toInt() and 0xFF)
-                val sub   = data[3].toInt() and 0xFF
-                val csStr = when (cs and 0xE0) {
-                    0x60 -> "写成功"
-                    0x40 -> "SDO错误"
-                    0x43 -> "读回4B"
-                    0x47 -> "读回3B"
-                    0x4B -> "读回2B"
-                    0x4F -> "读回1B"
-                    else -> "CS=0x%02X".format(cs)
-                }
-                val value = if (data.size >= 8 && (cs and 0xE0) != 0x60 && (cs and 0xE0) != 0x40) {
-                    val v = ((data[7].toLong() and 0xFF) shl 24) or
-                            ((data[6].toLong() and 0xFF) shl 16) or
-                            ((data[5].toLong() and 0xFF) shl 8)  or
-                            (data[4].toLong() and 0xFF)
-                    " val=0x%08X(%d)".format(v, v)
-                } else ""
-                "[$ts] SDO    Node$nodeId  $csStr  idx=0x%04X sub=0x%02X$value".format(index, sub)
-            }
-        }
-
-        // ── CANopen TPDO1 (0x181~0x1FF) ─────────────────────────────────────
-        canId in 0x181..0x1FF -> {
-            if (data.size >= 6) {
-                val pos = ((data[3].toLong() and 0xFF) shl 24) or
-                          ((data[2].toLong() and 0xFF) shl 16) or
-                          ((data[1].toLong() and 0xFF) shl 8)  or
-                          (data[0].toLong() and 0xFF)
-                val sw  = ((data[5].toInt() and 0xFF) shl 8) or (data[4].toInt() and 0xFF)
-                "[$ts] TPDO1  Node$nodeId  pos=$pos  sw=0x%04X".format(sw)
-            } else {
-                val raw = data.joinToString(" ") { "%02X".format(it) }
-                "[$ts] TPDO1  Node$nodeId  [$raw]"
-            }
-        }
-
-        // ── CANopen TPDO2 (0x281~0x2FF) ─────────────────────────────────────
-        canId in 0x281..0x2FF -> {
-            val raw = data.joinToString(" ") { "%02X".format(it) }
-            "[$ts] TPDO2  Node${canId - 0x280}  [$raw]"
-        }
-
-        // ── CANopen TPDO3 (0x381~0x3FF) ─────────────────────────────────────
-        // 电机默认 TPDO3 通常包含状态字（2B LE）+ 其他字段
-        canId in 0x381..0x3FF -> {
-            val raw = data.joinToString(" ") { "%02X".format(it) }
-            if (data.size >= 2) {
-                val sw = ((data[1].toInt() and 0xFF) shl 8) or (data[0].toInt() and 0xFF)
-                val swDesc = when {
-                    sw and 0x0008 != 0 -> "故障"
-                    sw and 0x0004 != 0 -> "已使能"
-                    sw and 0x0002 != 0 -> "已上电"
-                    sw and 0x0040 != 0 -> "禁用"
-                    else -> "sw=0x%04X".format(sw)
-                }
-                "[$ts] TPDO3  Node${canId - 0x380}  $swDesc  [$raw]"
-            } else {
-                "[$ts] TPDO3  Node${canId - 0x380}  [$raw]"
-            }
-        }
-
-        // ── 施肥电机 (CAN-ID 0x01~0x27) ─────────────────────────────────────
-        canId in 0x01..0x27 -> {
-            val raw = data.joinToString(" ") { "%02X".format(it) }
-            "[$ts] 施肥电机  ID=0x%02X  [$raw]".format(canId)
-        }
-
-        // ── 其他 ─────────────────────────────────────────────────────────────
-        else -> {
-            val raw = data.joinToString(" ") { "%02X".format(it) }
-            "[$ts] 未知  CAN-ID=0x%03X  [$raw]".format(canId)
         }
     }
 }

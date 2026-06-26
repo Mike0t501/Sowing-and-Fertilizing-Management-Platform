@@ -755,7 +755,7 @@ fun TemplatesNav_LatiLonti(
 ) {
     val formattedValue = String.format(Locale.CHINA, "%.${decimalPlaces}f", value)
     val formattedValue1 = String.format(Locale.CHINA, "%.${decimalPlaces}f", value1)
-    Box(modifier = Modifier.padding(start = 10.dp, top = 20.dp)) {
+    Box {
         Row(
             verticalAlignment = Alignment.CenterVertically
         ) {

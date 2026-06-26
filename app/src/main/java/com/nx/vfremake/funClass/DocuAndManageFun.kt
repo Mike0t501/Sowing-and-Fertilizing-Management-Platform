@@ -103,11 +103,6 @@ class DocuAndManageFun {
      */
     fun copyShpFilesToExternalStorage(context: Context) {
         // 检查存储权限
-        if (checkSelfPermission(context) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(context)
-            return
-        }
-
         // 获取外部存储目录
         val appSpecificExternalDir = context.getExternalFilesDir("shpFile") ?: return
 
@@ -156,6 +151,22 @@ class DocuAndManageFun {
                 inputStream.close()
                 outputStream.close()
             }
+        }
+
+        val bundledShp = File(appSpecificExternalDir, "VariableFert.shp")
+        if (bundledShp.exists()) {
+            val sharedPre = MySharedPreFun(context).getMySharedPre()
+            val selectedPathKey = context.getString(R.string.myLoadShpFile_Path_name)
+            val selectedPath = sharedPre.getString(selectedPathKey, null)
+            val usablePath = selectedPath?.takeIf { File(it).exists() } ?: bundledShp.absolutePath
+            sharedPre.edit()
+                .putString(
+                    context.getString(R.string.myLoadShpFile_AppSpecificExternalDirPath_name),
+                    bundledShp.absolutePath
+                )
+                .putString(selectedPathKey, usablePath)
+                .putString(context.getString(R.string.runForTheFirstTime), "1")
+                .apply()
         }
     }
 

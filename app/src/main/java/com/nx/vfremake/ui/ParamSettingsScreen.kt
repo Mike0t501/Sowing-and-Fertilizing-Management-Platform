@@ -1,30 +1,36 @@
-/**
- ***********************************************************************************************************
- * @author  :NIANXI (Modified with Interactive Tractor UI)
- * @date    :2024年7月12日22:40:23
- * @file    :
- * @brief   :参数设置页面
- * ---------------------------------------------------------------------------------------------------------
- ***********************************************************************************************************
- */
 package com.nx.vfremake.ui
 
 import android.content.res.Configuration
-import android.util.Log
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.*
+import androidx.compose.material.Icon
+import androidx.compose.material.IconButton
+import androidx.compose.material.Scaffold
+import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.SettingsBackupRestore
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,17 +41,19 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.dimensionResource
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.vfremake.R
+import com.nx.vfremake.FERT_NODE_START_INDEX
+import com.nx.vfremake.SEED_NODE_COUNT
+import com.nx.vfremake.SEED_NODE_START_INDEX
+import com.nx.vfremake.TOTAL_NODE_COUNT
 import com.nx.vfremake.funClass.MySharedPreFun
 
 @Composable
 fun ParamSettingsScreen(onClickBack: () -> Unit = {}) {
     val isPortrait = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
-
     if (isPortrait) {
         ParamSettingsPortraitScreen(onClickBack) { ParamSettingsTextSection() }
     } else {
@@ -54,18 +62,6 @@ fun ParamSettingsScreen(onClickBack: () -> Unit = {}) {
     ParamSettingsResetAndApply()
 }
 
-/**
- * 横竖屏布局共用参数设置文字部分
- */
-/**
- * 横竖屏布局共用参数设置文字部分
- */
-/**
- * 横竖屏布局共用参数设置文字部分
- */
-/**
- * 横竖屏布局共用参数设置文字部分
- */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ParamSettingsTextSection() {
@@ -81,6 +77,7 @@ fun ParamSettingsTextSection() {
 
     FlowRow(
         verticalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.middle_view_padding)),
+        horizontalArrangement = Arrangement.spacedBy(dimensionResource(id = R.dimen.middle_view_padding))
     ) {
         TemplatesText_FieldUint(title = "行距RS", value = rowSize.value, uint = "cm") { newText ->
             rowSize.value = newText
@@ -164,129 +161,120 @@ fun ParamSettingsPortraitScreen(onClickBack: () -> Unit = {}, content: @Composab
     }
 }
 
-/**
- * 💡 核心组件：可交互的拖拉机大图与等距离交互矩形视图
- */
 @Composable
 fun InteractiveTractorDiagram() {
     val context = LocalContext.current
     val sharedPre = remember { MySharedPreFun(context).getMySharedPre() }
-
-    // 读取当前的电机启停状态
     val activeMotorsState = remember {
-        val str = sharedPre.getString("active_motors_state", "1,1,1,1,1,1,1,1") ?: "1,1,1,1,1,1,1,1"
+        val defaultState = List(TOTAL_NODE_COUNT) { "1" }.joinToString(",")
+        val str = sharedPre.getString("active_motors_state", defaultState) ?: defaultState
         val list = str.split(",").map { it == "1" }.toMutableList()
-        // 补齐 8 个，防止下标越界
-        while (list.size < 8) list.add(true)
-        mutableStateListOf(*list.toTypedArray())
-    }
-
-    // 读取当前机型行数（4/6/8），决定渲染多少个单体方块
-    val rowNumberState = rememberSaveable {
-        mutableStateOf(
-            (sharedPre.getString(
-                context.getString(R.string.rowNumber_name),
-                context.getString(R.string.rowNumber_defeatValue)
-            ) ?: "4").toIntOrNull()?.coerceIn(1, 8) ?: 4
-        )
+        while (list.size < TOTAL_NODE_COUNT) list.add(true)
+        mutableStateListOf(*list.take(TOTAL_NODE_COUNT).toTypedArray())
     }
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        // 【修改1】将内部的垂直排列方式设为从底部对齐
         verticalArrangement = Arrangement.Bottom,
         modifier = Modifier.fillMaxSize()
     ) {
-        // 1. 拖拉机大图
         Image(
             painter = painterResource(id = R.drawable.ic_user_tractor),
-            contentDescription = "拖拉机施肥作业大图",
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f), // 依然占据所有剩余空间以防报错
+            contentDescription = "拖拉机作业示意图",
+            modifier = Modifier.fillMaxWidth().weight(1f),
             contentScale = ContentScale.Fit,
-            // 【最核心修改】：强制图片内容在它的专属区域内沉底，不让下方产生空白间隙！
             alignment = Alignment.BottomCenter
         )
 
-        // 1.5 机型行数选择（4/6/8）：决定单体数量与单体定位，改后需点“应用”生效
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 4.dp, start = 16.dp, end = 16.dp),
-            horizontalArrangement = Arrangement.Center,
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "机型：",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(end = 8.dp)
-            )
-            listOf(4, 6, 8).forEach { preset ->
-                val selected = rowNumberState.value == preset
-                Box(
-                    modifier = Modifier
-                        .padding(horizontal = 4.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (selected) Color(0xFF1976D2) else Color(0xFFE0E0E0))
-                        .clickable {
-                            rowNumberState.value = preset
-                            sharedPre.edit()
-                                .putString(context.getString(R.string.rowNumber_name), preset.toString())
-                                .apply()
-                        }
-                        .border(
-                            width = 2.dp,
-                            color = if (selected) Color(0xFF0D47A1) else Color(0xFFBDBDBD),
-                            shape = RoundedCornerShape(6.dp)
-                        )
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
-                    contentAlignment = Alignment.Center
-                ) {
+            StateLegend(Color(0xFF43A047), "绿色：启用")
+            Spacer(Modifier.width(14.dp))
+            StateLegend(Color(0xFFE53935), "红色：关断")
+        }
+
+        MotorStateRow(
+            title = "施肥",
+            startIndex = FERT_NODE_START_INDEX,
+            activeMotorsState = activeMotorsState,
+            onStateChanged = {
+                sharedPre.edit().putString(
+                    "active_motors_state",
+                    activeMotorsState.joinToString(",") { if (it) "1" else "0" }
+                ).apply()
+            }
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        MotorStateRow(
+            title = "播种",
+            startIndex = SEED_NODE_START_INDEX,
+            activeMotorsState = activeMotorsState,
+            onStateChanged = {
+                sharedPre.edit().putString(
+                    "active_motors_state",
+                    activeMotorsState.joinToString(",") { if (it) "1" else "0" }
+                ).apply()
+            }
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+    }
+}
+
+@Composable
+private fun MotorStateRow(
+    title: String,
+    startIndex: Int,
+    activeMotorsState: MutableList<Boolean>,
+    onStateChanged: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color(0xFF222222), modifier = Modifier.width(42.dp))
+        for (col in 0 until SEED_NODE_COUNT) {
+            val index = startIndex + col
+            val isActive = activeMotorsState[index]
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(56.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (isActive) Color(0xFF4CAF50) else Color(0xFFE53935))
+                    .clickable {
+                        activeMotorsState[index] = !isActive
+                        onStateChanged()
+                    }
+                    .border(
+                        width = 2.dp,
+                        color = if (isActive) Color(0xFF388E3C) else Color(0xFFB71C1C),
+                        shape = RoundedCornerShape(6.dp)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = "${preset}行",
-                        color = if (selected) Color.White else Color(0xFF424242),
+                        "${col + 1}",
+                        color = Color.White,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
-                }
-            }
-        }
-
-        // 2. 按机型行数渲染交互矩形方块
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                // 【修改2】微调了外边距，让方块离上方图片更紧凑一点
-                .padding(top = 8.dp, bottom = 12.dp, start = 16.dp, end = 16.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            for (i in 0 until rowNumberState.value) {
-                val isActive = activeMotorsState[i]
-                Box(
-                    modifier = Modifier
-                        .width(36.dp)
-                        .height(60.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (isActive) Color(0xFF4CAF50) else Color(0xFFE53935))
-                        .clickable {
-                            activeMotorsState[i] = !isActive
-                            val newStateStr = activeMotorsState.joinToString(",") { if (it) "1" else "0" }
-                            sharedPre.edit().putString("active_motors_state", newStateStr).apply()
-                        }
-                        .border(
-                            width = 2.dp,
-                            color = if (isActive) Color(0xFF388E3C) else Color(0xFFB71C1C),
-                            shape = RoundedCornerShape(6.dp)
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
                     Text(
-                        text = "${i + 1}",
+                        "ID${index + 1}",
                         color = Color.White,
-                        fontSize = 18.sp,
+                        fontSize = 9.sp,
                         fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        if (isActive) "启用" else "关断",
+                        color = Color.White,
+                        fontSize = 8.sp
                     )
                 }
             }
@@ -295,19 +283,34 @@ fun InteractiveTractorDiagram() {
 }
 
 @Composable
+private fun StateLegend(color: Color, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .width(18.dp)
+                .height(10.dp)
+                .background(color, RoundedCornerShape(2.dp))
+        )
+        Spacer(Modifier.width(5.dp))
+        Text(text, fontSize = 11.sp, color = Color(0xFF424A46))
+    }
+}
+
+@Composable
 fun ParamSettingsResetAndApply() {
     val context = LocalContext.current
     val sharedPreHelper = MySharedPreFun(context)
-    val paramResetState = remember { mutableStateOf(false) }
+    val paramResetState: MutableState<Boolean> = remember { mutableStateOf(false) }
     if (paramResetState.value) {
         ShowConfirmDialog(
             title = "重置参数",
-            text = "你确实要重置参数吗？",
+            text = "确定要重置参数吗？",
             onConfirm = {
                 sharedPreHelper.resetConfig()
                 sharedPreHelper.initSettingsParam()
-                // 重置电机状态为全开
-                sharedPreHelper.getMySharedPre().edit().putString("active_motors_state", "1,1,1,1,1,1,1,1").apply()
+                sharedPreHelper.getMySharedPre().edit()
+                    .putString("active_motors_state", List(TOTAL_NODE_COUNT) { "1" }.joinToString(","))
+                    .apply()
             },
             showDialog = paramResetState
         )

@@ -37,16 +37,18 @@ import com.esri.arcgisruntime.symbology.ClassBreaksRenderer
 import com.esri.arcgisruntime.symbology.PictureMarkerSymbol
 import com.esri.arcgisruntime.symbology.SimpleFillSymbol
 import com.esri.arcgisruntime.symbology.SimpleLineSymbol
-import com.nx.vfremake.DEPTH_MAP_CM_TO_MM
 import com.nx.vfremake.R
+import com.nx.vfremake.SEED_NODE_COUNT
+import com.nx.vfremake.FERT_NODE_START_INDEX
+import com.nx.vfremake.SEED_NODE_START_INDEX
 import com.nx.vfremake.VariableFertViewModel
-import com.nx.vfremake.depthQueryField
 import com.nx.vfremake.fertQueryField
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
 import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mRmcData
 import java.util.Locale
+import java.io.File
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -63,47 +65,20 @@ class MyArcGisFun {
      * @note
      */
     fun loadShp(context: Context, mVariableFertViewModel: VariableFertViewModel) {
-        val shpPath =
-            MySharedPreFun(context).getSpecificValue(R.string.myLoadShpFile_Path_name)
-        if (shpPath.isNullOrEmpty()) return
-        // 施肥/深度两个字段都先读出来（深度可选），加载后据存在性各自置入全局
-        val fertField =
-            MySharedPreFun(context).getSpecificValue(R.string.fertQueryField_name)
-        val depthField =
-            MySharedPreFun(context).getSpecificValue(R.string.depthQueryField_name)
-        // 处方图工作模式：控深开 → 按深度字段渲染；控深关 → 按施肥字段渲染
-        val depthMode = mVariableFertViewModel.depthPrescriptionMode.value == true
-
-        val shapefileFeatureTable = ShapefileFeatureTable(shpPath)
-        shapefileFeatureTable.loadAsync()
-        // 异步加载监听
-        shapefileFeatureTable.addDoneLoadingListener {
-            if (shapefileFeatureTable.loadStatus == LoadStatus.LOADED) {
-                try {
-                    val fieldListString = shapefileFeatureTable.fields.map { it.name }
-                    // 检查字段是否属于该处方图字段集，存在则置入全局，否则空串
-                    fertQueryField = if (!fertField.isNullOrEmpty() &&
-                        fieldListString.contains(fertField)
-                    ) fertField else ""
-                    depthQueryField = if (!depthField.isNullOrEmpty() &&
-                        fieldListString.contains(depthField)
-                    ) depthField else ""
-                    // 渲染字段：控深模式优先深度字段，否则施肥字段（只显示当前工作的处方图）
-                    val renderField =
-                        if (depthMode && depthQueryField.isNotEmpty()) depthQueryField
-                        else fertQueryField
-                    if (renderField.isNotEmpty()) {
-                        MyArcGisFun().loadShapefile(
-                            shpPath,
-                            renderField,
-                            mVariableFertViewModel,
-                            context
-                        )
-                    }
-                } catch (e: Exception) {
-                    Log.e("shapefileFeatureTable", "错误: " + e.message)
-                }
-            }
+        val shared = MySharedPreFun(context)
+        val configuredPath = shared.getSpecificValue(R.string.myLoadShpFile_Path_name)
+        val bundledPath = shared.getSpecificValue(
+            R.string.myLoadShpFile_AppSpecificExternalDirPath_name
+        )
+        val shpPath = configuredPath?.takeIf { File(it).exists() }
+            ?: bundledPath?.takeIf { File(it).exists() }
+        val queryField = shared.getSpecificValue(R.string.fertQueryField_name)
+            ?: context.getString(R.string.fertQueryField_defeatValue)
+        if (!shpPath.isNullOrEmpty()) {
+            fertQueryField = queryField
+            loadShapefile(shpPath, queryField, mVariableFertViewModel, context)
+        } else {
+            Log.e("ShapefileFeatureTable", "No usable bundled or selected shapefile path")
         }
     }
 
@@ -245,14 +220,14 @@ class MyArcGisFun {
     /**
      *  加载离线地图(处方图)
      * @param   shpFilePath:地图路径
-     * @param   renderField:分级渲染所用字段（施肥量 / 播种深度，按当前工作模式）
+     * @param   fertQueryField:施肥量所在字段
      * @param   mVariableFertViewModel:更新UI使用的viewmodel
      * @param   context:上下文，获取strings.xml里的资源值
      * @note
      */
     private fun loadShapefile(
         shpFilePath: String,
-        renderField: String,
+        fertQueryField: String,
         mVariableFertViewModel: VariableFertViewModel,
         context: Context
     ) {
@@ -279,9 +254,7 @@ class MyArcGisFun {
                 //...第二种渲染方式，分级渲染
                 // 分级渲染非零地块，零区域在分级函数里已经应用
                 try {
-                    val queryParameters = QueryParameters().apply {
-                        whereClause = renderField // 指定渲染字段（施肥量 / 播种深度）
-                    }
+                    val queryParameters = QueryParameters().apply { whereClause = "1=1" }
                     var maxValue = Double.MIN_VALUE
                     var minValue = Double.MAX_VALUE
                     val shapefileFuture =
@@ -290,7 +263,7 @@ class MyArcGisFun {
                         val result = shapefileFuture.get()
 
                         for (feature in result) {
-                            val attribute = feature.attributes[renderField]
+                            val attribute = feature.attributes[fertQueryField]
                             if (attribute == 0.0) {
                                 // 如果当前字段的值为0，则跳过本次遍历
                                 // 创建分级渲染器时已经考虑到0值，这里跳过避免清一色
@@ -369,7 +342,7 @@ class MyArcGisFun {
 
                         // 设置分级渲染器
                         val renderer = ClassBreaksRenderer(
-                            renderField,
+                            fertQueryField,
                             classBreaks
                         )
                         shapefileFeatureLayer.renderer = renderer
@@ -382,8 +355,7 @@ class MyArcGisFun {
                 }
                 //...第二种渲染方式，分级渲染结束
                 // 添加到地图的图层组中
-                val basemap = Basemap()
-                mArcGISMap.basemap = basemap
+                mArcGISMap.basemap = Basemap()
 
                 mArcGISMap.operationalLayers.add(shapefileFeatureLayer)
 
@@ -720,6 +692,18 @@ class MyArcGisFun {
         var dantiYPro: Double
         var fertApplied = DoubleArray(n) { 0.0 }
 
+        if (isSystemRunning) {
+            val seedMotorRpm = ConvAndCtrlFun().seedToMotorSpeed(mRmcData.forwardSpeedCalculate)
+            val seedTargets = DoubleArray(SEED_NODE_COUNT) { seedMotorRpm }
+            mVariableFertViewModel.seedTargetRpm.postValue(seedTargets)
+            for (seedIndex in 0 until SEED_NODE_COUNT) {
+                ConvAndCtrlFun().motorSpeedrpmSend(
+                    seedMotorRpm,
+                    seedIndex + SEED_NODE_START_INDEX
+                )
+            }
+        }
+
         //...计算单体投影位置
         for (i in 0 until n) {
             dantiXPro =
@@ -738,8 +722,56 @@ class MyArcGisFun {
         //...计算单体投影位置结束
 
         //...查询单体所在地块施肥量（补偿后）
-        // 施肥定额下发（fert-manual）：抽成 lambda 供两处复用，杜绝逻辑分叉
-        val sendFertManual = {
+        // 如果用户设置的参数为-1，则说明需要自动查询施肥量，>=0，手动设置
+        if (mSPParamData.fertApplied == -1.0 || mSPParamData.fertApplied <= 0.0) {
+            val table = mVariableFertViewModel.shapefileFeatureTable.value
+            for (i in 0 until n) {
+                // 查询施肥量代码搬在这里，因为查询是异步的，addDoneListener里执行后续代码，不好分出去单写一个函数调用形式
+                // 设置查询参数
+                val queryParameters = QueryParameters().apply {
+                    // 查询指定点
+                    geometry = dantiLLGeo[i]
+                    // 设定字段，也可以加上限定条件
+                    whereClause = fertQueryField
+                }
+                // 执行查询
+                val shapefileFuture = table?.queryFeaturesAsync(queryParameters)
+                shapefileFuture?.addDoneListener {
+                    try {
+                        // 使用 get() 方法等待查询完成并获取结果
+                        val result = shapefileFuture.get()
+                        var fert = 0.0
+                        // 遍历查询结果
+                        result.forEach { feature ->
+                            fert = feature.attributes[fertQueryField].toString().toDouble()
+                        }
+                        fertApplied[i] = fert
+
+                        Log.d(
+                            "fertQueryField",
+                            dantiLLGeo[i].x.toString() + "  " + dantiLLGeo[i].y.toString() + "  " + fert.toString() + "  " + mRmcData.forwardSpeed.toString() + "  " + mRmcData.forwardSpeedCalculate.toString()
+                        )
+                        if (fert >= 0 && isSystemRunning) {
+                            val motorSpeedrpm = ConvAndCtrlFun().fertToMotorSpeed(
+                                fert,
+                                mRmcData.forwardSpeedCalculate,
+                                mSPParamData.rowSize,
+                                fittingCoefficientA[i],
+                                fittingCoefficientB[i]
+                            )
+
+//                            Log.d("CtrlMsg", "电机转速: $motorSpeedrpm")
+                            ConvAndCtrlFun().motorSpeedrpmSend(
+                                motorSpeedrpm, i + FERT_NODE_START_INDEX
+                            )
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                    mVariableFertViewModel.fertApplied.postValue(fertApplied)
+                }
+            }
+        } else {
             fertApplied = DoubleArray(n) { mSPParamData.fertApplied }
             mVariableFertViewModel.fertApplied.postValue(fertApplied)
             for (i in 0 until n) {
@@ -753,96 +785,8 @@ class MyArcGisFun {
                 )
                 ConvAndCtrlFun().motorSpeedrpmSend(
                     motorSpeedrpm,
-                    i
+                    i + FERT_NODE_START_INDEX
                 )
-            }
-        }
-
-        // 处方图工作模式（拮抗/互斥）：控深开 → 只控播深；控深关 → 只控施肥
-        val depthMode = mVariableFertViewModel.depthPrescriptionMode.value == true
-        val table = mVariableFertViewModel.shapefileFeatureTable.value
-
-        if (depthMode) {
-            // ── 播深模式：仅查深度字段、写 targetDepth，绝不下发任何施肥命令 ──
-            if (table != null && depthQueryField.isNotEmpty()) {
-                val mapDepth = FloatArray(n) { -1f }
-                for (i in 0 until n) {
-                    val idx = i // 捕获，避免 addDoneListener 闭包错位
-                    val queryParameters = QueryParameters().apply {
-                        geometry = dantiLLGeo[idx]
-                        whereClause = depthQueryField
-                    }
-                    val shapefileFuture = table.queryFeaturesAsync(queryParameters)
-                    shapefileFuture?.addDoneListener {
-                        try {
-                            var depthCm = Double.NaN
-                            shapefileFuture.get().forEach { feature ->
-                                depthCm = feature.attributes[depthQueryField]
-                                    ?.toString()?.toDoubleOrNull() ?: Double.NaN
-                            }
-                            // cm → mm；无效/缺失/≤0 → 不动电机，保留上次 targetDepth
-                            if (isSystemRunning && !depthCm.isNaN() && depthCm > 0.0) {
-                                val depthMm = (depthCm * DEPTH_MAP_CM_TO_MM).toFloat()
-                                mapDepth[idx] = depthMm
-                                Log.d(
-                                    "depthQueryField",
-                                    dantiLLGeo[idx].x.toString() + "  " + dantiLLGeo[idx].y.toString() + "  cm=" + depthCm.toString() + "  mm=" + depthMm.toString()
-                                )
-                                mVariableFertViewModel.updateServoCalibration(idx) {
-                                    it.copy(targetDepth = depthMm)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                        mVariableFertViewModel.mapDepthApplied.postValue(mapDepth)
-                    }
-                }
-            }
-        } else {
-            // ── 施肥模式：与改动前 fert 行为逐字一致（auto 查询 / manual 定额）──
-            // 如果用户设置的参数为-1，则说明需要自动查询施肥量，>=0，手动设置
-            val fertAuto = mSPParamData.fertApplied == -1.0 || mSPParamData.fertApplied <= 0.0
-            if (fertAuto && table != null) {
-                for (i in 0 until n) {
-                    val idx = i // 捕获，避免 addDoneListener 闭包错位
-                    val queryParameters = QueryParameters().apply {
-                        geometry = dantiLLGeo[idx]
-                        whereClause = fertQueryField
-                    }
-                    val shapefileFuture = table.queryFeaturesAsync(queryParameters)
-                    shapefileFuture?.addDoneListener {
-                        try {
-                            var fert = 0.0
-                            shapefileFuture.get().forEach { feature ->
-                                fert = feature.attributes[fertQueryField].toString().toDouble()
-                            }
-                            fertApplied[idx] = fert
-                            Log.d(
-                                "fertQueryField",
-                                dantiLLGeo[idx].x.toString() + "  " + dantiLLGeo[idx].y.toString() + "  " + fert.toString() + "  " + mRmcData.forwardSpeed.toString() + "  " + mRmcData.forwardSpeedCalculate.toString()
-                            )
-                            if (fert >= 0 && isSystemRunning) {
-                                val motorSpeedrpm = ConvAndCtrlFun().fertToMotorSpeed(
-                                    fert,
-                                    mRmcData.forwardSpeedCalculate,
-                                    mSPParamData.rowSize,
-                                    fittingCoefficientA[idx],
-                                    fittingCoefficientB[idx]
-                                )
-                                ConvAndCtrlFun().motorSpeedrpmSend(
-                                    motorSpeedrpm, idx
-                                )
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                        mVariableFertViewModel.fertApplied.postValue(fertApplied)
-                    }
-                }
-            } else {
-                // 纯施肥手动（深度关）：原 else 块行为不变
-                sendFertManual()
             }
         }
 

@@ -27,24 +27,16 @@ import androidx.navigation.compose.rememberNavController
 import com.esri.arcgisruntime.mapping.view.MapView
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.ui.DantiFertSettings
-import com.nx.vfremake.ui.DepthCalibrationScreen
 import com.nx.vfremake.ui.MainScreen
 import com.nx.vfremake.ui.ParamSettingsScreen
 import com.nx.vfremake.ui.SettingsScreen
-import com.nx.vfremake.ui.SimGnssScreen
-import com.nx.vfremake.ui.SowingDepthScreen
-import androidx.navigation.NavType
-import androidx.navigation.navArgument
 
 // 枚举字符串对应各个页面名称
 enum class VariableFertScreen(@StringRes val title: Int) {
     Main(title = R.string.app_name),
     ParamSet(title = R.string.param_settings),
     Settings(title = R.string.settings),
-    DantiSettings(title = R.string.settings),
-    SimGnss(title = R.string.settings),             // 模拟GNSS定位配置界面
-    SowingDepth(title = R.string.settings),         // 播种深度主控制界面
-    DepthCalibration(title = R.string.settings)     // 单路电机深度校准向导（携带 motorIndex 参数）
+    DantiSettings(title = R.string.settings)
 }
 
 /**
@@ -75,11 +67,8 @@ fun VariableFert(
             MainScreen(
                 mapView = mapViewRemember,
                 mVariableFertViewModel = mVariableFertViewModel,
-                onClickSettigns     = { navController.navigate(VariableFertScreen.Settings.name) },
-                onClickParamSet     = { navController.navigate(VariableFertScreen.ParamSet.name) },
-                onClickSowingDepth  = { navController.navigate(VariableFertScreen.SowingDepth.name) },
-                // 地图取点完成后回到模拟GNSS配置页（重建实例以重新读取刚点选的经纬度）
-                onSimGnssReturnToConfig = { navController.navigate(VariableFertScreen.SimGnss.name) }
+                onClickSettigns = { navController.navigate(VariableFertScreen.Settings.name) },
+                onClickParamSet = { navController.navigate(VariableFertScreen.ParamSet.name) }
             )
             content()
         }
@@ -90,9 +79,8 @@ fun VariableFert(
         }
         composable(route = VariableFertScreen.Settings.name) {
             SettingsScreen(
-                onClickBack          = { navController.popBackStack() },
+                onClickBack = { navController.popBackStack() },
                 onClickDantiSettigns = { navController.navigate(VariableFertScreen.DantiSettings.name) },
-                onClickSimGnss = { navController.navigate(VariableFertScreen.SimGnss.name) },
                 onReinitSerialPort = {
                     if (isSystemRunning) {
                         Toast.makeText(context, "系统运行中，请先停止后再应用", Toast.LENGTH_SHORT).show()
@@ -107,38 +95,6 @@ fun VariableFert(
         composable(route = VariableFertScreen.DantiSettings.name) {
             DantiFertSettings(
                 onClickBack = { navController.popBackStack() }
-            )
-        }
-        // ── 模拟GNSS定位配置界面 ────────────────────────────────────────────
-        composable(route = VariableFertScreen.SimGnss.name) {
-            SimGnssScreen(
-                onClickBack = { navController.popBackStack() },
-                // 进入地图取点：置“点选起点”模式，回到已存在的主地图实例
-                onPickOnMap = {
-                    mVariableFertViewModel.simGnssPickMode.value = 1
-                    navController.popBackStack(VariableFertScreen.Main.name, false)
-                }
-            )
-        }
-        // ── 播种深度主控制界面 ──────────────────────────────────────────────
-        composable(route = VariableFertScreen.SowingDepth.name) {
-            SowingDepthScreen(
-                viewModel        = mVariableFertViewModel,
-                onClickBack      = { navController.popBackStack() },
-                onClickCalibrate = { motorIndex ->
-                    navController.navigate("${VariableFertScreen.DepthCalibration.name}/$motorIndex")
-                }
-            )
-        }
-        // ── 单路电机深度校准向导（携带电机下标参数）──────────────────────────
-        composable(
-            route     = "${VariableFertScreen.DepthCalibration.name}/{motorIndex}",
-            arguments = listOf(navArgument("motorIndex") { type = NavType.IntType })
-        ) { backStackEntry ->
-            DepthCalibrationScreen(
-                viewModel   = mVariableFertViewModel,
-                motorIndex  = backStackEntry.arguments?.getInt("motorIndex") ?: 0,
-                onBack      = { navController.popBackStack() }
             )
         }
     }

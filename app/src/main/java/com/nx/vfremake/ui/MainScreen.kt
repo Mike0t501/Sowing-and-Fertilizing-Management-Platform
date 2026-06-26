@@ -17,12 +17,12 @@
 package com.nx.vfremake.ui
 
 import android.util.Log
-import android.view.MotionEvent
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -36,10 +36,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.DropdownMenu
 import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
+import androidx.compose.material.LinearProgressIndicator
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -69,6 +71,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.dimensionResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -80,20 +83,17 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import com.esri.arcgisruntime.geometry.Envelope
-import com.esri.arcgisruntime.geometry.GeometryEngine
 import com.esri.arcgisruntime.geometry.Point
-import com.esri.arcgisruntime.geometry.PolylineBuilder
 import com.esri.arcgisruntime.geometry.SpatialReferences
 import com.esri.arcgisruntime.mapping.Viewpoint
-import com.esri.arcgisruntime.mapping.view.DefaultMapViewOnTouchListener
-import com.esri.arcgisruntime.mapping.view.Graphic
-import com.esri.arcgisruntime.mapping.view.GraphicsOverlay
 import com.esri.arcgisruntime.mapping.view.MapView
 import com.esri.arcgisruntime.symbology.PictureMarkerSymbol
-import com.esri.arcgisruntime.symbology.SimpleLineSymbol
-import com.esri.arcgisruntime.symbology.SimpleMarkerSymbol
-import com.esri.arcgisruntime.symbology.TextSymbol
 import com.nx.vfremake.R
+import com.nx.vfremake.FERT_NODE_COUNT
+import com.nx.vfremake.FERT_NODE_START_INDEX
+import com.nx.vfremake.SEED_NODE_COUNT
+import com.nx.vfremake.SEED_NODE_START_INDEX
+import com.nx.vfremake.TOTAL_NODE_COUNT
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
@@ -111,15 +111,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.roundToInt
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material.Surface
 import androidx.compose.material.Divider
-import androidx.compose.material.Switch
 import androidx.compose.material.TextButton
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
@@ -140,177 +137,17 @@ fun MainScreen(
     mapView: MapView,
     mVariableFertViewModel: VariableFertViewModel,
     onClickSettigns: () -> Unit = {},
-    onClickParamSet: () -> Unit = {},
-    onClickSowingDepth: () -> Unit = {},
-    onSimGnssReturnToConfig: () -> Unit = {}
+    onClickParamSet: () -> Unit = {}
 ) {
-    Box(modifier = Modifier.background(Color(LocalContext.current.getColor(R.color.background_color_night)))) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFF2F4F2))
+    ) {
         MapAndFunBontonVeiw(mapView, mVariableFertViewModel)
-        MsgScreenRight(mVariableFertViewModel)
-        MsgScreenBottom(mVariableFertViewModel)
-        MenuBottomBar(mapView, mVariableFertViewModel, onClickSettigns, onClickParamSet, onClickSowingDepth)
-        // 模拟GNSS地图取点浮层：z 序最上，仅取点模式下显示
-        SimGnssPickOverlay(mapView, mVariableFertViewModel, onSimGnssReturnToConfig)
-    }
-}
-
-/**
- * 模拟GNSS地图取点浮层
- * @param  mapView:主地图（处方图已加载其上）
- * @param  mVariableFertViewModel:读取/推进取点模式
- * @param  onReturnToConfig:取点结束回到模拟GNSS配置页
- * @note   仅 simGnssPickMode != 0 时安装单击监听并显示提示浮层；点中即写 SharedPreferences。
- *         经纬度复用 simGnss_startLat/Lon、simGnss_endLat/Lon 键，与配置页一致。
- */
-@Composable
-fun SimGnssPickOverlay(
-    mapView: MapView,
-    mVariableFertViewModel: VariableFertViewModel,
-    onReturnToConfig: () -> Unit
-) {
-    val context = LocalContext.current
-    val pickMode by mVariableFertViewModel.simGnssPickMode.observeAsState(0)
-    val sharedPre = MySharedPreFun(context).getMySharedPre()
-    // 起/终标记与连线专用图层（独立于业务图层，取消时单独清除）
-    val pickOverlay = remember { GraphicsOverlay() }
-
-    // 经纬度即点即存（6 位小数，约 0.1m 精度，与默认值格式一致）
-    fun writeCoord(latKey: Int, lonKey: Int, lat: Double, lon: Double) {
-        sharedPre.edit()
-            .putString(context.getString(latKey), String.format(Locale.US, "%.6f", lat))
-            .putString(context.getString(lonKey), String.format(Locale.US, "%.6f", lon))
-            .apply()
-    }
-    // 画终点连线时从 SharedPreferences 取回起点，避免跨监听器闭包传值
-    fun readStartPoint(): Point? {
-        val la = sharedPre.getString(context.getString(R.string.simGnss_startLat_name), null)?.toDoubleOrNull()
-        val lo = sharedPre.getString(context.getString(R.string.simGnss_startLon_name), null)?.toDoubleOrNull()
-        return if (la != null && lo != null) Point(lo, la, SpatialReferences.getWgs84()) else null
-    }
-    fun drawMarker(p: Point, isStart: Boolean) {
-        val fillColor = if (isStart) 0xFF4CAF50.toInt() else 0xFFF44336.toInt()
-        val textColor = if (isStart) 0xFF1B5E20.toInt() else 0xFFB71C1C.toInt()
-        pickOverlay.graphics.add(Graphic(p, SimpleMarkerSymbol(SimpleMarkerSymbol.Style.CIRCLE, fillColor, 16f)))
-        val label = TextSymbol(
-            14f, if (isStart) "起" else "终", textColor,
-            TextSymbol.HorizontalAlignment.CENTER, TextSymbol.VerticalAlignment.BOTTOM
-        ).apply { offsetY = 12f }
-        pickOverlay.graphics.add(Graphic(p, label))
-        mapView.post { mapView.invalidate() }
-    }
-    fun drawLine(start: Point?, end: Point) {
-        if (start == null) return
-        val line = PolylineBuilder(SpatialReferences.getWgs84()).apply {
-            addPoint(start); addPoint(end)
-        }.toGeometry()
-        pickOverlay.graphics.add(
-            Graphic(line, SimpleLineSymbol(SimpleLineSymbol.Style.DASH, 0xFF1565C0.toInt(), 2f))
-        )
-        mapView.post { mapView.invalidate() }
-    }
-
-    // 安装/卸载单击监听 + 进入时清旧标记、关跟随
-    LaunchedEffect(pickMode) {
-        if (pickMode != 0) {
-            if (!mapView.graphicsOverlays.contains(pickOverlay)) mapView.graphicsOverlays.add(pickOverlay)
-            mVariableFertViewModel.navCenterIsRunning.value = false  // 取点期间停跟随，地图不乱动
-            if (pickMode == 1) {
-                pickOverlay.graphics.clear()
-                mapView.post { mapView.invalidate() }
-            }
-            mapView.setOnTouchListener(object : DefaultMapViewOnTouchListener(context, mapView) {
-                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                    val mapPt = mapView.screenToLocation(android.graphics.Point(e.x.roundToInt(), e.y.roundToInt()))
-                    val wgs = mapPt?.let { GeometryEngine.project(it, SpatialReferences.getWgs84()) as? Point }
-                    if (wgs == null) {
-                        Toast.makeText(context, "请先加载处方图", Toast.LENGTH_SHORT).show()
-                        return true
-                    }
-                    val lat = wgs.y
-                    val lon = wgs.x
-                    when (mVariableFertViewModel.simGnssPickMode.value) {
-                        1 -> {
-                            writeCoord(R.string.simGnss_startLat_name, R.string.simGnss_startLon_name, lat, lon)
-                            drawMarker(wgs, isStart = true)
-                            mVariableFertViewModel.simGnssPickMode.value = 2
-                        }
-                        2 -> {
-                            writeCoord(R.string.simGnss_endLat_name, R.string.simGnss_endLon_name, lat, lon)
-                            drawMarker(wgs, isStart = false)
-                            drawLine(readStartPoint(), wgs)
-                            mVariableFertViewModel.simGnssPickMode.value = 3
-                        }
-                    }
-                    return true
-                }
-            })
-        } else {
-            // 退出取点：还原默认触摸 + 兜底清除残留标记/连线
-            mapView.setOnTouchListener(DefaultMapViewOnTouchListener(context, mapView))
-            if (pickOverlay.graphics.isNotEmpty()) {
-                pickOverlay.graphics.clear()
-                mapView.post { mapView.invalidate() }
-            }
-        }
-    }
-
-    // 顶部提示浮层
-    if (pickMode != 0) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp),
-            contentAlignment = Alignment.TopCenter
-        ) {
-            Surface(shape = RoundedCornerShape(12.dp), color = Color(0xCC000000), elevation = 8.dp) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = when (pickMode) {
-                            1 -> "请点击地图选择【起点】"
-                            2 -> "请点击地图选择【终点】"
-                            else -> "✓ 取点完成"
-                        },
-                        color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        if (pickMode == 3) {
-                            Button(
-                                onClick = {
-                                    // 同步清除标记/连线：pickOverlay 挂在长生命周期 mapView 上，
-                                    // 不能只靠 LaunchedEffect（导航离开后本 composable 可能已销毁不再执行）
-                                    pickOverlay.graphics.clear()
-                                    mapView.post { mapView.invalidate() }
-                                    mVariableFertViewModel.simGnssPickMode.value = 0
-                                    onReturnToConfig()
-                                },
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF4CAF50))
-                            ) { Text("返回配置", color = Color.White) }
-                            Button(
-                                onClick = { mVariableFertViewModel.simGnssPickMode.value = 1 },
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1976D2))
-                            ) { Text("重新取点", color = Color.White) }
-                        } else {
-                            Button(
-                                onClick = {
-                                    pickOverlay.graphics.clear()
-                                    mapView.post { mapView.invalidate() }
-                                    mVariableFertViewModel.simGnssPickMode.value = 0
-                                    onReturnToConfig()
-                                },
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF757575))
-                            ) { Text("取消", color = Color.White) }
-                        }
-                    }
-                }
-            }
-        }
+        OperationDashboard(mVariableFertViewModel)
+        MenuBottomBar(mapView, mVariableFertViewModel, onClickSettigns, onClickParamSet)
+        TestOutputBottomBar(mVariableFertViewModel)
     }
 }
 
@@ -401,11 +238,10 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
             title = "清除已施肥区域图层",
             text = "你确实要清除已施肥区域的绘制图层吗？",
             onConfirm = {
-                // 运行时 drawPoly→fertGraphicsOverlay、drawPolyExport→fertGraphicsOverlayExport
-                // 两个图层都画，必须都清，否则黄色施肥轨迹残留
-                if (mapView.graphicsOverlays.contains(fertGraphicsOverlay) && fertGraphicsOverlay != null) {
-                    fertGraphicsOverlay?.graphics?.clear()
-                }
+//                if (mapView.graphicsOverlays.contains(fertGraphicsOverlay) && fertGraphicsOverlay != null) {
+//                    fertGraphicsOverlay?.graphics?.clear()
+////                    mapView.post { mapView.invalidate() }
+//                }
                 if (mapView.graphicsOverlays.contains(fertGraphicsOverlayExport) && fertGraphicsOverlayExport != null) {
                     fertGraphicsOverlayExport?.graphics?.clear()
                 }
@@ -478,6 +314,12 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
         }
     }
 
+    LaunchedEffect(shapefileFeatureLayer) {
+        shapefileFeatureLayer?.fullExtent?.let { extent ->
+            mapView.setViewpointAsync(Viewpoint(extent), 0.4f)
+        }
+    }
+
     Box(
         modifier = Modifier
             .padding(dimensionResource(id = R.dimen.small_custom_padding))
@@ -486,8 +328,8 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
         Box(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .fillMaxWidth(0.8f)
-                .fillMaxHeight(0.8f),
+                .fillMaxWidth(0.60f)
+                .fillMaxHeight(),
         ) {
             AndroidView(
                 modifier = Modifier
@@ -514,7 +356,7 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
                             mapView.graphicsOverlays.add(fertGraphicsOverlayExport)
                         }
                     }
-                    mArcGISMap.let {
+                    mArcGISMap?.let {
                         mapView.map = it
                         mapView.invalidate()
                     }
@@ -534,10 +376,10 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
             )
             Column(
                 modifier = Modifier
-                    .padding(start = dimensionResource(id = R.dimen.big_view_padding))
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, top = 10.dp)
 //                    .align(Alignment.CenterStart),
             ) {
-
                 TemplatesNav_LatiLonti(
                     value = loLaDiData.first,
                     value1 = loLaDiData.second,
@@ -545,9 +387,22 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
                     unit = "°"
                 )
 
-                Spacer(modifier = Modifier.height(30.dp))
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = if (shapefileFeatureLayer != null) "处方图已加载" else "正在恢复地块",
+                    color = Color(0xFF45534D),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .align(Alignment.Start)
+                        .padding(start = 2.dp, top = 2.dp, bottom = 2.dp)
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 IconButton(
+                    modifier = Modifier
+                        .size(36.dp),
                     // 因为对视图的操作不是在主线程操作，compose会自动响应变化
                     // 要想手动刷新需要mapView.post { mapView.invalidate() }
                     // 不能直接 mapView.invalidate()，不在主线程操作需要post否则没反应
@@ -561,10 +416,18 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
                         }
                     }
                 ) {
-                    Icon(imageVector = Icons.Filled.Fullscreen, contentDescription = "适应屏幕")
+                    Icon(
+                        imageVector = Icons.Filled.Fullscreen,
+                        contentDescription = "适应屏幕",
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
 
-                IconButton(onClick = {
+                Spacer(Modifier.height(10.dp))
+                IconButton(
+                    modifier = Modifier
+                        .size(36.dp),
+                    onClick = {
                     navCenterIsRunning.value = !navCenterIsRunning.value
                     mVariableFertViewModel.navCenterIsRunning.value =
                         mVariableFertViewModel.navCenterIsRunning.value != true
@@ -572,21 +435,46 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
                     Icon(
                         imageVector = if (navCenterIsRunning.value) Icons.Filled.Explore
                         else Icons.Outlined.Explore,
-                        contentDescription = "跟随当前位置"
+                        contentDescription = "跟随当前位置",
+                        modifier = Modifier.size(28.dp)
                     )
                 }
-                IconButton(onClick = { clearFertOverlayState.value = true }) {
+                Spacer(Modifier.height(10.dp))
+                IconButton(
+                    modifier = Modifier
+                        .size(36.dp),
+                    onClick = { clearFertOverlayState.value = true }
+                ) {
                     Icon(
                         imageVector = Icons.Filled.LayersClear,
-                        contentDescription = "清除已施肥区域图层"
+                        contentDescription = "清除已施肥区域图层",
+                        modifier = Modifier.size(28.dp)
                     )
                 }
 
-                IconButton(onClick = { mergeFertOverlayState.value = true }) {
-                    Icon(imageVector = Icons.Filled.Merge, contentDescription = "合并施肥区域图层")
+                Spacer(Modifier.height(10.dp))
+                IconButton(
+                    modifier = Modifier
+                        .size(36.dp),
+                    onClick = { mergeFertOverlayState.value = true }
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Merge,
+                        contentDescription = "合并施肥区域图层",
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
-                IconButton(onClick = { exportFertOverlayState.value = true }) {
-                    Icon(imageVector = Icons.Filled.Upload, contentDescription = "导出施肥区域图层")
+                Spacer(Modifier.height(10.dp))
+                IconButton(
+                    modifier = Modifier
+                        .size(36.dp),
+                    onClick = { exportFertOverlayState.value = true }
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Upload,
+                        contentDescription = "导出施肥区域图层",
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
 
                 if (shpLoadDone) {
@@ -633,14 +521,12 @@ fun MenuBottomBar(
     mapView: MapView,
     mVariableFertViewModel: VariableFertViewModel,
     onClickSettigns: () -> Unit = {},
-    onClickParamSet: () -> Unit = {},
-    onClickSowingDepth: () -> Unit = {}
+    onClickParamSet: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val sharedPre = MySharedPreFun(context).getMySharedPre()
     val editor = sharedPre.edit()
     val fertValueFieldResKey = context.getString(R.string.fertQueryField_name)
-    val depthValueFieldResKey = context.getString(R.string.depthQueryField_name)
 
     // 展开/收起菜单逻辑
     val menuIsExpanded = remember { mutableStateOf(false) }
@@ -652,13 +538,6 @@ fun MenuBottomBar(
         rememberSaveable {
             mutableStateOf(sharedPre.getString(fertValueFieldResKey, null) ?: "")
         }
-    // 处方图深度字段（可选）
-    val depthValueField =
-        rememberSaveable {
-            mutableStateOf(sharedPre.getString(depthValueFieldResKey, null) ?: "")
-        }
-    // 处方图控深模式开关
-    val depthPrescriptionMode by mVariableFertViewModel.depthPrescriptionMode.observeAsState(false)
 
     // 从viewmodel加载字段列表
     val fieldList by mVariableFertViewModel.fieldsList.observeAsState()
@@ -682,46 +561,32 @@ fun MenuBottomBar(
     }
     //... 如果添加了新shp却没有选择字段则警告结束
 
-    //... 处方图控深「未下发原因」一次性提示弹窗
-    val depthNotice by mVariableFertViewModel.depthControlNotice.observeAsState()
-    val depthNoticeText = remember { mutableStateOf("") }
-    val showDepthNotice = remember { mutableStateOf(false) }
-    LaunchedEffect(depthNotice) {
-        depthNotice?.let {
-            depthNoticeText.value = it
-            showDepthNotice.value = true
-            mVariableFertViewModel.depthControlNotice.postValue(null)  // 消费一次，避免重复弹
-        }
-    }
-    if (showDepthNotice.value) {
-        ShowConfirmDialog(
-            title = "处方图控深提示",
-            text = depthNoticeText.value,
-            showDialog = showDepthNotice,
-            showDismiss = false
-        )
-    }
-    //... 处方图控深提示结束
-
     // 菜单展开栏
     Box(
         modifier = Modifier
             .fillMaxSize(),
         contentAlignment = Alignment.BottomStart
     ) {
-        IconButton(
-            modifier = Modifier.padding(start = dimensionResource(id = R.dimen.middle_view_padding)),
-            onClick = { menuIsExpanded.value = true }
+        Surface(
+            color = Color.White,
+            modifier = Modifier
+                .padding(start = 8.dp, bottom = 8.dp)
+                .width(90.dp)
+                .height(48.dp),
+            shape = RoundedCornerShape(dimensionResource(id = R.dimen.small_roundedCornerShape))
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
+            IconButton(
+                modifier = Modifier.fillMaxSize(),
+                onClick = { menuIsExpanded.value = true }
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Menu,
-                    contentDescription = "菜单",
-                    tint = Color.White
-                )
-                Text(text = "菜单", color = Color.White)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.Menu,
+                        contentDescription = "菜单",
+                        tint = Color.Black
+                    )
+                    Text(text = "菜单", color = Color.Black)
+                }
             }
         }
         DropdownMenu(
@@ -739,18 +604,10 @@ fun MenuBottomBar(
             DropdownMenuItem(
                 onClick = {
                     onClickParamSet()
-                    menuIsExpanded.value = false
+                    menuIsExpanded.value = false // 手动关闭 DropdownMenu
                 }
             ) {
                 Text("参数设置")
-            }
-            DropdownMenuItem(
-                onClick = {
-                    onClickSowingDepth()
-                    menuIsExpanded.value = false
-                }
-            ) {
-                Text("播种深度控制")
             }
             DropdownMenuItem(onClick = {
                 // 点击更换处方图时，显示悬浮界面
@@ -932,92 +789,6 @@ fun MenuBottomBar(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    // ================= 步骤 3：播种深度字段 + 控深模式 =================
-                    Text(
-                        text = "步骤 3：选择播种深度字段（可选，单位 cm）",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (shpLoadDone.value) Color(0xFF1976D2) else Color.Gray,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = Color.White,
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE0E0E0)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        if (!shpLoadDone.value) {
-                            Text(
-                                text = "请先在上方选择处方图文件",
-                                fontSize = 14.sp,
-                                color = Color.LightGray,
-                                modifier = Modifier.padding(16.dp),
-                                textAlign = TextAlign.Center
-                            )
-                        } else {
-                            FlowRow(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                fieldList?.forEach { field ->
-                                    val isSelected = depthValueField.value == field
-                                    Surface(
-                                        shape = RoundedCornerShape(8.dp),
-                                        color = if (isSelected) Color(0xFF2E7D32) else Color(0xFFF5F5F5),
-                                        border = androidx.compose.foundation.BorderStroke(
-                                            width = 1.dp,
-                                            color = if (isSelected) Color(0xFF2E7D32) else Color.Transparent
-                                        ),
-                                        modifier = Modifier.clickable {
-                                            depthValueField.value = field
-                                            editor.putString(depthValueFieldResKey, field).apply()
-                                        }
-                                    ) {
-                                        Text(
-                                            text = field,
-                                            color = if (isSelected) Color.White else Color(0xFF555555),
-                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                                            fontSize = 14.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = if (depthPrescriptionMode) "处方图工作模式：播深" else "处方图工作模式：施肥",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF333333)
-                            )
-                            Text(
-                                text = "关=施肥 / 开=播深，二者互斥：同一时刻只控制一类电机并显示对应字段的处方图。" +
-                                    "播深模式下按\"开始\"自动使能深度电机、\"停止\"自动断使能。",
-                                fontSize = 12.sp,
-                                color = Color.Gray
-                            )
-                        }
-                        Switch(
-                            checked = depthPrescriptionMode,
-                            onCheckedChange = { mVariableFertViewModel.setDepthPrescriptionMode(it) }
-                        )
-                    }
-
                     Spacer(modifier = Modifier.height(32.dp))
 
                     // ================= 底部操作按钮区 =================
@@ -1028,12 +799,9 @@ fun MenuBottomBar(
                     ) {
                         TextButton(
                             onClick = {
-                                // 按工作模式校验对应字段：播深查深度字段，施肥查施肥字段
-                                val activeFieldResKey =
-                                    if (depthPrescriptionMode) depthValueFieldResKey else fertValueFieldResKey
-                                val activeFieldResValue = sharedPre.getString(activeFieldResKey, null)
+                                val fertFieldResValue = sharedPre.getString(fertValueFieldResKey, null)
                                 val fieldListValue = fieldList
-                                if (fieldListValue?.contains(activeFieldResValue) != true) {
+                                if (fieldListValue?.contains(fertFieldResValue) != true) {
                                     showNoFieldDialogAlert.value = true
                                     return@TextButton
                                 }
@@ -1054,26 +822,13 @@ fun MenuBottomBar(
                                     return@Button
                                 }
 
-                                // 检查是否选择了当前工作模式所需字段
+                                // 检查是否选择了字段
+                                val fertFieldResValue = sharedPre.getString(fertValueFieldResKey, null) ?: ""
                                 val fieldListValue = fieldList
-                                if (depthPrescriptionMode) {
-                                    // 播深模式：必须选播种深度字段
-                                    val depthFieldResValue = sharedPre.getString(depthValueFieldResKey, null) ?: ""
-                                    if (fieldListValue?.contains(depthFieldResValue) != true) {
-                                        android.widget.Toast.makeText(
-                                            context,
-                                            "播深模式：请先在步骤 3 选择播种深度字段！",
-                                            android.widget.Toast.LENGTH_SHORT
-                                        ).show()
-                                        return@Button
-                                    }
-                                } else {
-                                    // 施肥模式：必须选施肥字段
-                                    val fertFieldResValue = sharedPre.getString(fertValueFieldResKey, null) ?: ""
-                                    if (fieldListValue?.contains(fertFieldResValue) != true) {
-                                        showNoFieldDialogAlert.value = true
-                                        return@Button
-                                    }
+                                if (fieldListValue?.contains(fertFieldResValue) != true) {
+                                    // 没选字段，弹出警告
+                                    showNoFieldDialogAlert.value = true
+                                    return@Button
                                 }
 
                                 // 移除旧业务图层和覆盖层
@@ -1104,6 +859,141 @@ fun MenuBottomBar(
     }
 }
 
+@Composable
+private fun TestOutputBottomBar(
+    mVariableFertViewModel: VariableFertViewModel
+) {
+    val context = LocalContext.current
+    val testModeEnabled =
+        MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1"
+    if (!testModeEnabled) return
+
+    val sharedPre = MySharedPreFun(context).getMySharedPre()
+    var testValue by rememberSaveable {
+        mutableStateOf(
+            MySharedPreFun(context).getSpecificValue(R.string.testMode_testSend_name)
+                ?: context.getString(R.string.testMode_testSend_defeatValue)
+        )
+    }
+    var testUsesRpm by rememberSaveable {
+        mutableStateOf(
+            (MySharedPreFun(context).getSpecificValue(R.string.testMode_testSendMode_name)
+                ?: context.getString(R.string.testMode_testSendMode_defeatValue)) == "0"
+        )
+    }
+
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomStart) {
+        Row(
+            modifier = Modifier
+                .padding(start = 8.dp, bottom = 64.dp)
+                .width(298.dp)
+                .height(54.dp)
+                .padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Text(
+                text = "测试输出",
+                modifier = Modifier.width(52.dp),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.Black
+            )
+            MyDiyTextField(
+                modifier = Modifier.width(50.dp),
+                value = testValue,
+                onValueChange = { newText ->
+                    testValue = newText
+                    sharedPre.edit()
+                        .putString(context.getString(R.string.testMode_testSend_name), newText)
+                        .apply()
+                }
+            )
+            Row(
+                modifier = Modifier
+                    .width(112.dp)
+                    .height(38.dp)
+                    .background(Color.White, RoundedCornerShape(5.dp))
+                    .border(1.dp, Color(0xFFD0D0D0), RoundedCornerShape(5.dp))
+                    .padding(2.dp)
+            ) {
+                TestModeSegment("转速", "rpm", testUsesRpm, Modifier.weight(1f)) {
+                    testUsesRpm = true
+                    sharedPre.edit().putString(
+                        context.getString(R.string.testMode_testSendMode_name), "0"
+                    ).apply()
+                }
+                TestModeSegment("车速", "km/h", !testUsesRpm, Modifier.weight(1f)) {
+                    testUsesRpm = false
+                    sharedPre.edit().putString(
+                        context.getString(R.string.testMode_testSendMode_name), "1"
+                    ).apply()
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            IconButton(
+                modifier = Modifier.size(34.dp),
+                onClick = {
+                    if (mVariableFertViewModel.serialPortIsRunning.value != true) {
+                        MySerialPortFun().openSerialPort(context, mVariableFertViewModel)
+                    }
+                    val value = testValue.toDoubleOrNull() ?: 0.0
+                    if (testUsesRpm) {
+                        for (i in 0 until TOTAL_NODE_COUNT) {
+                            ConvAndCtrlFun().motorSpeedrpmSend(value, i)
+                        }
+                    } else {
+                        sendSimulatedForwardSpeed(value, mVariableFertViewModel)
+                    }
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "发送测试值",
+                    tint = Color.Black
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TestModeSegment(
+    title: String,
+    unit: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = modifier
+            .fillMaxHeight()
+            .background(Color.White, RoundedCornerShape(4.dp))
+            .then(
+                if (selected) {
+                    Modifier.border(1.5.dp, Color.Black, RoundedCornerShape(4.dp))
+                } else {
+                    Modifier
+                }
+            )
+            .clickable(onClick = onClick),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            title,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (selected) Color.Black else Color(0xFF555555)
+        )
+        Text(
+            unit,
+            fontSize = 8.sp,
+            color = if (selected) Color(0xFF333333) else Color(0xFF888888)
+        )
+    }
+}
+
 /**
  * 左右侧信息栏
  * @param  mVariableFertViewModel:更新地图UI viewmodel
@@ -1111,6 +1001,486 @@ fun MenuBottomBar(
  * @return
  * @note   因为这里有信息栏，也有图层提示，所以有两个viewmodel
  */
+@Composable
+fun OperationDashboard(
+    mVariableFertViewModel: VariableFertViewModel
+) {
+    val forwardSpeed by mVariableFertViewModel.forwardspeed.observeAsState(0.0)
+    val avgFert by mVariableFertViewModel.avgFert.observeAsState(0.0)
+    val avgAccuracy by mVariableFertViewModel.avgAccuracy.observeAsState(0.0)
+    val fertFlow by mVariableFertViewModel.displayFertArray.observeAsState(DoubleArray(FERT_NODE_COUNT))
+    val fertRpm by mVariableFertViewModel.fertMotorSpeed.observeAsState(DoubleArray(FERT_NODE_COUNT))
+    val seedRpm by mVariableFertViewModel.seedMotorSpeed.observeAsState(DoubleArray(SEED_NODE_COUNT))
+    val seedCounts by mVariableFertViewModel.seedSensorCount.observeAsState(IntArray(SEED_NODE_COUNT))
+    val motorCurrent by mVariableFertViewModel.motorCurrent.observeAsState(DoubleArray(TOTAL_NODE_COUNT))
+    val motorVoltage by mVariableFertViewModel.motorVoltage.observeAsState(DoubleArray(TOTAL_NODE_COUNT))
+    val electricalValid by mVariableFertViewModel.motorElectricalValid.observeAsState(BooleanArray(TOTAL_NODE_COUNT))
+    val gnssGood by mVariableFertViewModel.gnssIsGood.observeAsState(false)
+    val canRunning by mVariableFertViewModel.serialPortIsRunning.observeAsState(false)
+    var showElectrical by rememberSaveable { mutableStateOf(false) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(6.dp)
+    ) {
+        Surface(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .fillMaxWidth(0.40f)
+                .fillMaxHeight(),
+            color = Color(0xFFF7F9F7),
+            elevation = 0.dp
+        ) {
+            BoxWithConstraints {
+                val compact = maxHeight < 620.dp
+                val sectionTitleSize = if (compact) 11.sp else 12.sp
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(start = 8.dp, top = 7.dp, end = 7.dp, bottom = 7.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(if (compact) 28.dp else 32.dp)
+                            .background(Color.White)
+                            .border(1.dp, Color(0xFFD7DEDA)),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(4.dp)
+                                .fillMaxHeight()
+                                .background(Color(0xFF8B9A92))
+                        )
+                        Text(
+                            text = "玉米精量播种机种肥测控系统",
+                            color = Color(0xFF2F3B35),
+                            fontSize = if (compact) 13.sp else 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(start = 10.dp)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(if (compact) 48.dp else 56.dp),
+                        horizontalArrangement = Arrangement.spacedBy(1.dp)
+                    ) {
+                        DashboardMetric("前进速度", "%.2f".format(forwardSpeed), "km/h", Color(0xFF176B87), Modifier.weight(1f))
+                        DashboardMetric("平均施肥", "%.1f".format(avgFert), "kg/亩", Color(0xFF3A7D44), Modifier.weight(1f))
+                        DashboardMetric("平均准确率", "%.1f".format(avgAccuracy), "%", Color(0xFF9A6700), Modifier.weight(1f))
+                        DashboardMetric(
+                            "通信状态",
+                            if (canRunning) "CAN" else "--",
+                            if (gnssGood) "GNSS正常" else "GNSS等待",
+                            if (canRunning && gnssGood) Color(0xFF2E7D32) else Color(0xFF9C3D10),
+                            Modifier.weight(1f)
+                        )
+                    }
+
+                    DashboardSectionTitle(
+                        "施肥流量",
+                        if (showElectrical) "收起电参" else "展开电参",
+                        sectionTitleSize,
+                        onSubtitleClick = { showElectrical = !showElectrical }
+                    )
+                    FertilizerChannelGrid(
+                        rpmValues = fertRpm,
+                        flowValues = fertFlow,
+                        currentValues = motorCurrent,
+                        voltageValues = motorVoltage,
+                        electricalValid = electricalValid,
+                        showElectrical = showElectrical,
+                        compact = compact,
+                        extraCompact = false,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    )
+
+                    DashboardSectionTitle(
+                        "播种计数",
+                        "1-8路 · 节点9-16",
+                        sectionTitleSize
+                    )
+                    SeedChannelGrid(
+                        rpmValues = seedRpm,
+                        counts = seedCounts,
+                        currentValues = motorCurrent,
+                        voltageValues = motorVoltage,
+                        electricalValid = electricalValid,
+                        showElectrical = showElectrical,
+                        compact = compact,
+                        extraCompact = false,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+internal fun sendSimulatedForwardSpeed(
+    speedKmh: Double,
+    viewModel: VariableFertViewModel
+) {
+    val speed = speedKmh.coerceIn(0.0, 30.0)
+    viewModel.forwardspeed.postValue(speed)
+    val seedTarget = ConvAndCtrlFun().seedToMotorSpeed(speed)
+    viewModel.seedTargetRpm.postValue(DoubleArray(SEED_NODE_COUNT) { seedTarget })
+    for (i in 0 until SEED_NODE_COUNT) {
+        ConvAndCtrlFun().motorSpeedrpmSend(seedTarget, i + SEED_NODE_START_INDEX)
+    }
+
+    val targetFert = mSPParamData.fertApplied.coerceAtLeast(0.0)
+    for (i in 0 until FERT_NODE_COUNT) {
+        val a = runCatching { fittingCoefficientA[i] }.getOrDefault(0.0)
+        val b = runCatching { fittingCoefficientB[i] }.getOrDefault(0.0)
+        val targetRpm = ConvAndCtrlFun().fertToMotorSpeed(
+            targetFert,
+            speed,
+            mSPParamData.rowSize,
+            a,
+            b
+        )
+        ConvAndCtrlFun().motorSpeedrpmSend(targetRpm, i + FERT_NODE_START_INDEX)
+    }
+}
+
+@Composable
+private fun DashboardMetric(
+    title: String,
+    value: String,
+    unit: String,
+    accent: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxHeight()
+            .background(Color.White)
+            .border(1.dp, Color(0xFFD7DEDA))
+            .padding(horizontal = 5.dp, vertical = 3.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(title, fontSize = 9.sp, color = Color(0xFF7A8580), maxLines = 1)
+        Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = accent, maxLines = 1)
+        Text(unit, fontSize = 8.sp, color = Color(0xFF69756F), maxLines = 1)
+    }
+}
+
+@Composable
+private fun DashboardSectionTitle(
+    title: String,
+    subtitle: String,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    onSubtitleClick: (() -> Unit)? = null
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(22.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .width(4.dp)
+                .fillMaxHeight()
+                .background(Color(0xFF9AA7A0))
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(title, fontSize = fontSize, fontWeight = FontWeight.Bold, color = Color(0xFF173F35))
+        Spacer(Modifier.weight(1f))
+        Text(
+            subtitle,
+            fontSize = 9.sp,
+            color = if (onSubtitleClick != null) Color(0xFF41675A) else Color(0xFF6B7772),
+            fontWeight = if (onSubtitleClick != null) FontWeight.Bold else FontWeight.Normal,
+            modifier = if (onSubtitleClick != null) {
+                Modifier
+                    .clickable(onClick = onSubtitleClick)
+                    .background(Color(0xFFE8EDEA), RoundedCornerShape(3.dp))
+                    .padding(horizontal = 7.dp, vertical = 3.dp)
+            } else {
+                Modifier
+            }
+        )
+    }
+}
+
+@Composable
+private fun FertilizerChannelGrid(
+    rpmValues: DoubleArray,
+    flowValues: DoubleArray,
+    currentValues: DoubleArray,
+    voltageValues: DoubleArray,
+    electricalValid: BooleanArray,
+    showElectrical: Boolean,
+    compact: Boolean,
+    extraCompact: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val peakFlow = maxOf(1.0, (flowValues.maxOrNull() ?: 0.0) * 1.15)
+    Column(
+        modifier = modifier
+            .background(Color(0xFFF1F4F2), RoundedCornerShape(4.dp))
+            .padding(if (extraCompact) 4.dp else 6.dp),
+        verticalArrangement = Arrangement.spacedBy(if (extraCompact) 3.dp else 5.dp)
+    ) {
+        for (row in 0 until 4) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(if (extraCompact) 3.dp else 5.dp)
+            ) {
+                for (col in 0 until 2) {
+                    val index = row * 2 + col
+                    FertilizerFlowLane(
+                        index = index,
+                        rpm = rpmValues.getOrElse(index) { 0.0 },
+                        flow = flowValues.getOrElse(index) { 0.0 },
+                        peakFlow = peakFlow,
+                        current = currentValues.getOrElse(index + FERT_NODE_START_INDEX) { 0.0 },
+                        voltage = voltageValues.getOrElse(index + FERT_NODE_START_INDEX) { 0.0 },
+                        electricalValid = electricalValid.getOrElse(index + FERT_NODE_START_INDEX) { false },
+                        showElectrical = showElectrical,
+                        compact = compact,
+                        extraCompact = extraCompact,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FertilizerFlowLane(
+    index: Int,
+    rpm: Double,
+    flow: Double,
+    peakFlow: Double,
+    current: Double,
+    voltage: Double,
+    electricalValid: Boolean,
+    showElectrical: Boolean,
+    compact: Boolean,
+    extraCompact: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val running = rpm >= 0.5
+    val level = (flow / peakFlow).toFloat().coerceIn(0f, 1f)
+    Row(
+        modifier = modifier
+            .fillMaxHeight()
+            .background(Color.White, RoundedCornerShape(4.dp))
+            .border(1.dp, Color(0xFFDCE3DF), RoundedCornerShape(4.dp))
+            .padding(
+                horizontal = if (extraCompact) 5.dp else 7.dp,
+                vertical = if (extraCompact) 2.dp else 5.dp
+            ),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(if (extraCompact) 22.dp else if (compact) 25.dp else 29.dp)
+                .background(if (running) Color(0xFF2F8754) else Color(0xFFE3E9E5), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "${index + 1}",
+                fontSize = if (compact) 10.sp else 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (running) Color.White else Color(0xFF64706A)
+            )
+        }
+        Spacer(Modifier.width(if (extraCompact) 5.dp else 7.dp))
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+                Text(
+                    text = "%.2f".format(flow),
+                    fontSize = if (extraCompact) 10.sp else if (compact) 11.sp else 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF1D6846)
+                )
+                Spacer(Modifier.width(3.dp))
+                Text("g/s", fontSize = 8.sp, color = Color(0xFF6C7872))
+                Spacer(Modifier.weight(1f))
+                Text("%.1f rpm".format(rpm), fontSize = 8.sp, color = Color(0xFF176B87))
+            }
+            Spacer(Modifier.height(if (extraCompact) 2.dp else 4.dp))
+            LinearProgressIndicator(
+                progress = level,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(if (extraCompact) 4.dp else 6.dp)
+                    .clip(CircleShape),
+                color = if (level > 0.85f) Color(0xFFD39A27) else Color(0xFF4B9A68),
+                backgroundColor = Color(0xFFE2E8E4)
+            )
+            Spacer(Modifier.height(if (extraCompact) 1.dp else 3.dp))
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = if (running) "运行" else "待机",
+                    fontSize = 8.sp,
+                    color = if (running) Color(0xFF477D60) else Color(0xFF7A8580)
+                )
+                if (showElectrical) {
+                    Spacer(Modifier.weight(1f))
+                    ElectricalReading(current, voltage, electricalValid, compact)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SeedChannelGrid(
+    rpmValues: DoubleArray,
+    counts: IntArray,
+    currentValues: DoubleArray,
+    voltageValues: DoubleArray,
+    electricalValid: BooleanArray,
+    showElectrical: Boolean,
+    compact: Boolean,
+    extraCompact: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .background(Color(0xFFF1F4F2), RoundedCornerShape(4.dp))
+            .padding(if (extraCompact) 4.dp else 6.dp),
+        verticalArrangement = Arrangement.spacedBy(if (extraCompact) 3.dp else 5.dp)
+    ) {
+        for (row in 0 until 4) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(if (extraCompact) 3.dp else 5.dp)
+            ) {
+                for (col in 0 until 2) {
+                    val index = row * 2 + col
+                    SeedCounterLane(
+                        index = index,
+                        rpm = rpmValues.getOrElse(index) { 0.0 },
+                        count = counts.getOrElse(index) { 0 },
+                        current = currentValues.getOrElse(index + SEED_NODE_START_INDEX) { 0.0 },
+                        voltage = voltageValues.getOrElse(index + SEED_NODE_START_INDEX) { 0.0 },
+                        electricalValid = electricalValid.getOrElse(index + SEED_NODE_START_INDEX) { false },
+                        showElectrical = showElectrical,
+                        compact = compact,
+                        extraCompact = extraCompact,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SeedCounterLane(
+    index: Int,
+    rpm: Double,
+    count: Int,
+    current: Double,
+    voltage: Double,
+    electricalValid: Boolean,
+    showElectrical: Boolean,
+    compact: Boolean,
+    extraCompact: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val running = rpm >= 0.5
+    val hasSeed = count > 0
+    Row(
+        modifier = modifier
+            .fillMaxHeight()
+            .background(if (hasSeed) Color(0xFFE8F2E8) else Color.White)
+            .border(
+                1.dp,
+                if (hasSeed) Color(0xFF78A77F) else Color(0xFFD8DFDB),
+                RoundedCornerShape(4.dp)
+            )
+            .padding(
+                horizontal = if (extraCompact) 5.dp else 7.dp,
+                vertical = if (extraCompact) 2.dp else 5.dp
+            ),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(if (extraCompact) 23.dp else if (compact) 28.dp else 32.dp)
+                .background(
+                    if (hasSeed) Color(0xFF2F8754) else Color(0xFFE7ECE9),
+                    CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "${index + 1}",
+                fontSize = if (compact) 10.sp else 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (hasSeed) Color.White else Color(0xFF6D7772),
+                maxLines = 1
+            )
+        }
+        Spacer(Modifier.width(if (extraCompact) 5.dp else 7.dp))
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "${index + 1}路",
+                    fontSize = if (compact) 10.sp else 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF35423C)
+                )
+                Spacer(Modifier.width(5.dp))
+                Text("$count 粒", fontSize = if (compact) 9.sp else 10.sp, color = Color(0xFF765400))
+                Spacer(Modifier.weight(1f))
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .background(if (running) Color(0xFF2C7890) else Color(0xFFC8D0CC), CircleShape)
+                )
+            }
+            Spacer(Modifier.height(if (extraCompact) 2.dp else 4.dp))
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Text("%.1f rpm".format(rpm), fontSize = 8.sp, color = Color(0xFF176B87))
+                Spacer(Modifier.weight(1f))
+                if (showElectrical) {
+                    ElectricalReading(current, voltage, electricalValid, compact)
+                } else {
+                    Text(if (hasSeed) "已计数" else "待机", fontSize = 8.sp, color = Color(0xFF7A8580))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ElectricalReading(
+    current: Double,
+    voltage: Double,
+    valid: Boolean,
+    compact: Boolean
+) {
+    val text = if (valid) {
+        "%.2f A  %.1f V".format(current, voltage)
+    } else {
+        "-- A  -- V"
+    }
+    Text(
+        text = text,
+        fontSize = if (compact) 8.sp else 9.sp,
+        color = if (valid) Color(0xFF7A3E00) else Color(0xFF8A918D),
+        maxLines = 1
+    )
+}
+
 //@Preview(
 //    widthDp = 1712,
 //    heightDp = 1072
@@ -1203,6 +1573,8 @@ fun MsgScreenRight(
                 TemplatesRightMsgText_Value(title = "平均施肥量(kg/亩)", doubleArray = doubleArrayOf(avgFert))
                 TemplatesRightMsgText_Value(title = "平均准确率(%)", doubleArray = doubleArrayOf(avgAcc))
 
+                SeedSensorCounterWindow(mVariableFertViewModel)
+
                 if (MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1") {
                     Box(modifier = Modifier.background(Color.White, RoundedCornerShape(8.dp))) {
                         Column(
@@ -1255,7 +1627,7 @@ fun MsgScreenRight(
                                         isMotorRpmState.value = !isMotorRpmState.value
                                         sharedPre.edit().putString(context.getString(R.string.testMode_testSendMode_name), if (isMotorRpmState.value) "0" else "1").apply()
                                     },
-                                    text = if (isMotorRpmState.value) "rpm" else "g/s",
+                                    text = if (isMotorRpmState.value) "rpm" else "km/h",
                                     style = TextStyle(color = Color.Black, fontFamily = FontFamily(Font(R.font.youshehaoshenti)), fontSize = 20.sp)
                                 )
                                 IconButton(
@@ -1264,18 +1636,14 @@ fun MsgScreenRight(
                                             MySerialPortFun().openSerialPort(context, mVariableFertViewModel)
                                         }
                                         if (isMotorRpmState.value) {
-                                            for (i in 0 until mSPParamData.rowNumber) {
+                                            for (i in 0 until TOTAL_NODE_COUNT) {
                                                 ConvAndCtrlFun().motorSpeedrpmSend(testSendRemember.value.toDouble(), i)
                                             }
                                         } else {
-                                            for (i in 0 until mSPParamData.rowNumber) {
-                                                val flowtoRpm = ConvAndCtrlFun().fertflowToMotorSpeed(
-                                                    testSendRemember.value.toDouble(),
-                                                    fittingCoefficientA[i],
-                                                    fittingCoefficientB[i]
-                                                )
-                                                ConvAndCtrlFun().motorSpeedrpmSend(flowtoRpm, i)
-                                            }
+                                            sendSimulatedForwardSpeed(
+                                                testSendRemember.value.toDoubleOrNull() ?: 0.0,
+                                                mVariableFertViewModel
+                                            )
                                         }
                                     }
                                 ) {
@@ -1293,9 +1661,51 @@ fun MsgScreenRight(
 // 2024年12月12日16:31:34，下诉代码为界面重构修改的代码
 
 @Composable
+fun SeedSensorCounterWindow(mVariableFertViewModel: VariableFertViewModel) {
+    val seedCounts by mVariableFertViewModel.seedSensorCount.observeAsState(IntArray(SEED_NODE_COUNT) { 0 })
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White, RoundedCornerShape(8.dp))
+            .padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text("播种计数", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFF222222))
+        for (row in 0 until 4) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                for (col in 0 until 2) {
+                    val index = row * 2 + col
+                    val count = seedCounts.getOrNull(index) ?: 0
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .background(
+                                if (count > 0) Color(0xFFE8F5E9) else Color(0xFFF5F5F5),
+                                RoundedCornerShape(6.dp)
+                            )
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("播${index + 1}", fontSize = 11.sp, color = Color(0xFF666666))
+                            Text(count.toString(), fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun MsgScreenBottom(mVariableFertViewModel: VariableFertViewModel = VariableFertViewModel()) {
     // 初始化时通过判断 rowNumber 保证数组至少有长度，避免一开始为0时崩溃
-    val safeSize = if (mSPParamData.rowNumber > 0) mSPParamData.rowNumber else 8
+    val safeSize = FERT_NODE_COUNT
 
     // 让底部图表直接使用完美计算的显示数据，取代底层抖动的 confertflow
     val confertflow by mVariableFertViewModel.displayFertArray.observeAsState(DoubleArray(safeSize) { 0.0 })

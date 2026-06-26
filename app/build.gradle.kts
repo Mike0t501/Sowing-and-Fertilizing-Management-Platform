@@ -1,7 +1,21 @@
+layout.buildDirectory.set(file("D:/development/Android/build-corn-seedfert-monitor-ui467"))
+
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.jetbrainsKotlinAndroid)
 }
+
+val localProperties = java.util.Properties().apply {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        localPropertiesFile.inputStream().use { load(it) }
+    }
+}
+
+fun quotedLocalProperty(name: String): String =
+    (localProperties.getProperty(name) ?: System.getenv(name).orEmpty())
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
 
 android {
     signingConfigs {
@@ -10,16 +24,16 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.nx.vfremake.v3"
+        applicationId = "com.nx.corn.seedfert.monitor"
         minSdk = 29
         targetSdk = 34
-        versionCode = 2
-        versionName = "3.0.0"
+        versionCode = 19
+        versionName = "4.6.7-frameless-testbar"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
-            abiFilters.addAll(arrayOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64"))
+            abiFilters.addAll(arrayOf("armeabi-v7a", "arm64-v8a"))
         }
 
         kotlinOptions {
@@ -32,21 +46,14 @@ android {
         composeOptions {
             kotlinCompilerExtensionVersion = "1.5.3"
         }
-        buildConfigField(
-            "String",
-            "API_KEY",
-            "\"AAPKfdce8f77ea174a8a8919d740a1cf8bf16BKmZwlbY1Ze5PpWzFPY7g5-OJk7QgCePqQF2w50H42MDUjg496CyFZP_ESGbhl_\""
-        )
-        buildConfigField(
-            "String",
-            "Lite_License",
-            "\"runtimelite,1000,rud5900429336,none,B5H93PJPXJ0H8YAJM066\""
-        )
+        buildConfigField("String", "API_KEY", "\"${quotedLocalProperty("ARCGIS_API_KEY")}\"")
+        buildConfigField("String", "Lite_License", "\"${quotedLocalProperty("ARCGIS_LITE_LICENSE")}\"")
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -117,9 +124,9 @@ dependencies {
 
     implementation (libs.gson)
 
-    // arcgis runtime for Android 库和Android serialport库依赖
+    // ArcGIS Runtime and Android serial port dependencies.
     // https://mvnrepository.com/artifact/com.esri.arcgisruntime/arcgis-android
-    //本地arcgis runtime api，没法用，arcgis需要调用drawable的文件，只有jar包是没法调用的，会报错
+    // Use Maven ArcGIS runtime because the local jar cannot load drawable resources.
     implementation(libs.arcgis.android)
     // https://github.com/licheedev/Android-SerialPort-API
 //    implementation("com.licheedev:android-serialport:2.1.3")

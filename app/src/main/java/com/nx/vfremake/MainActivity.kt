@@ -21,12 +21,18 @@ import android.app.Activity
 import android.content.Context
 import android.media.MediaPlayer
 import android.content.Intent
-import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
@@ -39,8 +45,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -57,19 +65,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.dimensionResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.esri.arcgisruntime.ArcGISRuntimeEnvironment
+import com.esri.arcgisruntime.geometry.Point
+import com.esri.arcgisruntime.geometry.SpatialReferences
 import com.esri.arcgisruntime.mapping.view.BackgroundGrid
 import com.esri.arcgisruntime.mapping.view.MapView
+import com.esri.arcgisruntime.mapping.ArcGISMap
+import com.esri.arcgisruntime.mapping.Basemap
+import com.esri.arcgisruntime.mapping.Viewpoint
+import com.nx.vfremake.funClass.ExportGeoFun
+import com.nx.vfremake.funClass.TableRow
+import org.json.JSONArray
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
 import com.nx.vfremake.coroutine.DB9reCANseCoroutine
 import com.nx.vfremake.coroutine.MyWriteSaveFun
-import com.nx.vfremake.coroutine.SowingDepthCoroutine
-import com.nx.vfremake.data.depthControlReadinessWarning
 import com.nx.vfremake.coroutine.TestModeCoroutine
 import com.nx.vfremake.funClass.ConvAndCtrlFun
 import com.nx.vfremake.funClass.DocuAndManageFun
@@ -84,6 +97,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.nx.vfremake.lastSentMotorSpeed
+import com.nx.vfremake.ui.runDiagnosticTest
+import com.nx.vfremake.ui.scanSerialDevices
+import com.nx.vfremake.ui.sendSimulatedForwardSpeed
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
@@ -101,25 +118,27 @@ class MainActivity : AppCompatActivity() {
     private lateinit var mDB9reCANseCoroutine: DB9reCANseCoroutine
     private var mCanReceiveCoroutine = CanReceiveCoroutine()
 
-    // 处方图控深模式：作业期间由 MainActivity 独占持有，避免与 SowingDepthScreen 双实例写 CAN
-    private var mSowingDepthCoroutine = SowingDepthCoroutine()
-
     // 定义ActivityResultLauncher用于对象选择
     private lateinit var selectWriteDirectoryLauncher: ActivityResultLauncher<Uri?>
+
+    // ===== WebView UI 集成 =====
+    private val isRunningState = mutableStateOf(false)   // 运行标志（TestModeCoroutine 需要 MutableState）
+    private var watchdogJob: Job? = null
+    private lateinit var webView: WebView
+    private lateinit var root: FrameLayout
+    private val pushHandler = Handler(Looper.getMainLooper())
+    @Volatile private var mapTracking = false   // 地图位置跟踪开关
+    @Volatile private var currentPage = "home"  // 当前页面，按页推送数据
 
     //...oncreat开始
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // 开机语音（随机从 begin1/begin2/begin3 中选一个播放）
-        // 用 nanoTime 取模而非 Random.Default，避免工业设备开机熵池不足导致每次选同一个
-        try {
-            val beginList = listOf(R.raw.begin1, R.raw.begin2, R.raw.begin3)
-            val idx = ((System.nanoTime() % 3 + 3) % 3).toInt()
-            val mp = MediaPlayer.create(this, beginList[idx])
-            mp?.setOnCompletionListener { it.release() }
-            mp?.start()
-        } catch (_: Exception) {}
+        selectWriteDirectoryLauncher =
+            selectDirectoryLauncher(R.string.myWriteDir_DocumentUri_name, this)
+        selectLoadShpFileLauncher =
+            selectShpFileLauncher(R.string.myLoadShpFile_Path_name, this)
 
         // 注入"应用"按钮提示音，由 Composable 调用，保证与报错音走同一条播放链路
         onPlayApplySound = {
@@ -128,44 +147,534 @@ class MainActivity : AppCompatActivity() {
             enqueueErrorSound(getList[idx], isError = false)
         }
 
-        setContent {
-            VariableFert(
-                mapView,
-                mVariableFertViewModel,
-            ) { StartAndStopBottom() }
+        // ===== 用 WebView 承载新版网页 UI；ArcGIS 地图浮在中间“留白”区 =====
+        webView = WebView(this).apply {
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)  // 透明，露出下层 ArcGIS 地图
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.allowFileAccess = true
+            settings.allowContentAccess = true
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    // 启用 App 内透明模式（中间透出底层地图）+ 让网页上报 .map 实际区域用于精确定位
+                    view?.evaluateJavascript(
+                        "document.body.classList.add('inapp');if(window.reportMapRect)window.reportMapRect();",
+                        null
+                    )
+                    pushInitSettings()
+                    startPushLoop()
+                    // 界面显示后再初始化较重的 ArcGIS 地图，避免开机卡死被系统杀
+                    pushHandler.postDelayed({ setupMapDeferred() }, 600)
+                }
+            }
+            addJavascriptInterface(
+                WebBridge(
+                    onSetRunning = { run -> runOnUiThread { if (run) startWork() else stopWork() } },
+                    onLoadShp = { field -> runOnUiThread { onWebLoadShp(field) } },
+                    onSelectShp = { runOnUiThread { DocuAndManageFun().selectShapefile(selectLoadShpFileLauncher) } },
+                    onSaveParams = { json -> runOnUiThread { onWebSaveParams(json) } },
+                    onRunDiagnostic = { runOnUiThread { runDiagnostics() } },
+                    onPage = { page -> runOnUiThread { currentPage = page; if (::mapView.isInitialized) mapView.visibility = if (page == "home") View.VISIBLE else View.GONE } },
+                    onSaveDanti = { json -> runOnUiThread { onWebSaveDanti(json) } },
+                    onMapOp = { op -> runOnUiThread { onMapOp(op) } },
+                    onSetMapRect = { l, t, w, h -> runOnUiThread { setMapBounds(l, t, w, h) } },
+                    onSendTest = { value, isRpm -> runOnUiThread { onWebSendTest(value, isRpm) } },
+                    onMapVisible = { vis -> runOnUiThread { if (::mapView.isInitialized) mapView.visibility = if (vis && currentPage == "home") View.VISIBLE else View.GONE } }
+                ),
+                "NativeBridge"
+            )
+            loadUrl("file:///android_asset/web/index.html")
         }
 
-        // 首次运行需要将assets里的资源复制到外部专属目录files/shpFile/下
-        val firstRunState = MySharedPreFun(this).getSpecificValue(R.string.runForTheFirstTime)
-        if (firstRunState != "1") {
-            customViewModel.copyShpFilesJob = lifecycleScope.launch(Dispatchers.Default) {
-                DocuAndManageFun().copyShpFilesToExternalStorage(this@MainActivity)
+        root = FrameLayout(this)
+        root.setBackgroundColor(0xFFEAF1F6.toInt())   // 浅色底，避免透明区露黑边
+        // 只先放 WebView，让界面秒开；ArcGIS 地图稍后由 setupMapDeferred() 加上
+        root.addView(
+            webView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        setContentView(root)
+
+        // 处方图字段列表更新 → 推给网页“步骤2”字段块
+        mVariableFertViewModel.fieldsList.observe(this) { list ->
+            if (::webView.isInitialized && !list.isNullOrEmpty()) {
+                val arr = JSONArray(); list.forEach { arr.put(it) }
+                webView.evaluateJavascript("if(window.setRxFields)window.setRxFields(${JSONObject.quote(arr.toString())})", null)
             }
         }
 
-        // 设置apikey使用功能
-        ArcGISRuntimeEnvironment.setApiKey(BuildConfig.API_KEY)
-
-        // 初始化selectDirectoryLauncher
-        selectWriteDirectoryLauncher =
-            selectDirectoryLauncher(R.string.myWriteDir_DocumentUri_name, this)
-        selectLoadShpFileLauncher =
-            selectShpFileLauncher(R.string.myLoadShpFile_Path_name, this)
-
-        // 屏幕常亮
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        val colorArgbBackgrand = this.getColor(R.color.background_color_default)
-        // 初始化mapview
-        mapView = MapView(this).apply {
-            isAttributionTextVisible = false
-            setBackgroundColor(colorArgbBackgrand)
-            backgroundGrid = BackgroundGrid(colorArgbBackgrand, colorArgbBackgrand, 0f, 2f)
+        lifecycleScope.launch {
+            delay(350)
+            playStartupSound()
         }
 
-        MyArcGisFun().loadShp(this, mVariableFertViewModel)
     }
     //...oncreat结束
+
+    // ====== 延迟初始化 ArcGIS 地图：界面显示后再做，避免开机卡死被系统杀 ======
+    private var mapReady = false
+    private fun setupMapDeferred() {
+        if (mapReady || isFinishing) return
+        mapReady = true
+        try {
+            ArcGISRuntimeEnvironment.setApiKey(BuildConfig.API_KEY)
+            val colorArgbBackgrand = getColor(R.color.background_color_default)
+            mapView = MapView(this).apply {
+                isAttributionTextVisible = false
+                setBackgroundColor(colorArgbBackgrand)
+                backgroundGrid = BackgroundGrid(colorArgbBackgrand, colorArgbBackgrand, 0f, 2f)
+                map = ArcGISMap(Basemap())
+            }
+            val dn = resources.displayMetrics.density
+            val mapLp = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            ).apply {
+                setMargins((104 * dn).toInt(), (58 * dn).toInt(), (28 * dn).toInt(), (96 * dn).toInt())
+            }
+            root.addView(mapView, 0, mapLp)   // index 0 = 放到 WebView 下层，透明网页透出地图
+            mapView.visibility = if (currentPage == "home") View.VISIBLE else View.GONE
+
+            // 关键：把加载好的处方图地图挂到 mapView（原 Compose 是 mapView.map = mArcGISMap）
+            mVariableFertViewModel.mArcGISMap.observe(this) { m ->
+                if (m != null && ::mapView.isInitialized) {
+                    mapView.map = m
+                    // 适应到处方图地块范围，避免视点停在空白处
+                    val layer = mVariableFertViewModel.shapefileFeatureLayer.value
+                    val fit = Runnable {
+                        val ext = layer?.fullExtent
+                        if (ext != null) { try { mapView.setViewpointAsync(Viewpoint(ext), 0.5f) } catch (_: Throwable) {} }
+                    }
+                    fit.run()
+                    layer?.addDoneLoadingListener { fit.run() }
+                }
+            }
+
+            webView.evaluateJavascript("if(window.reportMapRect)window.reportMapRect()", null)
+
+            // 复制并加载默认处方图
+            customViewModel.copyShpFilesJob = lifecycleScope.launch(Dispatchers.Default) {
+                DocuAndManageFun().copyShpFilesToExternalStorage(this@MainActivity)
+                withContext(Dispatchers.Main) {
+                    if (::mapView.isInitialized) MyArcGisFun().loadShp(this@MainActivity, mVariableFertViewModel)
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun playStartupSound() {
+        try {
+            val beginList = listOf(R.raw.begin1, R.raw.begin2, R.raw.begin3)
+            val idx = ((System.nanoTime() % 3 + 3) % 3).toInt()
+            val mp = MediaPlayer.create(this, beginList[idx])
+            mp?.setOnCompletionListener { it.release() }
+            mp?.start()
+        } catch (_: Exception) {}
+    }
+
+    // ====== 网页数据推送：把 ViewModel 实时数据喂给网页灵动岛 ======
+    private val pushRunnable = object : Runnable {
+        override fun run() {
+            pushToWeb()
+            pushHandler.postDelayed(this, 450)
+        }
+    }
+
+    private fun startPushLoop() {
+        pushHandler.removeCallbacks(pushRunnable)
+        pushHandler.post(pushRunnable)
+    }
+
+    private fun pushToWeb() {
+        if (!::webView.isInitialized) return
+        when (currentPage) {
+            "home" -> {
+                val rpm = mVariableFertViewModel.motorSpeed.value ?: DoubleArray(TOTAL_NODE_COUNT)
+                val sb = StringBuilder("[")
+                for (i in 0 until TOTAL_NODE_COUNT) { if (i > 0) sb.append(","); sb.append(if (i < rpm.size) rpm[i] else 0.0) }
+                sb.append("]")
+                val runCount = (0 until TOTAL_NODE_COUNT).count { (rpm.getOrNull(it) ?: 0.0) >= 1.0 }
+                val avg = mVariableFertViewModel.avgFert.value ?: 0.0
+                webView.evaluateJavascript("if(window.pushMotors)window.pushMotors($sb)", null)
+                webView.evaluateJavascript("if(window.pushStatus)window.pushStatus($isSystemRunning,$runCount,$avg)", null)
+
+                if (mapTracking && ::mapView.isInitialized) {
+                    val ll = mVariableFertViewModel.loLaDidegData.value
+                    if (ll != null && (ll.first != 0.0 || ll.second != 0.0)) {
+                        try {
+                            val p = Point(ll.first, ll.second, SpatialReferences.getWgs84())
+                            mapView.setViewpointAsync(Viewpoint(p, mapView.mapScale), 0.25f)
+                        } catch (_: Throwable) {}
+                    }
+                }
+
+                val flow = mVariableFertViewModel.confertflow.value ?: DoubleArray(0)
+                val cnt = mVariableFertViewModel.seedSensorCount.value ?: IntArray(0)
+                val cur = mVariableFertViewModel.motorCurrent.value ?: DoubleArray(0)
+                val vol = mVariableFertViewModel.motorVoltage.value ?: DoubleArray(0)
+                val acc = mVariableFertViewModel.avgAccuracy.value ?: 0.0
+                fun darr(d: DoubleArray, n: Int) = (0 until n).joinToString(",", "[", "]") { (d.getOrNull(it) ?: 0.0).toString() }
+                fun iarr(d: IntArray, n: Int) = (0 until n).joinToString(",", "[", "]") { (d.getOrNull(it) ?: 0).toString() }
+                val detail = "{\"flow\":${darr(flow, 8)},\"count\":${iarr(cnt, 8)},\"cur\":${darr(cur, 16)},\"vol\":${darr(vol, 16)},\"acc\":$acc}"
+                webView.evaluateJavascript("if(window.pushDetail)window.pushDetail($detail)", null)
+            }
+            "set" -> {
+                val sbc = StringBuilder()
+                for (i in 0 until TOTAL_NODE_COUNT) sbc.append("节点").append(i + 1).append("  ").append(canMonitorData.getOrElse(i) { "---" }).append("\n")
+                webView.evaluateJavascript("if(window.setCan)window.setCan(${JSONObject.quote(sbc.toString())})", null)
+            }
+        }
+    }
+
+    private fun pushInitSettings() {
+        if (!::webView.isInitialized) return
+        val pre = MySharedPreFun(this)
+        val o = JSONObject()
+        o.put("testMode", pre.getSpecificValue(R.string.testMode_Switch_name) == "1")
+        o.put("writeSaveData", pre.getSpecificValue(R.string.writeSaveData_Switch_name) == "1")
+        o.put("navMark", pre.getSpecificValue(R.string.navMarkCompensated_Switch_name) == "1")
+        o.put("errorSound", pre.getSpecificValue(R.string.errorSound_Switch_name) == "1")
+        o.put("speedAvg", pre.getSpecificValue(R.string.forwardSpeedAverageNum_name) ?: "5")
+        o.put("colorStep", pre.getSpecificValue(R.string.colorStep_name) ?: "3")
+        o.put("deltaXY", pre.getSpecificValue(R.string.deltaX_name) ?: "50")
+        val sp2 = pre.getMySharedPre()
+        o.put("db9Port", sp2.getString(getString(R.string.serial_db9_port_name), getString(R.string.serial_db9_port_defValue)))
+        o.put("db9Baud", sp2.getString(getString(R.string.serial_db9_baud_name), getString(R.string.serial_db9_baud_defValue)))
+        o.put("canPort", sp2.getString(getString(R.string.serial_can_port_name), getString(R.string.serial_can_port_defValue)))
+        o.put("canBaud", sp2.getString(getString(R.string.serial_can_baud_name), getString(R.string.serial_can_baud_defValue)))
+        webView.evaluateJavascript("if(window.initSettings)window.initSettings(${JSONObject.quote(o.toString())})", null)
+
+        // 串口枚举较慢（sysfs/shell），放后台线程，完成后再推给网页，避免拖慢启动
+        lifecycleScope.launch(Dispatchers.Default) {
+            val ports = try { scanSerialDevices() } catch (_: Throwable) { emptyList() }
+            val pArr = JSONArray(); ports.forEach { pArr.put(it) }
+            withContext(Dispatchers.Main) {
+                if (::webView.isInitialized)
+                    webView.evaluateJavascript("if(window.setPorts)window.setPorts(${JSONObject.quote(pArr.toString())})", null)
+            }
+        }
+
+        // 单体设置回显（施肥 a/b + 排种 传动比/型孔/株距）
+        val rows = MydantiFertSharedPre(this).getTableRows().associateBy { it.id }
+        val fertArr = JSONArray()
+        for (id in 0..8) {
+            val r = rows[id]
+            fertArr.put(JSONObject().put("id", id).put("a", r?.a ?: "0.0").put("b", r?.b ?: "0.0"))
+        }
+        val danti = JSONObject()
+            .put("fert", fertArr)
+            .put("seed", JSONObject()
+                .put("ratio", sp2.getString("seed_transmission_ratio", "1.0"))
+                .put("hole", sp2.getString("seed_hole_count", "12"))
+                .put("spacing", sp2.getString("seed_plant_spacing_cm", "20")))
+        webView.evaluateJavascript("if(window.initDanti)window.initDanti(${JSONObject.quote(danti.toString())})", null)
+    }
+
+    private fun onWebLoadShp(field: String) {
+        // 写入所选渲染字段（同原程序 fertQueryField_name），再重新加载处方图
+        if (field.isNotEmpty()) MySharedPreFun(this).getMySharedPre().edit()
+            .putString(getString(R.string.fertQueryField_name), field).apply()
+        lifecycleScope.launch { MyArcGisFun().loadShp(this@MainActivity, mVariableFertViewModel) }
+    }
+
+    // 网页“应用参数/测试模式开关”回调：写回 SharedPreferences（键同原程序）
+    private fun onWebSaveParams(json: String) {
+        try {
+            val o = JSONObject(json)
+            val ed = MySharedPreFun(this).getMySharedPre().edit()
+            if (o.has("testMode")) ed.putString(getString(R.string.testMode_Switch_name), if (o.getBoolean("testMode")) "1" else "0")
+            if (o.has("writeSaveData")) ed.putString(getString(R.string.writeSaveData_Switch_name), if (o.getBoolean("writeSaveData")) "1" else "0")
+            if (o.has("navMark")) ed.putString(getString(R.string.navMarkCompensated_Switch_name), if (o.getBoolean("navMark")) "1" else "0")
+            if (o.has("errorSound")) ed.putString(getString(R.string.errorSound_Switch_name), if (o.getBoolean("errorSound")) "1" else "0")
+            if (o.has("speedAvg")) ed.putString(getString(R.string.forwardSpeedAverageNum_name), o.getString("speedAvg"))
+            if (o.has("colorStep")) ed.putString(getString(R.string.colorStep_name), o.getString("colorStep"))
+            if (o.has("deltaXY")) {
+                val v = o.getString("deltaXY")
+                ed.putString(getString(R.string.deltaX_name), v)
+                ed.putString(getString(R.string.deltaY_name), v)
+            }
+            if (o.has("active")) {
+                val arr = o.getJSONArray("active")
+                val csv = (0 until arr.length()).joinToString(",") { arr.getInt(it).toString() }
+                ed.putString("active_motors_state", csv)
+            }
+            if (o.has("rowSize")) ed.putString(getString(R.string.rowSize_name), o.getString("rowSize"))
+            if (o.has("gnssL1")) ed.putString(getString(R.string.gnssDistanceVertical_name), o.getString("gnssL1"))
+            if (o.has("gnssL2")) ed.putString(getString(R.string.gnssDistanceHorizontal_name), o.getString("gnssL2"))
+            if (o.has("lagTime")) ed.putString(getString(R.string.lagTime_name), o.getString("lagTime"))
+            if (o.has("forwardSpeed")) ed.putString(getString(R.string.forwardSpeed_name), o.getString("forwardSpeed"))
+            if (o.has("fertApplied")) ed.putString(getString(R.string.fertApplied_name), o.getString("fertApplied"))
+            if (o.has("db9Port")) ed.putString(getString(R.string.serial_db9_port_name), o.getString("db9Port"))
+            if (o.has("db9Baud")) ed.putString(getString(R.string.serial_db9_baud_name), o.getString("db9Baud"))
+            if (o.has("canPort")) ed.putString(getString(R.string.serial_can_port_name), o.getString("canPort"))
+            if (o.has("canBaud")) ed.putString(getString(R.string.serial_can_baud_name), o.getString("canBaud"))
+            ed.apply()
+            MySharedPreFun(this).initSettingsParam()
+        } catch (_: Throwable) {}
+    }
+
+    // 网页“一键检测”回调：跑原程序真实诊断，进度/报告实时推回网页
+    private fun runDiagnostics() {
+        lifecycleScope.launch {
+            runDiagnosticTest(
+                this@MainActivity,
+                onProgress = { line ->
+                    runOnUiThread {
+                        if (::webView.isInitialized)
+                            webView.evaluateJavascript("if(window.pushDiag)window.pushDiag(${JSONObject.quote(line)})", null)
+                    }
+                },
+                onComplete = { report, _ ->
+                    runOnUiThread {
+                        if (::webView.isInitialized)
+                            webView.evaluateJavascript("if(window.setDiag)window.setDiag(${JSONObject.quote(report)})", null)
+                    }
+                }
+            )
+        }
+    }
+
+    // 网页“单体设置”保存：施肥 a/b 拟合系数 / 排种 传动比·型孔·株距
+    private fun onWebSaveDanti(json: String) {
+        try {
+            val o = JSONObject(json)
+            if (o.optBoolean("seed", false)) {
+                MySharedPreFun(this).getMySharedPre().edit()
+                    .putString("seed_transmission_ratio", o.optString("ratio", "1.0"))
+                    .putString("seed_hole_count", o.optString("hole", "12"))
+                    .putString("seed_plant_spacing_cm", o.optString("spacing", "20"))
+                    .apply()
+            } else {
+                val id = o.getInt("id")
+                val a = o.optString("a", "0.0")
+                val b = o.optString("b", "0.0")
+                val helper = MydantiFertSharedPre(this)
+                helper.saveTableRow(id, TableRow(id, a, b))
+                if (id == 0) for (i in 1..8) helper.saveTableRow(i, TableRow(i, a, b))
+            }
+            MySharedPreFun(this).initSettingsParam()
+            initFittingCoefficient()   // a/b 改后立即重算拟合系数
+        } catch (_: Throwable) {}
+    }
+
+    // 网页地图工具：全屏 / 位置跟踪 / 清除已施肥 / 合并 / 导出（逻辑同原 MainScreen）
+    private fun onMapOp(op: String) {
+        if (!::mapView.isInitialized) return
+        try {
+            when (op) {
+                "fullscreen" -> {
+                    val ext = mVariableFertViewModel.shapefileFeatureLayer.value?.fullExtent
+                    if (ext != null) { mapView.setViewpointAsync(Viewpoint(ext), 0.3f); mapView.post { mapView.invalidate() } }
+                }
+                "track" -> {
+                    mapTracking = !mapTracking
+                    mVariableFertViewModel.navCenterIsRunning.value = mapTracking
+                }
+                "clear" -> {
+                    mVariableFertViewModel.fertGraphicsOverlayExport.value?.graphics?.clear()
+                    mapView.post { mapView.invalidate() }
+                }
+                "merge" -> {
+                    mVariableFertViewModel.fertGraphicsOverlay.value?.let { MyArcGisFun().mergeGraphicsWithBuffer(it, 0.0, this) }
+                }
+                "export" -> {
+                    mVariableFertViewModel.fertGraphicsOverlayExport.value?.let { ExportGeoFun(this).createGeodatabase(it) }
+                }
+                "zerocount" -> {
+                    mVariableFertViewModel.seedSensorCount.postValue(IntArray(SEED_NODE_COUNT) { 0 })
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    // 网页“测试输出”：测试模式下发送 rpm（给所有电机）或 车速km/h（同原主页测试控件）
+    private fun onWebSendTest(value: Double, isRpm: Boolean) {
+        try {
+            MySharedPreFun(this).getMySharedPre().edit()
+                .putString(getString(R.string.testMode_testSend_name), value.toString())
+                .putString(getString(R.string.testMode_testSendMode_name), if (isRpm) "0" else "1")
+                .apply()
+            if (mVariableFertViewModel.serialPortIsRunning.value != true) {
+                MySerialPortFun().openSerialPort(this, mVariableFertViewModel)
+            }
+            if (isRpm) {
+                for (i in 0 until TOTAL_NODE_COUNT) ConvAndCtrlFun().motorSpeedrpmSend(value, i)
+            } else {
+                sendSimulatedForwardSpeed(value, mVariableFertViewModel)
+            }
+        } catch (_: Throwable) {}
+    }
+
+    // 网页上报 .map 区域（CSS px）→ 把底层地图精确放到右侧栏中间那块
+    private fun setMapBounds(l: Int, t: Int, w: Int, h: Int) {
+        if (!::mapView.isInitialized || w <= 0 || h <= 0) return
+        val d = resources.displayMetrics.density
+        val lp = FrameLayout.LayoutParams((w * d).toInt(), (h * d).toInt())
+        lp.leftMargin = (l * d).toInt()
+        lp.topMargin = (t * d).toInt()
+        mapView.layoutParams = lp
+    }
+
+    // ====== 开始作业（由网页 NativeBridge.setRunning(true) 调用，逻辑同原开始按钮） ======
+    fun startWork() {
+        val context = this@MainActivity
+        val coroutineScope = lifecycleScope
+        if (!isRunningState.value) {
+            val isTestMode = MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1"
+
+            if (!isTestMode) {
+                DocuAndManageFun().cheekDirectoryUriPermission(
+                    R.string.myWriteDir_DocumentUri_name, selectWriteDirectoryLauncher, context
+                )
+                if (MySharedPreFun(context).getSpecificValue(R.string.writeSaveData_Switch_name) == "1") {
+                    myWriteSaveFun.start(context = context, getData = {
+                        myWriteSaveFun.getMySaveData(mSPParamData.rowNumber, mVariableFertViewModel)
+                    })
+                }
+            }
+
+            if (mVariableFertViewModel.serialPortIsRunning.value == false) {
+                MySerialPortFun().openSerialPort(context, mVariableFertViewModel)
+            }
+
+            MySharedPreFun(context).initSettingsParam()
+
+            val sharedPre = MySharedPreFun(context).getMySharedPre()
+            val defaultActive = List(TOTAL_NODE_COUNT) { "1" }.joinToString(",")
+            val activeStr = sharedPre.getString("active_motors_state", defaultActive) ?: defaultActive
+            val activeList = activeStr.split(",").map { it == "1" }.toMutableList()
+            while (activeList.size < TOTAL_NODE_COUNT) activeList.add(true)
+            val activeArray = activeList.take(TOTAL_NODE_COUNT).toBooleanArray()
+            mVariableFertViewModel.activeMotorsState.postValue(activeArray)
+
+            mVariableFertViewModel.resetFertStats()
+            errorTriggeredThisRun = false
+
+            val soundEnabledAtStart = MySharedPreFun(context).getSpecificValue(R.string.errorSound_Switch_name) == "1"
+            if (soundEnabledAtStart && fittingCoefficientA.all { it == 0.0 } && fittingCoefficientB.all { it == 0.0 }) {
+                enqueueErrorSound(R.raw.fail6)
+            }
+            if (soundEnabledAtStart && !isTestMode && mRmcData.latitude == 0.0 && mRmcData.longitude == 0.0) {
+                enqueueErrorSound(R.raw.fail7)
+            }
+
+            isSystemRunning = true
+            isRunningState.value = true
+
+            if (isTestMode) {
+                if (!myTestModeCoroutine.isRunning) myTestModeCoroutine.start(context, isRunningState)
+                if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel)
+            } else {
+                if (!mDB9reCANseCoroutine.isRunning) mDB9reCANseCoroutine.start1(context, mVariableFertViewModel)
+                if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel)
+            }
+
+            mVariableFertViewModel.canEverReceived = false
+            mVariableFertViewModel.rtkEverReceived = false
+            mVariableFertViewModel.canLastReceiveTime.postValue(System.currentTimeMillis())
+            watchdogJob?.cancel()
+            watchdogShouldRun = true
+            watchdogJob = coroutineScope.launch {
+                var motorDelayStartTime = 0L
+                var canReadyPlayed = false
+                var rtkReadyPlayed = false
+                var noResponseCooldownTime = 0L
+                var noResponseStartTime = 0L
+                while (isActive && watchdogShouldRun) {
+                    delay(2000)
+                    if (!watchdogShouldRun) break
+                    val errorSoundOn = MySharedPreFun(context).getSpecificValue(R.string.errorSound_Switch_name) == "1"
+                    if (!errorSoundOn) { motorDelayStartTime = 0L; continue }
+                    if (mVariableFertViewModel.canEverReceived && !canReadyPlayed) {
+                        canReadyPlayed = true
+                        enqueueErrorSound(R.raw.ready1, isError = false)
+                    }
+                    if (mVariableFertViewModel.rtkEverReceived && !rtkReadyPlayed) {
+                        rtkReadyPlayed = true
+                        enqueueErrorSound(R.raw.ready2, isError = false)
+                    }
+                    val anyMotorCommanded = lastSentMotorSpeed.any { it >= 1.0 }
+                    val lastReceive = mVariableFertViewModel.canLastReceiveTime.value ?: 0L
+                    if (anyMotorCommanded && System.currentTimeMillis() - lastReceive > 5000L) {
+                        val resId = if (mVariableFertViewModel.canEverReceived) R.raw.fail2 else R.raw.fail3
+                        enqueueErrorSound(resId)
+                        motorDelayStartTime = 0L
+                        delay(8000)
+                        continue
+                    }
+                    val returnSpeeds = mVariableFertViewModel.motorSpeed.value
+                    val anyCommanded = lastSentMotorSpeed.any { it >= 1.0 }
+                    if (anyCommanded && System.currentTimeMillis() - noResponseCooldownTime > 8000L) {
+                        val noResponseCount = (0 until TOTAL_NODE_COUNT).count { i ->
+                            val active: Boolean = mSPParamData.activeMotors.getOrNull(i) ?: true
+                            active && (returnSpeeds?.getOrNull(i) ?: 0.0) == 0.0
+                        }
+                        if (noResponseCount >= 2) {
+                            if (noResponseStartTime == 0L) noResponseStartTime = System.currentTimeMillis()
+                            if (System.currentTimeMillis() - noResponseStartTime > 3000L) {
+                                if (noResponseCount == 2) enqueueErrorSound(R.raw.fail4) else enqueueErrorSound(R.raw.fail5)
+                                noResponseCooldownTime = System.currentTimeMillis()
+                                noResponseStartTime = 0L
+                                motorDelayStartTime = 0L; delay(8000); continue
+                            }
+                        } else {
+                            noResponseStartTime = 0L
+                        }
+                    } else {
+                        noResponseStartTime = 0L
+                    }
+                    val hasDelay = (0 until TOTAL_NODE_COUNT).any { i ->
+                        val sent = if (i < lastSentMotorSpeed.size) lastSentMotorSpeed[i] else 0.0
+                        val actual = returnSpeeds?.getOrNull(i) ?: 0.0
+                        sent >= 1.0 && actual > 0.0 && actual < sent * 0.7
+                    }
+                    if (hasDelay) {
+                        if (motorDelayStartTime == 0L) motorDelayStartTime = System.currentTimeMillis()
+                        if (System.currentTimeMillis() - motorDelayStartTime > 3000L) {
+                            enqueueErrorSound(R.raw.fail1)
+                            motorDelayStartTime = 0L
+                            delay(8000)
+                        }
+                    } else {
+                        motorDelayStartTime = 0L
+                    }
+                }
+            }
+        }
+    }
+
+    // ====== 停止作业（由网页 NativeBridge.setRunning(false) 调用，逻辑同原停止按钮） ======
+    fun stopWork() {
+        val context = this@MainActivity
+        val coroutineScope = lifecycleScope
+        coroutineScope.launch {
+            isSystemRunning = false
+            if (mDB9reCANseCoroutine.isRunning) mDB9reCANseCoroutine.shutdown()
+            if (myTestModeCoroutine.isRunning) myTestModeCoroutine.shutdown()
+            if (myWriteSaveFun.isRunning) myWriteSaveFun.shutdown()
+            delay(100)
+            if (!isSystemRunning) {
+                withContext(Dispatchers.IO) {
+                    for (i in 0 until TOTAL_NODE_COUNT) {
+                        if (isSystemRunning) break
+                        ConvAndCtrlFun().motorSpeedrpmSend(0.0, i)
+                        delay(15)
+                    }
+                    if (!isSystemRunning) delay(150)
+                }
+            }
+            if (!isSystemRunning) {
+                releaseResource(mVariableFertViewModel)
+                if (isRunningState.value) isRunningState.value = false
+                watchdogShouldRun = false
+                val errorSoundOn = MySharedPreFun(context).getSpecificValue(R.string.errorSound_Switch_name) == "1"
+                if (errorSoundOn && !errorTriggeredThisRun) {
+                    enqueueErrorSound(R.raw.good, isError = false)
+                }
+            }
+        }
+    }
 
     private fun selectDirectoryLauncher(
         resId: Int,
@@ -206,6 +715,9 @@ class MainActivity : AppCompatActivity() {
                         Log.d("SharedPre", filePath.toString())
                         MySharedPreFun(context).getMySharedPre().edit()
                             .putString(context.getString(resId), filePath).apply()
+                        val shpName = filePath?.substringAfterLast('/') ?: ""
+                        if (::webView.isInitialized && shpName.isNotEmpty())
+                            webView.evaluateJavascript("if(window.setRxFile)window.setRxFile(${JSONObject.quote(shpName)})", null)
                         MyArcGisFun().getFieldList(filePath, mVariableFertViewModel)
                     } else {
                         AlertDialog.Builder(context)
@@ -230,31 +742,34 @@ class MainActivity : AppCompatActivity() {
                 .padding(dimensionResource(id = R.dimen.small_custom_padding))
                 .fillMaxSize()
         ) {
-            val configuration = LocalConfiguration.current
-            val isInPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT
             val isRunningState = remember { mutableStateOf(false) }
             val watchdogJobRef = remember { object { var job: Job? = null } }
 
-            FlowRow(
-                modifier = Modifier.align(Alignment.BottomEnd).fillMaxWidth(0.2f),
-                maxItemsInEachRow = if (isInPortrait) 1 else 2,
-                horizontalArrangement = Arrangement.Center,
-                verticalArrangement = Arrangement.Center
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 106.dp, bottom = 2.dp)
+                    .width(194.dp)
+                    .height(48.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 // ================== 开始按钮 ==================
                 Surface(
                     color = if (isRunningState.value) androidx.compose.ui.graphics.Color.Gray else androidx.compose.ui.graphics.Color.White,
-                    modifier = Modifier.width(90.dp).padding(dimensionResource(id = R.dimen.middle_view_padding)),
+                    modifier = Modifier
+                        .width(90.dp)
+                        .fillMaxHeight(),
                     shape = RoundedCornerShape(dimensionResource(id = R.dimen.small_roundedCornerShape)),
                 ) {
                     IconButton(
+                        modifier = Modifier.fillMaxSize(),
                         onClick = {
                             if (!isRunningState.value) {
                                 val isTestMode = MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1"
-                                val simGnss = MySharedPreFun(context).getSpecificValue(R.string.simGnss_Switch_name) == "1"
 
-                                // 1. 【修复】：测试模式 / 模拟GNSS 模式下跳过申请文件夹，不要弹出文件选择器！
-                                if (!isTestMode && !simGnss) {
+                                // 1. 【修复】：测试模式下跳过申请文件夹，不要弹出文件选择器！
+                                if (!isTestMode) {
                                     DocuAndManageFun().cheekDirectoryUriPermission(
                                         R.string.myWriteDir_DocumentUri_name, selectWriteDirectoryLauncher, context
                                     )
@@ -277,8 +792,11 @@ class MainActivity : AppCompatActivity() {
                                 // 读取单体启停状态字符串，转成 Boolean 数组并传给 ViewModel，
                                 // 让 ViewModel 在计算准确率时跳过那些被关闭的电机
                                 val sharedPre = MySharedPreFun(context).getMySharedPre()
-                                val activeStr = sharedPre.getString("active_motors_state", "1,1,1,1,1,1,1,1") ?: "1,1,1,1,1,1,1,1"
-                                val activeArray = activeStr.split(",").map { it == "1" }.toBooleanArray()
+                                val defaultActive = List(TOTAL_NODE_COUNT) { "1" }.joinToString(",")
+                                val activeStr = sharedPre.getString("active_motors_state", defaultActive) ?: defaultActive
+                                val activeList = activeStr.split(",").map { it == "1" }.toMutableList()
+                                while (activeList.size < TOTAL_NODE_COUNT) activeList.add(true)
+                                val activeArray = activeList.take(TOTAL_NODE_COUNT).toBooleanArray()
                                 mVariableFertViewModel.activeMotorsState.postValue(activeArray)
                                 // ================= 【核心修复：结束】 =================
 
@@ -293,8 +811,8 @@ class MainActivity : AppCompatActivity() {
                                     enqueueErrorSound(R.raw.fail6)
                                 }
 
-                                // 4b. 开始前提示：非测试 / 非模拟GNSS 模式下没有 RTK 数据
-                                if (soundEnabledAtStart && !isTestMode && !simGnss && mRmcData.latitude == 0.0 && mRmcData.longitude == 0.0) {
+                                // 4b. 开始前提示：非测试模式下没有 RTK 数据
+                                if (soundEnabledAtStart && !isTestMode && mRmcData.latitude == 0.0 && mRmcData.longitude == 0.0) {
                                     enqueueErrorSound(R.raw.fail7)
                                 }
 
@@ -307,41 +825,8 @@ class MainActivity : AppCompatActivity() {
                                     // 【修复】：测试模式必须也打开接收，这样底部图表才能收到反馈发生变化！
                                     if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel)
                                 } else {
-                                    if (!mDB9reCANseCoroutine.isRunning) {
-                                        if (simGnss) mDB9reCANseCoroutine.start1Simulated(context, mVariableFertViewModel)
-                                        else         mDB9reCANseCoroutine.start1(context, mVariableFertViewModel)
-                                    }
+                                    if (!mDB9reCANseCoroutine.isRunning) mDB9reCANseCoroutine.start1(context, mVariableFertViewModel)
                                     if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel)
-                                }
-
-                                // 5b. 处方图控深模式：作业期间由 MainActivity 独占启动深度控制协程。
-                                // 单次原子恢复持久化状态并置 masterEnabled=true，避免
-                                // restoreSowingDepthState 与 updateMasterEnabled 的 LiveData 顺序竞态；
-                                // 按"开始"即显式使能深度伺服（已与用户确认）。
-                                if (mVariableFertViewModel.depthPrescriptionMode.value == true) {
-                                    mVariableFertViewModel.restoreSowingDepthState(
-                                        MySharedPreFun(context).loadSowingDepthState()
-                                            .copy(masterEnabled = true)
-                                    )
-                                    if (!mSowingDepthCoroutine.isRunning) {
-                                        mSowingDepthCoroutine = SowingDepthCoroutine()
-                                        mSowingDepthCoroutine.start(mVariableFertViewModel, context)
-                                    }
-
-                                    // 5c. 控深就绪诊断：留出上线检测窗口后评估一次，
-                                    // 若仍无电机可下发位置命令则在主界面弹一次提示。
-                                    coroutineScope.launch {
-                                        delay(3000)   // 等心跳/TPDO + 2s 离线看门狗判定
-                                        if (isSystemRunning &&
-                                            mVariableFertViewModel.depthPrescriptionMode.value == true
-                                        ) {
-                                            val warn = mVariableFertViewModel.sowingDepthState.value
-                                                ?.depthControlReadinessWarning()
-                                            if (warn != null) {
-                                                mVariableFertViewModel.depthControlNotice.postValue(warn)
-                                            }
-                                        }
-                                    }
                                 }
 
                                 // 6. 启动 CAN 看门狗（测试模式和正常模式都启动）
@@ -392,7 +877,7 @@ class MainActivity : AppCompatActivity() {
                                         val returnSpeeds = mVariableFertViewModel.motorSpeed.value
                                         val anyCommanded = lastSentMotorSpeed.any { it >= 1.0 }
                                         if (anyCommanded && System.currentTimeMillis() - noResponseCooldownTime > 8000L) {
-                                            val noResponseCount = (0 until mSPParamData.rowNumber).count { i ->
+                                            val noResponseCount = (0 until TOTAL_NODE_COUNT).count { i ->
                                                 val isActive: Boolean = mSPParamData.activeMotors.getOrNull(i) ?: true
                                                 isActive && (returnSpeeds?.getOrNull(i) ?: 0.0) == 0.0
                                             }
@@ -412,7 +897,7 @@ class MainActivity : AppCompatActivity() {
                                         }
 
                                         // --- fail1：电机响应延迟（发出转速 > 1rpm 但回传 < 70% 且持续 3 秒）---
-                                        val hasDelay = (0 until mSPParamData.rowNumber).any { i ->
+                                        val hasDelay = (0 until TOTAL_NODE_COUNT).any { i ->
                                             val sent = if (i < lastSentMotorSpeed.size) lastSentMotorSpeed[i] else 0.0
                                             val actual = returnSpeeds?.getOrNull(i) ?: 0.0
                                             // actual > 0：只检测有回传的电机，无回传（反转电机）跳过
@@ -443,10 +928,13 @@ class MainActivity : AppCompatActivity() {
                 // ================== 停止按钮 ==================
                 Surface(
                     color = androidx.compose.ui.graphics.Color.White,
-                    modifier = Modifier.width(90.dp).padding(dimensionResource(id = R.dimen.middle_view_padding)),
+                    modifier = Modifier
+                        .width(90.dp)
+                        .fillMaxHeight(),
                     shape = RoundedCornerShape(dimensionResource(id = R.dimen.small_roundedCornerShape)),
                 ) {
                     IconButton(
+                        modifier = Modifier.fillMaxSize(),
                         onClick = {
                             // 【修复】：立刻切断串口导致0转速命令发不出去。改用协程保障缓冲发完！
                             coroutineScope.launch {
@@ -459,15 +947,6 @@ class MainActivity : AppCompatActivity() {
                                 if (myTestModeCoroutine.isRunning) myTestModeCoroutine.shutdown()
                                 if (myWriteSaveFun.isRunning) myWriteSaveFun.shutdown()
 
-                                // 1b. 处方图控深模式：先断使能，让 SowingDepthCoroutine 的
-                                // Phase2 ON→OFF 跳变发 Shutdown(0x6040=0x0006) 减速退使能，
-                                // 等至少一个 500ms 周期后再关协程（否则伺服停在原位仍带电）。
-                                if (mSowingDepthCoroutine.isRunning) {
-                                    mVariableFertViewModel.updateMasterEnabled(false)
-                                    kotlinx.coroutines.delay(600)
-                                    mSowingDepthCoroutine.shutdown()
-                                }
-
                                 // 2. 稍作延迟，避开总线最高峰
                                 kotlinx.coroutines.delay(100)
 
@@ -476,7 +955,7 @@ class MainActivity : AppCompatActivity() {
                                 // 避免与新周期的发送协程争抢 synchronized(outputStream) 造成卡顿
                                 if (!isSystemRunning) {
                                     kotlinx.coroutines.withContext(Dispatchers.IO) {
-                                        for (i in 0 until mSPParamData.rowNumber) {
+                                        for (i in 0 until TOTAL_NODE_COUNT) {
                                             if (isSystemRunning) break // 发送途中又开始了，立即终止
                                             ConvAndCtrlFun().motorSpeedrpmSend(0.0, i)
                                             kotlinx.coroutines.delay(15)
@@ -512,41 +991,40 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        val sharedPreHelper = MySharedPreFun(this)
-        sharedPreHelper.updataNewConfig()
-
-        val resKey = this.getString(R.string.myLoadShpFile_Path_name)
-        val keyValue = sharedPreHelper.getMySharedPre().getString(resKey, "")
-        if (keyValue.equals("-1")) {
-            Log.d("SharedPreferences", "$resKey 不存在或为空")
-        } else {
-            Log.d("SharedPreferences", "$resKey 已存在: $keyValue")
-        }
-
-        sharedPreHelper.initSettingsParam()
         mDB9reCANseCoroutine = DB9reCANseCoroutine()
-        initFittingCoefficient()
-        Log.d(
-            "Coefficient",
-            "A:" + fittingCoefficientA.joinToString(separator = ", ") +
-                    "\nB:" + fittingCoefficientB.joinToString(separator = ", ")
-        )
+        // 启动期读取 SharedPreferences/系数，任意一处坏值都不致命，避免每次启动崩溃需清存储
+        try {
+            val sharedPreHelper = MySharedPreFun(this)
+            sharedPreHelper.updataNewConfig()
+
+            val resKey = this.getString(R.string.myLoadShpFile_Path_name)
+            val keyValue = sharedPreHelper.getMySharedPre().getString(resKey, "")
+            if (keyValue.equals("-1")) {
+                Log.d("SharedPreferences", "$resKey 不存在或为空")
+            } else {
+                Log.d("SharedPreferences", "$resKey 已存在: $keyValue")
+            }
+
+            sharedPreHelper.initSettingsParam()
+            initFittingCoefficient()
+        } catch (e: Throwable) {
+            Log.e("onStart", "启动读取失败（已忽略）: " + e.message)
+        }
     }
 
     private fun initFittingCoefficient() {
-        // 固定按最大行数 8 分配，避免运行中机型行数增大时（应用/开始仅重载参数、不重建本数组）下标越界
-        fittingCoefficientA = Array(8) { 0.0 }
-        fittingCoefficientB = Array(8) { 0.0 }
+        fittingCoefficientA = Array(FERT_NODE_COUNT) { 0.0 }
+        fittingCoefficientB = Array(FERT_NODE_COUNT) { 0.0 }
 
         val tableRows = MydantiFertSharedPre(this).getTableRows()
         tableRows.forEach { row ->
-            if (row.id <= mSPParamData.rowNumber && row.id != 0) {
-                fittingCoefficientA[row.id - 1] = row.a.toDouble()
-                fittingCoefficientB[row.id - 1] = row.b.toDouble()
+            if (row.id <= FERT_NODE_COUNT && row.id != 0) {
+                fittingCoefficientA[row.id - 1] = row.a.toDoubleOrNull() ?: 0.0
+                fittingCoefficientB[row.id - 1] = row.b.toDoubleOrNull() ?: 0.0
             }
         }
-        val defaultCoefficientA = tableRows.find { it.id == 0 }?.a?.toDouble() ?: 0.0
-        val defaultCoefficientB = tableRows.find { it.id == 0 }?.b?.toDouble() ?: 0.0
+        val defaultCoefficientA = tableRows.find { it.id == 0 }?.a?.toDoubleOrNull() ?: 0.0
+        val defaultCoefficientB = tableRows.find { it.id == 0 }?.b?.toDoubleOrNull() ?: 0.0
 
         fittingCoefficientA.forEachIndexed { index, value ->
             if (value == 0.0) {
@@ -613,8 +1091,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        pushHandler.removeCallbacksAndMessages(null)
+        if (::webView.isInitialized) webView.destroy()
         releaseResource(mVariableFertViewModel)
-        mapView.dispose()
+        if (::mapView.isInitialized) mapView.dispose()
     }
 
     private fun releaseResource(viewModel: VariableFertViewModel) {
@@ -623,7 +1103,6 @@ class MainActivity : AppCompatActivity() {
             mDB9reCANseCoroutine.shutdown()
             mCanReceiveCoroutine.shutdown()
         }
-        if (mSowingDepthCoroutine.isRunning) mSowingDepthCoroutine.shutdown()
         if (viewModel.serialPortIsRunning.value == true) {
             MySerialPortFun().releaseSerialPort(mVariableFertViewModel)
         }

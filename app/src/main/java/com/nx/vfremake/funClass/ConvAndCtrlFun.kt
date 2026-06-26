@@ -1,10 +1,21 @@
 package com.nx.vfremake.funClass
 
 import android.util.Log
+import com.nx.vfremake.SEED_NODE_START_INDEX
 import com.nx.vfremake.lastSentMotorSpeed
 import com.nx.vfremake.mSPParamData
+import kotlin.math.roundToInt
 
 class ConvAndCtrlFun {
+    fun seedToMotorSpeed(forwardSpeedKmh: Double): Double {
+        val spacingM = mSPParamData.seedPlantSpacing
+        val holeCount = mSPParamData.seedHoleCount
+        val ratio = mSPParamData.seedTransmissionRatio
+        if (forwardSpeedKmh <= 0.0 || spacingM <= 0.0 || holeCount <= 0 || ratio <= 0.0) return 0.0
+        val forwardSpeedMPerMin = forwardSpeedKmh * 1000.0 / 60.0
+        val seedPlateRpm = forwardSpeedMPerMin / spacingM / holeCount
+        return seedPlateRpm * ratio
+    }
 
     fun motorSpeedToFert(
         motorSpeedrpm: Double, forwardSpeed: Double, rowSize: Double,
@@ -31,26 +42,31 @@ class ConvAndCtrlFun {
 
     @OptIn(ExperimentalUnsignedTypes::class)
     fun motorSpeedrpmSend(motorSpeedrpm: Double, i: Int) {
-
         val isMotorActive: Boolean = mSPParamData.activeMotors.getOrNull(i) ?: true
         val safeSpeed = if (motorSpeedrpm.isNaN() || motorSpeedrpm.isInfinite()) 0.0 else motorSpeedrpm
-        val actualSpeed = if (isMotorActive) safeSpeed else 0.0
+        val speedLimit = if (i < SEED_NODE_START_INDEX) 56.8 else 300.0
+        val actualSpeed = if (isMotorActive) safeSpeed.coerceIn(0.0, speedLimit) else 0.0
         if (i < lastSentMotorSpeed.size) lastSentMotorSpeed[i] = actualSpeed
 
-        val motorStartFlag = if (actualSpeed >= 1.0) 0x01.toUByte() else 0x00.toUByte()
-        val ctrlIntPart = actualSpeed.toInt()
-        val ctrlDecimalPart = ((actualSpeed - ctrlIntPart) * 100).toInt()
+        val running = actualSpeed >= 1.0
+        val hardwareId = i + 1
+        val mode = if (running) 0x01 else 0x00
+        val targetX10 = if (running) (actualSpeed * 10.0).roundToInt().coerceIn(0, 65535) else 0
 
-        val ctrlIntPartByte = if (motorStartFlag == 0x00.toUByte()) 0x00.toUByte() else ctrlIntPart.toUByte()
-        val ctrlDecimalPartByte = if (motorStartFlag == 0x00.toUByte()) 0x00.toUByte() else ctrlDecimalPart.toUByte()
-
-        // 【真相大白】：硬件底层的ID本来就是 0~7！千万不能加 1！
-        val hardwareId = i
-
+        // UART-CAN wrapper + A5 extended command:
+        // Fertilizer nodes 1..8, seed nodes 9..16, selector 1 = forward.
         val canMessageSend = ubyteArrayOf(
-            0x27.toUByte(), 0x08.toUByte(), 0x00.toUByte(), 0x00.toUByte(),
-            0x27.toUByte(), 0x00.toUByte(), hardwareId.toUByte(), motorStartFlag,
-            ctrlIntPartByte, ctrlDecimalPartByte, 0x39.toUByte()
+            0x27.toUByte(), 0x0B.toUByte(), 0x00.toUByte(), 0x00.toUByte(),
+            0x27.toUByte(),
+            0xA5.toUByte(),
+            hardwareId.toUByte(),
+            mode.toUByte(),
+            0x01.toUByte(),
+            (targetX10 and 0xFF).toUByte(),
+            ((targetX10 shr 8) and 0xFF).toUByte(),
+            0x00.toUByte(),
+            0x00.toUByte(),
+            0x39.toUByte()
         )
         MySerialPortFun().slaveCanMsgSend(canMessageSend.toByteArray())
     }

@@ -1,8 +1,13 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Base.Theme.Variablefert" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- <item name="colorPrimary">@colorlist/my_light_primary</item> -->
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#D5A92F</item>
+        <item name="android:statusBarColor">#173F35</item>
+        <item name="android:navigationBarColor">#101713</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
     </style>
 
     <style name="Theme.Variablefert" parent="Base.Theme.Variablefert" />

@@ -1,0 +1,886 @@
+<!doctype html>
+<html lang="zh-cn">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>玉米精量播种机种肥测控系统</title>
+<style>
+/* =========================================================
+   白色毛玻璃为底 + 两个有质感的黑框(左侧栏 / 右主面板)
+   黑框：暗渐变 + 细噪点纹理 + 顶部内高光 + 投影
+   中间留白接处方图。
+   ========================================================= */
+:root{
+  --rail:76px;
+  --accent:#22b1ef; --accent2:#118fce;
+  --green:#34c06a;
+  --txt:#e9eff4; --dim:#8b9aa5;
+  --line:rgba(255,255,255,.08);
+  --ease:cubic-bezier(.38,0,.21,1);
+  --ease2:cubic-bezier(.4,0,.2,1);
+  /* 黑框质感（数值对齐启动器：#18171a 系 + .5px #ffffff1a 边 + 0 2px 8px #0000008c 紧阴影） */
+  --frame:linear-gradient(180deg,#1c1b20 0%,#161519 55%,#100f13 100%);
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+body{font-family:"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  background:#dde6ec;color:var(--txt);overflow:hidden;display:flex;align-items:center;justify-content:center}
+
+/* 底：白色毛玻璃 */
+#app{position:relative;width:100vw;height:100vh;max-width:1920px;max-height:1080px;
+  border-radius:18px;overflow:hidden;display:flex;gap:14px;padding:14px;background:
+  radial-gradient(48% 58% at 12% 6%,rgba(34,177,239,.18),transparent 60%),
+  radial-gradient(55% 65% at 92% 94%,rgba(52,192,106,.15),transparent 60%),
+  linear-gradient(135deg,#f8fbfc 0%,#e9eff4 55%,#dde7ed 100%)}
+#app:before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.5;
+  background:rgba(255,255,255,.20)}
+#app:after{content:"";position:absolute;inset:0;pointer-events:none;opacity:.4;mix-blend-mode:overlay;
+  background-image:var(--grain);background-size:160px}
+
+/* 黑框通用质感 */
+.frame{position:relative;background:var(--frame);
+  border:.5px solid rgba(255,255,255,.10);border-radius:16px;
+  box-shadow:0 2px 8px rgba(0,0,0,.55),0 1px 3px rgba(0,0,0,.45),
+             inset 0 1px 0 rgba(255,255,255,.10)}
+.frame:before{content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;
+  opacity:.05;mix-blend-mode:overlay;background-image:var(--grain);background-size:140px;z-index:0}
+.frame:after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;z-index:0;
+  background:linear-gradient(180deg,rgba(255,255,255,.06),transparent 22%)}
+.frame>*{position:relative;z-index:1}
+
+/* ============ 左结构：黑框侧栏 ============ */
+#left{z-index:20;width:var(--rail);flex:0 0 var(--rail);overflow:visible;
+  display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:10px}
+.brand{width:50px;height:50px;border-radius:50%;display:grid;place-items:center;margin-bottom:6px;
+  background:radial-gradient(circle at 35% 30%,#222a33,#0e151c);border:1px solid rgba(255,255,255,.12)}
+.brand svg{width:28px;height:28px}
+.nav{display:flex;flex-direction:column;gap:6px;margin-top:4px;width:100%;align-items:center}
+.nav-item{position:relative;width:56px;height:54px;border-radius:14px;display:grid;place-items:center;
+  color:var(--dim);transition:.25s var(--ease2);opacity:0;transform:translateX(-16px);
+  animation:slideIn .5s var(--ease) forwards}
+.nav-item svg{width:24px;height:24px;transition:transform .3s var(--ease)}
+.nav-item .lab{position:absolute;left:64px;white-space:nowrap;font-size:13px;padding:6px 11px;border-radius:8px;
+  background:rgba(20,24,30,.97);border:1px solid rgba(255,255,255,.1);box-shadow:0 8px 24px rgba(0,0,0,.4);color:#e9eff4;
+  opacity:0;transform:translateX(-6px);pointer-events:none;transition:.2s var(--ease2);z-index:30}
+.nav-item:hover{color:#fff;background:rgba(255,255,255,.06)}
+.nav-item:hover svg{transform:translateY(-2px)}
+.nav-item:hover .lab{opacity:1;transform:none}
+.nav-item.active{color:#fff;background:rgba(34,177,239,.16)}
+.nav-item.active:before{content:"";position:absolute;left:-16px;top:50%;translate:0 -50%;width:3px;height:22px;
+  border-radius:0 3px 3px 0;background:var(--accent);box-shadow:0 0 9px var(--accent)}
+@keyframes slideIn{to{opacity:1;transform:none}}
+.left-sp{flex:1}
+.apps{width:46px;height:46px;border-radius:12px;display:grid;place-items:center;color:var(--dim);
+  background:rgba(255,255,255,.05);transition:.25s var(--ease2)}
+.apps:hover{color:#fff;transform:rotate(90deg)}
+
+/* ============ 右结构：黑框主面板 ============ */
+#main{z-index:10;flex:1;overflow:hidden;display:flex;flex-direction:column}
+.m-top{position:absolute;top:14px;left:16px;right:16px;z-index:8;display:flex;align-items:center;gap:9px}
+.m-top .k{font-size:11px;letter-spacing:2px;color:#6fa8c4;font-weight:600}
+.m-top h1{margin:0;font-size:18px;font-weight:800;letter-spacing:.5px;color:#f0f5f8}
+.m-top h1 .a{color:var(--accent);font-size:14px;margin-left:4px}
+.chip{display:flex;align-items:center;gap:7px;height:34px;padding:0 14px;border-radius:17px;font-size:12px;color:#d2e0ea;
+  background:rgba(18,20,25,.5);border:1px solid var(--line)}
+.chip .live{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+.sp{flex:1}
+.wb{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;color:#cdd9e0;
+  background:rgba(18,20,25,.5);border:1px solid var(--line);transition:.2s var(--ease2)}
+.wb:hover{background:rgba(255,255,255,.14);color:#fff}
+.wb.close:hover{background:#d9544a;color:#fff}
+.wb svg{width:15px;height:15px}
+
+.m-body{position:relative;flex:1;overflow:hidden}
+.view{position:absolute;inset:0;padding:16px 18px;opacity:0;visibility:hidden;transform:translateY(6px);
+  transition:opacity .3s var(--ease2),transform .35s var(--ease),visibility 0s .35s;display:flex;flex-direction:column}
+.view.show{opacity:1;visibility:visible;transform:none;transition:opacity .35s var(--ease2),transform .4s var(--ease)}
+#v-home{padding:0}
+/* 拖拉机图 + 车后单体 */
+.tractor-stack{display:flex;flex-direction:column;align-items:stretch;flex:1;min-height:0}
+.tractor-img{flex:1;min-height:0;width:100%;object-fit:cover;object-position:center bottom;display:block}
+.mrow.attach{margin-top:-6px}
+/* 另外三页：白底（主页仍为深色地图） */
+.view.light{background:#f3f6f8;color:#26333c;padding:16px 20px 18px}
+.view.light .sec,.view.light .sg-title,.view.light .rx-step{color:#1a7fae}
+.view.light .rx-step.dim{color:#9aa7b0}
+.view.light .rx-title{color:#1f2c34}
+.view.light .fc,.view.light .set-group,.view.light .rx-box{background:#fff;border-color:#e3e8ec;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.view.light .fc label,.view.light .fc .unit,.view.light .set-row .info .s,.view.light .rx-empty{color:#7a8893}
+.view.light .fc input,.view.light .fc select,.view.light .numbox{background:#fff;border-color:#d6dde2;color:#26333c}
+.view.light .fc input:focus,.view.light .fc select:focus,.view.light .numbox:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(14,155,214,.16)}
+.view.light .set-row{border-top-color:#edf1f3}
+.view.light .set-row .info .t{color:#283640}
+.view.light .toggle .tk{background:#ccd5db}
+.view.light .toggle input:checked + .tk{background:var(--accent)}
+.view.light .btn-g{background:#eef2f4;border-color:#dde4e8;color:#3a4a55}
+.view.light .btn-g:hover{background:#e2e8ec}
+.view.light .mrow-t{color:#2a3640}
+.view.light .legend2{color:#5a6873}
+.view.light .fchip{background:#fff;border-color:#d6dde2;color:#3a4a55}
+.view.light .fchip.sel{background:var(--accent);border-color:var(--accent);color:#fff}
+.view.light .mono{background:#0f141a;border-color:#0f141a;color:#9fe6c0}
+
+/* 主页：中间近黑留白(处方图) */
+.map{position:relative;flex:1;border-radius:0;overflow:hidden;border:none;
+  background:
+    linear-gradient(rgba(0,0,0,.03) 1px,transparent 1px) 0 0/44px 44px,
+    linear-gradient(90deg,rgba(0,0,0,.03) 1px,transparent 1px) 0 0/44px 44px,
+    radial-gradient(120% 110% at 50% 38%,#f5f8fa 0%,#e7edf1 100%);
+  display:grid;place-items:center}
+.map-hole{position:absolute;top:46px;left:4px;right:50px;bottom:132px;pointer-events:none}
+.map-ph{text-align:center;color:#7d8c98;pointer-events:none}
+.map-ph svg{width:58px;height:58px;opacity:.45;margin-bottom:12px}
+.map-ph .t{font-size:17px;font-weight:700;color:#9fadb8}
+.map-ph .s{font-size:12px;margin-top:6px;opacity:.85}
+.map-tools{position:absolute;top:50%;right:12px;transform:translateY(-50%);display:flex;flex-direction:column;gap:7px}
+.mtool{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;color:#b7cad6;
+  background:rgba(20,24,30,.8);border:1px solid var(--line);transition:.2s var(--ease2)}
+.mtool:hover{background:rgba(255,255,255,.14);color:#fff}
+.mtool.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.mtool svg{width:17px;height:17px}
+.map-legend{position:absolute;left:14px;top:58px;display:flex;gap:13px;padding:7px 13px;border-radius:10px;font-size:12px;color:#c2cfd8;
+  background:rgba(20,24,30,.8);border:1px solid var(--line)}
+.map-legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+
+.home-foot{position:absolute;left:18px;right:18px;bottom:16px;z-index:3;display:flex;align-items:flex-end;justify-content:space-between;gap:10px}
+
+/* 左：数据灵动岛（3 行堆叠，向左收起） */
+.foot-info{display:flex;align-items:stretch;gap:8px;overflow:hidden;max-width:230px;
+  background:rgba(14,16,20,.82);border:1px solid var(--line);border-radius:16px;
+  padding:7px 14px 7px 6px;font-size:12px;color:#cdd9df;box-shadow:0 6px 18px rgba(0,0,0,.4);
+  transition:max-width .32s var(--ease),padding .32s var(--ease)}
+.foot-info b{color:#fff;font-weight:700}
+.fi-toggle{width:28px;flex:0 0 28px;border-radius:9px;display:grid;place-items:center;
+  background:rgba(255,255,255,.1);color:#bfe9ff;transition:.25s var(--ease2)}
+.fi-toggle:hover{background:rgba(255,255,255,.18)}
+.fi-toggle svg{width:15px;height:15px;transition:transform .32s var(--ease)}
+.fi-body{display:flex;flex-direction:column;justify-content:center;gap:3px;white-space:nowrap;transition:opacity .25s var(--ease)}
+.foot-info.collapsed{max-width:40px;padding:7px 6px}
+.foot-info.collapsed .fi-body{opacity:0}
+.foot-info.collapsed .fi-toggle svg{transform:rotate(180deg)}
+
+/* 中：数字灵动岛（8×2 转速环，向下收起） */
+.num-island{display:flex;flex-direction:column;align-items:center;gap:5px;
+  background:rgba(18,20,25,.6);border:1px solid var(--line);border-radius:18px;
+  padding:8px 10px 5px;box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 2px 8px rgba(0,0,0,.4);transition:.3s var(--ease)}
+.ni-wrap{overflow:hidden;max-height:140px;transition:max-height .32s var(--ease),opacity .25s}
+.num-island.collapsed .ni-wrap{max-height:0;opacity:0}
+.ni-grid{display:grid;grid-template-columns:repeat(8,36px);gap:6px;place-items:center}
+.ni-toggle{width:46px;height:16px;flex:0 0 16px;border-radius:8px;display:grid;place-items:center;
+  background:rgba(255,255,255,.1);color:#bfe9ff;transition:.25s var(--ease2)}
+.ni-toggle:hover{background:rgba(255,255,255,.18)}
+.ni-toggle svg{width:16px;height:16px;transition:transform .32s var(--ease)}
+.num-island.collapsed .ni-toggle svg{transform:rotate(180deg)}
+.mdot{position:relative;width:36px;height:36px;border-radius:50%}
+.mdot .ring{position:absolute;inset:0;border-radius:50%;
+  background:conic-gradient(var(--c) calc(var(--p)*1%),rgba(255,255,255,.12) 0);transition:background .5s linear}
+.mdot .core{position:absolute;inset:3px;border-radius:50%;background:#15171b;display:grid;place-items:center;
+  font-size:13px;font-weight:700;color:#dbe6ed}
+.mdot.run .core{color:#fff}
+/* 开始施肥：一个蓝色药丸，黑色圆形汉堡键嵌在右端里面 */
+.start-c{position:relative;display:inline-flex;align-items:center;height:64px;padding-right:7px;border-radius:34px;
+  background:linear-gradient(95deg,var(--accent),var(--accent2));box-shadow:0 10px 30px rgba(17,143,206,.5);transition:.3s var(--ease)}
+.start-c.run{background:linear-gradient(95deg,var(--green),#2aa75b);box-shadow:0 10px 30px rgba(52,192,106,.45)}
+.start-c:active{transform:translateY(1px)}
+.start{position:relative;display:flex;align-items:center;gap:13px;height:100%;padding:0 8px 0 18px;border-radius:34px;
+  font-size:21px;font-weight:800;letter-spacing:3px;color:#fff;overflow:hidden;background:transparent;border:none}
+.start .ic{width:42px;height:42px;border-radius:50%;background:rgba(255,255,255,.22);display:grid;place-items:center}
+.start .ic svg{width:22px;height:22px}
+.start .sheen{display:none}
+@keyframes sheen{0%{left:-60%}45%,100%{left:160%}}
+.menu{width:50px;height:50px;flex:0 0 50px;border-radius:50%;display:grid;place-items:center;
+  background:#14171c;box-shadow:0 3px 9px rgba(0,0,0,.45);transition:transform .2s var(--ease2)}
+.menu:hover{transform:scale(1.04)}
+.bars{position:relative;width:20px;height:13px}
+.bars span{position:absolute;left:0;width:100%;height:2px;border-radius:2px;background:#fff;transition:transform .35s var(--ease),opacity .25s}
+.bars span:nth-child(1){top:0}.bars span:nth-child(2){top:5.5px}.bars span:nth-child(3){top:11px}
+.menu.open .bars span:nth-child(1){transform:translateY(5.5px) rotate(45deg)}
+.menu.open .bars span:nth-child(2){opacity:0}
+.menu.open .bars span:nth-child(3){transform:translateY(-5.5px) rotate(-45deg)}
+.qmenu{position:absolute;right:0;bottom:70px;width:244px;border-radius:14px;overflow:hidden;z-index:6;
+  background:rgba(22,26,32,.98);border:1px solid var(--line);box-shadow:0 16px 40px rgba(0,0,0,.5);
+  transform-origin:bottom right;opacity:0;transform:scale(.92) translateY(8px);pointer-events:none;transition:.22s var(--ease)}
+.qmenu.show{opacity:1;transform:none;pointer-events:auto}
+.qmenu>button{display:flex;align-items:center;gap:10px;width:100%;padding:11px 15px;font-size:14px;color:#d2e2ea;transition:.16s}
+.qmenu>button:hover{background:rgba(255,255,255,.08)}
+.qmenu>button svg{width:16px;height:16px;opacity:.8}
+.qm-test{padding:11px 14px;border-bottom:1px solid var(--line)}
+.qm-label{font-size:11px;color:var(--dim);margin-bottom:8px}
+.qm-row{display:flex;gap:6px;align-items:center;margin-bottom:8px}
+.qm-input{flex:1;min-width:0;height:32px;border-radius:8px;background:rgba(0,0,0,.42);border:1px solid var(--line);color:#fff;text-align:center;font-size:13px;outline:none}
+.qm-input:focus{border-color:var(--accent)}
+.qm-seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;flex:0 0 auto}
+.qm-seg button{padding:0 10px;height:32px;font-size:12px;color:#cfe0e8;background:transparent;transition:.15s}
+.qm-seg button.on{background:var(--accent);color:#fff;font-weight:700}
+.qm-send{width:100%;height:34px;border-radius:8px;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(95deg,var(--accent),var(--accent2))}
+
+/* 表单页 */
+.scroll{flex:1;overflow-y:auto;padding-right:6px}
+.scroll::-webkit-scrollbar{width:7px}.scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:4px}
+.sec{font-size:13px;font-weight:800;color:#7fc0e0;letter-spacing:1px;margin:20px 0 11px}.sec:first-child{margin-top:0}
+.grid2{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.fc{background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:11px;padding:13px 15px}
+.fc label{display:block;font-size:12px;color:var(--dim);margin-bottom:8px}
+.fc .row{display:flex;align-items:center;gap:8px}
+.fc input,.fc select{flex:1;height:38px;border-radius:9px;background:rgba(0,0,0,.42);border:1px solid var(--line);color:#fff;padding:0 11px;font-size:14px;outline:none;transition:.2s}
+.fc input:focus,.fc select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(34,177,239,.18)}
+.fc .unit{font-size:12px;color:var(--dim)}
+.toggle{display:inline-flex;align-items:center;gap:9px;cursor:pointer;font-size:13px}
+.toggle input{display:none}
+.toggle .tk{width:44px;height:24px;border-radius:12px;background:#2a343c;position:relative;transition:background .3s var(--ease2)}
+.toggle .tk:after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;
+  box-shadow:0 2px 5px rgba(0,0,0,.35);transition:transform .38s cubic-bezier(.34,1.56,.64,1),width .18s ease}
+.toggle input:checked + .tk{background:var(--accent)}
+.toggle input:checked + .tk:after{transform:translateX(20px)}
+.toggle:active .tk:after{width:23px}
+.toggle input:checked + .tk{box-shadow:0 0 0 0 rgba(31,176,239,.5);animation:tkPulse .4s var(--ease)}
+@keyframes tkPulse{0%{box-shadow:0 0 0 0 rgba(31,176,239,.45)}to{box-shadow:0 0 0 8px rgba(31,176,239,0)}}
+.form-foot{flex:0 0 auto;display:flex;justify-content:flex-end;gap:11px;padding-top:14px;margin-top:6px;border-top:1px solid var(--line)}
+.btn-p{height:44px;padding:0 26px;border-radius:22px;font-size:14px;font-weight:700;color:#fff;background:linear-gradient(95deg,var(--accent),var(--accent2));transition:.25s var(--ease)}
+.btn-p:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(17,143,206,.45)}
+.btn-g{height:44px;padding:0 22px;border-radius:22px;font-size:14px;font-weight:600;color:#c2d3dc;background:rgba(255,255,255,.06);border:1px solid var(--line);transition:.2s}
+.btn-g:hover{background:rgba(255,255,255,.12)}
+.rx-file{border:1.5px dashed rgba(255,255,255,.18);border-radius:12px;padding:22px;text-align:center;cursor:pointer;transition:.25s;max-width:380px}
+.rx-file:hover{border-color:var(--accent);background:rgba(34,177,239,.06)}
+.rx-file svg{width:32px;height:32px;color:var(--accent);margin-bottom:8px}
+
+/* 参数页 */
+.param-wrap{flex:1;display:flex;gap:18px;overflow:auto;min-height:0}
+.param-left{flex:1.05;min-width:0;display:flex;flex-direction:column}
+.param-right{flex:1;min-width:0}
+.tractor{flex:1;min-height:150px;border-radius:12px;border:1px solid var(--line);
+  background:radial-gradient(120% 100% at 50% 0%,#12161c,#0a0d11);display:grid;place-items:center;margin-bottom:10px}
+.tractor svg{width:72%;max-height:180px}
+.legend2{display:flex;justify-content:flex-end;gap:16px;font-size:12px;color:var(--dim);margin-bottom:8px}
+.legend2 i{display:inline-block;width:16px;height:9px;border-radius:2px;margin-right:5px;vertical-align:0}
+.legend2 i.g{background:#34c06a}.legend2 i.r{background:#e0584a}
+.mrow{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.mrow-t{width:36px;flex:0 0 36px;font-size:14px;font-weight:700;color:#cdd9e0}
+.mcells{flex:1;display:grid;grid-template-columns:repeat(8,1fr);gap:6px}
+.mtog{height:54px;border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  cursor:pointer;border:1.5px solid;transition:.16s var(--ease2);color:#fff;line-height:1.18}
+.mtog.on{background:#37b063;border-color:#2c9152}
+.mtog.off{background:rgba(216,81,67,.42);border-color:#b53d30;color:#ffd9d4}
+.mtog b{font-size:14px}.mtog small{font-size:8.5px;opacity:.92}
+.pfields{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-content:start;grid-auto-rows:max-content}
+
+/* 设置页 */
+.set-group{background:rgba(255,255,255,.035);border:1px solid var(--line);border-radius:14px;padding:4px 16px 14px;margin-bottom:14px}
+.sg-title{font-size:13px;font-weight:800;color:#7fc0e0;letter-spacing:1px;padding:12px 0 4px}
+.set-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
+.set-row:first-of-type{border-top:none}
+.set-row .info{flex:1;min-width:0}
+.set-row .info .t{font-size:14px;font-weight:600;color:#e3edf2}
+.set-row .info .s{font-size:12px;color:var(--dim);margin-top:2px}
+.set-row .ctrl{flex:0 0 auto;display:flex;align-items:center;gap:8px}
+.numbox{width:96px;height:36px;border-radius:8px;background:rgba(0,0,0,.42);border:1px solid var(--line);color:#fff;text-align:center;font-size:14px;outline:none}
+.numbox:focus{border-color:var(--accent)}
+.link{color:var(--accent);cursor:pointer}
+.mono{background:#0a0d11;border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:6px;
+  font-family:Consolas,"Courier New",monospace;font-size:12px;color:#9fe6c0;height:120px;overflow:auto;white-space:pre-wrap;line-height:1.55}
+.row-btns{display:flex;gap:8px;margin-top:10px}
+
+/* 处方图页 */
+.rx-config{max-width:620px;margin:0 auto;width:100%}
+.rx-title{display:flex;align-items:center;justify-content:center;gap:10px;font-size:21px;font-weight:800;letter-spacing:2px;margin-bottom:22px;color:#eef5f8}
+.rx-title svg{width:26px;height:26px;color:var(--accent)}
+.rx-step{font-size:13px;font-weight:700;color:var(--accent);margin:0 0 8px}
+.rx-step.dim{color:var(--dim)}
+.rx-box{background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:20px}
+.rx-fileR{display:flex;align-items:center;gap:12px}
+.rx-fileR .fn{flex:1;font-size:15px;font-weight:600;color:#e3edf2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip-btn{height:36px;padding:0 18px;border-radius:9px;font-size:14px;font-weight:700;color:#bfe9ff;background:rgba(34,177,239,.16);border:1px solid rgba(34,177,239,.32);transition:.18s}
+.chip-btn:hover{background:rgba(34,177,239,.26)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.fchip{padding:8px 16px;border-radius:9px;font-size:14px;cursor:pointer;background:rgba(255,255,255,.05);border:1px solid var(--line);color:#cdd9e0;transition:.16s}
+.fchip:hover{background:rgba(255,255,255,.1)}
+.fchip.sel{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+.rx-empty{font-size:13px;color:#5d6e7a;text-align:center;padding:6px}
+
+/* 通用 modal */
+.modal{position:absolute;inset:0;z-index:60;background:rgba(0,0,0,.5);display:none;place-items:center}
+.modal.show{display:grid}
+.modal-card{width:min(440px,86%);max-height:80%;overflow:auto;border-radius:16px;background:#16181d;border:1px solid var(--line);box-shadow:0 24px 60px rgba(0,0,0,.6);padding:22px}
+.modal-card::-webkit-scrollbar{width:7px}.modal-card::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:4px}
+.modal-card h3{margin:0 0 16px;font-size:18px;font-weight:800}
+.dcard{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-radius:11px;
+  background:rgba(255,255,255,.04);border:1px solid var(--line);margin-bottom:8px;cursor:pointer;transition:.15s}
+.dcard:hover{background:rgba(255,255,255,.08)}
+.dcard .nm{font-size:15px;font-weight:700}
+.dcard .nm.def{color:var(--accent)}
+.dcard .sub{font-size:12px;color:var(--dim);margin-top:3px}
+.dcard .edit{font-size:12px;color:var(--dim)}
+.modal-foot{display:flex;justify-content:flex-end;gap:11px;margin-top:14px}
+
+/* 截图浮层：填满右侧主面板，点击收回 */
+#shotOverlay{position:absolute;inset:0;z-index:40;background:#06090c;cursor:pointer;
+  opacity:0;visibility:hidden;transform:scale(1.02);transition:opacity .3s var(--ease2),transform .35s var(--ease),visibility 0s .35s}
+#shotOverlay.show{opacity:1;visibility:visible;transform:none;transition:opacity .35s var(--ease2),transform .4s var(--ease)}
+#shotOverlay img{width:100%;height:100%;object-fit:cover;display:block}
+
+/* App 内透明模式：中间透出底层原生 ArcGIS 地图，所有组件/弹窗浮于其上 */
+body.inapp{background:transparent}
+.inapp #app{background:transparent}
+.inapp #app:before,.inapp #app:after{display:none}
+.inapp #main{background:transparent}
+.inapp #main:before,.inapp #main:after{display:none}
+.inapp .map{background:transparent!important;box-shadow:none}
+.inapp .map-ph,.inapp .map-legend{display:none}
+
+/* 触摸屏：禁用粘滞 hover，按一下后按钮恢复默认态（不会卡在高亮/浅色） */
+@media (hover:none){
+  .mtool:hover{background:rgba(20,24,30,.8);color:#b7cad6}
+  .wb:hover{background:rgba(18,20,25,.5);color:#cdd9e0}
+  .menu:hover{transform:none}
+  .nav-item:hover{background:transparent;color:var(--dim)}
+  .nav-item:hover .lab{opacity:0;transform:translateX(-6px)}
+  .start:hover{transform:none}
+}
+
+/* 诊断加载动图遮罩 */
+#diagLoading{position:absolute;inset:0;z-index:85;display:none;place-items:center;background:transparent;pointer-events:none}
+#diagLoading.show{display:grid}
+#diagLoading .box{display:flex;flex-direction:column;align-items:center;gap:14px}
+#diagLoading img{width:min(38vw,240px);height:auto;border-radius:14px}
+#diagLoading .txt{font-size:15px;font-weight:700;color:#eef5f8;text-shadow:0 2px 8px rgba(0,0,0,.5)}
+
+#ver{position:absolute;left:8px;bottom:6px;z-index:95;font-size:11px;font-weight:700;color:#bfe9ff;
+  background:rgba(0,0,0,.55);padding:2px 8px;border-radius:7px;pointer-events:none;letter-spacing:.5px}
+
+#boot{position:absolute;inset:0;z-index:90;background:#eef3f6;display:grid;place-items:center;transition:opacity .6s,visibility 0s .6s}
+#boot.gone{opacity:0;visibility:hidden}
+.spin{width:48px;height:48px;border-radius:50%;border:3px solid rgba(0,0,0,.1);border-top-color:var(--accent);animation:ld 1s linear infinite}
+@keyframes ld{to{transform:rotate(1turn)}}
+#toast{position:absolute;left:50%;bottom:30px;translate:-50% 20px;z-index:80;padding:11px 20px;border-radius:11px;font-size:14px;
+  background:rgba(22,26,32,.98);border:1px solid var(--line);box-shadow:0 12px 34px rgba(0,0,0,.45);color:#e9eff4;opacity:0;pointer-events:none;transition:.3s var(--ease)}
+#toast.show{opacity:1;translate:-50% 0}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- 左结构：黑框侧栏 -->
+  <aside id="left" class="frame">
+    <button class="brand" title="玉米精量播种机种肥测控系统">
+      <svg viewBox="0 0 48 48" fill="none" stroke="#bfe9ff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M24 6c-7 8-7 18 0 26 7-8 7-18 0-26Z" fill="#22b1ef" stroke="#bfe9ff"/><path d="M24 32v10M14 42h20"/>
+        <path d="M12 20c4 1 7 4 8 8M36 20c-4 1-7 4-8 8" stroke="#34c06a"/></svg>
+    </button>
+    <div class="left-sp"></div>
+    <nav class="nav" id="nav"></nav>
+    <div class="left-sp"></div>
+    <button class="apps" id="about" title="查看截图">
+      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+    </button>
+  </aside>
+
+  <!-- 右结构：黑框主面板 -->
+  <main id="main" class="frame">
+    <div class="m-top">
+      <div class="sp"></div>
+      <div class="chip"><span class="live"></span>终端 A7 · CAN 已连接</div>
+      <button class="wb" title="最小化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/></svg></button>
+      <button class="wb close" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+
+    <div class="m-body">
+      <!-- 主页 -->
+      <section class="view show" id="v-home">
+        <div class="map">
+          <!-- 原生 ArcGIS 地图只贴在这块中间区域（避开顶栏/底部灵动岛/右侧工具，不挡按钮） -->
+          <div class="map-hole" id="mapHole"></div>
+          <!-- ★ 接你的 ArcGIS MapView / 加载 VariableFert.shp。网页中先占位。 -->
+          <div class="map-ph">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7l6-3 6 3 6-3v13l-6 3-6-3-6 3V7Z"/><path d="M9 4v13M15 7v13"/></svg>
+            <div class="t">处方图显示区</div>
+            <div class="s">中间留白 · 接入 ArcGIS MapView</div>
+          </div>
+          <div class="map-tools">
+            <button class="mtool" title="适应全图" onclick="mapOp('fullscreen')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+            <button class="mtool" id="mtTrack" title="位置跟踪" onclick="mapOp('track')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
+            <button class="mtool" title="清除已施肥图层" onclick="mapOp('clear')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg></button>
+            <button class="mtool" title="合并已施肥区" onclick="mapOp('merge')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 21V9l5-5 5 5v12M3 21h18"/></svg></button>
+            <button class="mtool" title="导出图层" onclick="mapOp('export')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16"/></svg></button>
+          </div>
+          <div class="map-legend"><span><i style="background:#34c06a"></i>低量</span><span><i style="background:#e0a93a"></i>中量</span><span><i style="background:#e0685a"></i>高量</span></div>
+        </div>
+        <div class="home-foot">
+          <div class="foot-info" id="footInfo">
+            <button class="fi-toggle" id="fiToggle" title="收起 / 展开"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+            <div class="fi-body">
+              <div>运行 <b id="runN">0/16</b></div>
+              <div>平均施肥 <b id="avgFertV">0.0</b> kg/亩</div>
+              <div>准确率 <b id="avgAccV">0</b>%</div>
+            </div>
+          </div>
+          <div class="num-island" id="island">
+            <div class="ni-wrap"><div class="ni-grid" id="islandGrid"></div></div>
+            <button class="ni-toggle" id="niToggle" title="收起 / 展开"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+          </div>
+          <div class="start-c">
+            <div class="qmenu" id="qmenu">
+              <div class="qm-test">
+                <div class="qm-label">测试输出 · 测试模式下生效</div>
+                <div class="qm-row">
+                  <input id="testVal" type="number" class="qm-input" placeholder="数值">
+                  <div class="qm-seg"><button id="segRpm" type="button" class="on">转速</button><button id="segKmh" type="button">车速</button></div>
+                </div>
+                <button class="qm-send" id="testSend" type="button">发送测试值</button>
+              </div>
+              <button onclick="qmTest();closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/></svg>测试模式</button>
+              <button onclick="mapOp('zerocount');closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/></svg>清零计数</button>
+              <button onclick="mapOp('merge');closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 21V9l5-5 5 5v12M3 21h18"/></svg>合并已施肥区</button>
+            </div>
+            <button class="start" id="start"><span class="ic"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span class="lbl">开始施肥</span><span class="sheen"></span></button>
+            <button class="menu" id="menuBtn"><span class="bars"><span></span><span></span><span></span></span></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 参数设置：左=拖拉机示意图+电机启用，右=6项参数 -->
+      <section class="view light" id="v-param">
+        <div class="param-wrap">
+          <div class="param-left">
+            <div class="legend2"><span><i class="g"></i>绿色：启用</span><span><i class="r"></i>红色：关断</span></div>
+            <div class="tractor-stack">
+              <img class="tractor-img" src="tractor.png" alt="拖拉机作业俯视图：L1 天线纵向距离 / L2 天线横向偏移 / ○ GNSS 天线">
+              <div class="mrow attach"><span class="mrow-t">施肥</span><div class="mcells" id="mFert"></div></div>
+            </div>
+            <div class="mrow"><span class="mrow-t">播种</span><div class="mcells" id="mSeed"></div></div>
+          </div>
+          <div class="param-right">
+            <div class="sec">作业参数</div>
+            <div class="pfields">
+              <div class="fc"><label>行距 RS</label><div class="row"><input type="number" value="60"><span class="unit">cm</span></div></div>
+              <div class="fc"><label>GNSS 距离 L1（纵）</label><div class="row"><input type="number" value="0"><span class="unit">cm</span></div></div>
+              <div class="fc"><label>GNSS 距离 L2（横）</label><div class="row"><input type="number" value="0"><span class="unit">cm</span></div></div>
+              <div class="fc"><label>滞后时间 T</label><div class="row"><input type="number" step="0.1" value="0.0"><span class="unit">s</span></div></div>
+              <div class="fc"><label>前进速度</label><div class="row"><input type="number" step="0.1" value="0.0"><span class="unit">km/h</span></div></div>
+              <div class="fc"><label>施肥量</label><div class="row"><input type="number" step="0.1" value="0.0"><span class="unit">kg/亩</span></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="form-foot"><button class="btn-g" id="paramReset">重置</button><button class="btn-p" onclick="applyParams()">应用</button></div>
+      </section>
+
+      <!-- 设置：系统开关 + 数值参数 + 串口 + CAN + 一键检测 -->
+      <section class="view light" id="v-set">
+        <div class="scroll">
+          <div class="set-group">
+            <div class="sg-title">系统</div>
+            <div class="set-row">
+              <div class="info"><div class="t">测试模式</div><div class="s">开启后可进入单体设置 · <span class="link" id="openDanti">进入单体设置 ›</span></div></div>
+              <div class="ctrl"><label class="toggle"><input type="checkbox" id="tgTest"><span class="tk"></span></label></div>
+            </div>
+            <div class="set-row"><div class="info"><div class="t">保存实验数据</div></div><div class="ctrl"><label class="toggle"><input type="checkbox" id="tgSave" checked><span class="tk"></span></label></div></div>
+            <div class="set-row"><div class="info"><div class="t">显示补偿位置</div></div><div class="ctrl"><label class="toggle"><input type="checkbox" id="tgComp"><span class="tk"></span></label></div></div>
+            <div class="set-row"><div class="info"><div class="t">语音提示助手</div><div class="s">播报设备状态、报错与一键检测提示</div></div><div class="ctrl"><label class="toggle"><input type="checkbox" id="tgSound" checked><span class="tk"></span></label></div></div>
+          </div>
+
+          <div class="set-group">
+            <div class="sg-title">数值参数</div>
+            <div class="set-row"><div class="info"><div class="t">N 次速度均值定速</div><div class="s">目前设定值 × 200ms</div></div><div class="ctrl"><input class="numbox" type="number" id="numSpeedAvg" value="5"><button class="btn-g" style="height:36px;padding:0 16px" id="numSpeedAvgApply">应用</button></div></div>
+            <div class="set-row"><div class="info"><div class="t">颜色分级数</div><div class="s">不包含 0 域</div></div><div class="ctrl"><input class="numbox" type="number" id="numColor" value="3"></div></div>
+            <div class="set-row"><div class="info"><div class="t">位置跟随视图区域</div><div class="s">大小 × 10⁻⁶</div></div><div class="ctrl"><input class="numbox" type="number" id="numView" value="50"></div></div>
+          </div>
+
+          <div class="set-group">
+            <div class="sg-title">串口设置（改后下次“开始”生效）</div>
+            <div class="set-row"><div class="info"><div class="t">CAN 端口（电机总线）</div><div class="s">选择检测到的串口</div></div><div class="ctrl"><select class="numbox" style="width:140px" id="serCanPort"></select></div></div>
+            <div class="set-row"><div class="info"><div class="t">CAN 波特率</div></div><div class="ctrl"><select class="numbox" style="width:140px" id="serCanBaud"><option>9600</option><option>57600</option><option>115200</option><option>230400</option><option>250000</option><option>500000</option></select></div></div>
+            <div class="set-row"><div class="info"><div class="t">DB9 端口（RTK/GNSS）</div><div class="s">选择检测到的串口</div></div><div class="ctrl"><select class="numbox" style="width:140px" id="serDb9Port"></select></div></div>
+            <div class="set-row"><div class="info"><div class="t">DB9 波特率</div></div><div class="ctrl"><select class="numbox" style="width:140px" id="serDb9Baud"><option>9600</option><option>57600</option><option>115200</option><option>230400</option><option>250000</option><option>500000</option></select></div></div>
+          </div>
+
+          <div class="set-group">
+            <div class="sg-title">CAN 实时监控</div>
+            <div class="mono" id="canMon">&gt; 监听 CAN 总线…</div>
+          </div>
+
+          <div class="set-group">
+            <div class="sg-title">诊断</div>
+            <div class="set-row"><div class="info"><div class="t">一键检测</div><div class="s">自动扫速测试各电机与 RTK 信号，生成排肥机检测报告</div></div><div class="ctrl"><button class="btn-p" style="height:38px" id="diagBtn">开始检测</button></div></div>
+            <div class="mono hidden" id="diagOut" style="height:96px"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 更换处方图：步骤1 选文件 → 步骤2 选字段 → 加载渲染 -->
+      <section class="view light" id="v-rx">
+        <div class="scroll">
+          <div class="rx-config">
+            <div class="rx-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M15 9l-2.5 5.5L7 15l2.5-5.5L15 9Z" fill="currentColor" stroke="none"/></svg>处方图配置</div>
+
+            <div class="rx-step">步骤 1：选择文件 (.shp)</div>
+            <div class="rx-box">
+              <div class="rx-fileR"><span class="fn" id="rxName">VariableFert.shp</span><button class="chip-btn" id="rxBrowse">浏览</button></div>
+            </div>
+
+            <div class="rx-step" id="rxStep2">步骤 2：选择渲染字段</div>
+            <div class="rx-box"><div class="chips" id="rxFields"></div></div>
+
+            <div class="form-foot" style="border:none;padding:0;margin:0">
+              <button class="btn-g" onclick="go('home')">取消</button>
+              <button class="btn-p" id="rxApply"><span style="display:inline-flex;align-items:center;gap:6px"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>加载渲染</span></button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+    <div id="shotOverlay" title="点击收回"><img id="shotImg" alt="截图"></div>
+  </main>
+
+  <!-- 单体设置弹窗（测试模式进入，长按修改） -->
+  <div class="modal" id="dantiModal">
+    <div class="modal-card">
+      <h3>单体设置 <span style="font-size:12px;font-weight:500;color:var(--dim)">长按修改</span></h3>
+      <div id="dantiList"></div>
+      <div class="modal-foot"><button class="btn-g" onclick="closeModal('dantiModal')">关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 长按后弹出的独立编辑窗口 -->
+  <div class="modal" id="dantiEditModal" style="z-index:70">
+    <div class="modal-card" style="width:min(380px,86%)">
+      <h3 id="dantiEditTitle">编辑单体</h3>
+      <div id="dantiFert" class="hidden">
+        <div class="fc" style="margin-bottom:8px"><label>拟合系数 a</label><div class="row"><input id="dA" type="number" step="0.0001"></div></div>
+        <div class="fc"><label>拟合系数 b</label><div class="row"><input id="dB" type="number" step="0.0001"></div></div>
+      </div>
+      <div id="dantiSeed" class="hidden">
+        <div class="fc" style="margin-bottom:8px"><label>传动比</label><div class="row"><input id="dRatio" type="number" step="0.01"></div></div>
+        <div class="fc" style="margin-bottom:8px"><label>型孔数</label><div class="row"><input id="dHole" type="number"></div></div>
+        <div class="fc"><label>株距 (cm)</label><div class="row"><input id="dSpacing" type="number" step="0.1"></div></div>
+      </div>
+      <div class="modal-foot"><button class="btn-g" id="dantiCancel">取消</button><button class="btn-p" id="dantiSave">保存</button></div>
+    </div>
+  </div>
+
+  <!-- 重置确认弹窗 -->
+  <div class="modal" id="resetModal">
+    <div class="modal-card" style="width:min(360px,84%)">
+      <h3>重置参数</h3>
+      <div style="color:#c2d3dc;font-size:14px;line-height:1.7">确定要重置参数吗？全部参数与电机启用状态将恢复默认。</div>
+      <div class="modal-foot"><button class="btn-g" onclick="closeModal('resetModal')">取消</button><button class="btn-p" onclick="doReset()">确定重置</button></div>
+    </div>
+  </div>
+
+  <div id="diagLoading"><div class="box"><img id="diagGif" src="" alt="检测中"><div class="txt">一键检测中…</div></div></div>
+
+  <div id="boot"><div class="spin"></div></div>
+  <div id="toast"></div>
+  <div id="ver">UI v16 · 06-26</div>
+</div>
+
+<script>
+const NAV=[
+  {id:'home',name:'主页面',svg:'<path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/>'},
+  {id:'param',name:'参数设置',svg:'<path d="M4 6h10M4 12h16M4 18h7"/><circle cx="18" cy="6" r="2.4"/><circle cx="9" cy="18" r="2.4"/>'},
+  {id:'set',name:'设置',svg:'<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>'},
+  {id:'rx',name:'更换处方图',svg:'<path d="M3 7l6-3 6 3 6-3v13l-6 3-6-3-6 3V7Z"/><path d="M9 4v13M15 7v13"/>'},
+];
+const TITLES={home:'变量施肥处方图',param:'参数设置',set:'设置',rx:'更换处方图'};
+const nav=document.getElementById('nav');
+NAV.forEach((n,i)=>{const b=document.createElement('button');
+  b.className='nav-item'+(i===0?' active':'');b.style.animationDelay=(0.05+i*0.07)+'s';b.dataset.page=n.id;
+  b.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+n.svg+'</svg><span class="lab">'+n.name+'</span>';
+  b.onclick=()=>go(n.id);nav.appendChild(b);});
+function go(p){
+  document.querySelectorAll('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===p));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('show',v.id==='v-'+p));
+  const mt=document.querySelector('.m-top');if(mt)mt.style.display=(p==='home')?'flex':'none'; // 非主页隐藏顶栏，避免遮挡内容
+  if(window.NativeBridge&&NativeBridge.setPage)NativeBridge.setPage(p); // 非主页时原生隐藏地图，避免挡住
+  if(p==='home'&&window.reportMapRect)setTimeout(window.reportMapRect,50);
+}
+const shotOverlay=document.getElementById('shotOverlay');
+document.getElementById('about').onclick=()=>{const im=document.getElementById('shotImg');if(im&&!im.getAttribute('src'))im.src='shot.png';
+  shotOverlay.classList.toggle('show');};
+shotOverlay.onclick=()=>{shotOverlay.classList.remove('show');};
+
+let running=false;const sb=document.getElementById('start'),startC=document.querySelector('.start-c');
+sb.onclick=()=>{running=!running;startC.classList.toggle('run',running);
+  sb.querySelector('.lbl').textContent=running?'停止施肥':'开始施肥';
+  sb.querySelector('.ic').innerHTML=running?'<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="6" width="3.5" height="12" rx="1"/><rect x="13.5" y="6" width="3.5" height="12" rx="1"/></svg>':'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+  document.getElementById('runN').textContent=running?'16/16':'0/16';
+  islandTick();
+  if(window.NativeBridge&&NativeBridge.setRunning)NativeBridge.setRunning(running);
+  toast(running?'已开始变量施肥作业':'已停止作业');};
+const mb=document.getElementById('menuBtn'),qm=document.getElementById('qmenu');
+mb.onclick=()=>{mb.classList.toggle('open');qm.classList.toggle('show');};
+function closeMenu(){mb.classList.remove('open');qm.classList.remove('show');}
+// 左下角统计灵动岛：点一下收起/展开
+(function(){const ft=document.getElementById('fiToggle'),fi=document.getElementById('footInfo');
+  if(ft&&fi)ft.onclick=()=>fi.classList.toggle('collapsed');})();
+// 汉堡菜单“测试模式”：切换并与设置页开关同步
+function qmTest(){const c=document.getElementById('tgTest');const v=c?!c.checked:true;if(c)c.checked=v;
+  if(window.NativeBridge&&NativeBridge.saveParams)NativeBridge.saveParams(JSON.stringify({testMode:v}));
+  toast('测试模式：'+(v?'开':'关'));}
+// 测试输出：转速(rpm)/车速(km/h) 切换 + 发送（同原主页测试控件）
+let testRpm=true;
+(function(){const sR=document.getElementById('segRpm'),sK=document.getElementById('segKmh'),tS=document.getElementById('testSend');
+  if(sR&&sK){sR.onclick=()=>{testRpm=true;sR.classList.add('on');sK.classList.remove('on');};
+    sK.onclick=()=>{testRpm=false;sK.classList.add('on');sR.classList.remove('on');};}
+  if(tS)tS.onclick=()=>{const v=parseFloat((document.getElementById('testVal')||{}).value)||0;
+    if(window.NativeBridge&&NativeBridge.sendTest)NativeBridge.sendTest(v,testRpm);
+    toast('已发送测试值 '+v+(testRpm?' rpm':' km/h'));};})();
+
+/* 底部灵动岛：16 电机转速环（满转 1-8:56.8rpm / 9-16:300rpm，原程序 speedLimit） */
+const islandGrid=document.getElementById('islandGrid');
+const dots=[];
+for(let i=0;i<16;i++){
+  const fert=i<8, max=fert?56.8:300, c=fert?'#34c06a':'#22b1ef';
+  const d=document.createElement('div');d.className='mdot';
+  d.style.setProperty('--c',c);d.style.setProperty('--p','0');
+  d.innerHTML='<div class="ring"></div><div class="core">'+(i+1)+'</div>';
+  d.title=(fert?'施肥电机 ':'排种电机 ')+(i+1);
+  islandGrid.appendChild(d);dots.push({el:d,rpm:0,max:max,work:fert?44:235});
+}
+function islandTick(){
+  if(window.NativeBridge) return; // 接入 App 后由原生 pushMotors() 驱动，停用模拟
+  dots.forEach(m=>{
+    if(running){
+      if(m.rpm<1) m.rpm=m.work*0.7;
+      m.rpm=Math.max(0,Math.min(m.max,m.rpm+(Math.random()-.45)*(m.max*0.06)));
+    }else m.rpm*=0.55;
+    m.el.classList.toggle('run',m.rpm>=1);
+    m.el.style.setProperty('--p',(m.rpm/m.max*100).toFixed(0));
+  });
+}
+setInterval(islandTick,500);
+
+// 数字灵动岛：点一下向下收起 / 再点弹出
+(function(){const nt=document.getElementById('niToggle'),ni=document.getElementById('island');
+  if(nt&&ni)nt.onclick=()=>ni.classList.toggle('collapsed');})();
+
+/* ===== 原生桥接：App 的 WebView 里由 Kotlin 注入 window.NativeBridge =====
+   原生定时调用 window.pushMotors()/pushStatus()/pushCan() 推真实数据；
+   网页按钮经 NativeBridge.* 回调原生。无 NativeBridge 时自动用模拟。 */
+window.pushMotors=function(rpmArr){               // 长度16的瞬时转速(rpm)
+  if(typeof rpmArr==='string'){try{rpmArr=JSON.parse(rpmArr)}catch(e){return}}
+  dots.forEach((m,i)=>{m.rpm=+rpmArr[i]||0;
+    m.el.classList.toggle('run',m.rpm>=1);
+    m.el.style.setProperty('--p',Math.max(0,Math.min(100,m.rpm/m.max*100)).toFixed(0));});
+};
+window.pushStatus=function(run,runCount,avgFert){ // 运行状态/运行电机数/平均施肥
+  running=!!run;
+  startC.classList.toggle('run',running);
+  sb.querySelector('.lbl').textContent=running?'停止施肥':'开始施肥';
+  sb.querySelector('.ic').innerHTML=running?'<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="6" width="3.5" height="12" rx="1"/><rect x="13.5" y="6" width="3.5" height="12" rx="1"/></svg>':'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+  document.getElementById('runN').textContent=(runCount||0)+'/16';
+  const af=document.getElementById('avgFertV');if(af)af.textContent=(+avgFert||0).toFixed(1);
+};
+// 详细数据：每路 流量(g/s)/粒数 + 电流电压 → 悬浮提示；平均准确率
+window.pushDetail=function(o){if(typeof o==='string'){try{o=JSON.parse(o)}catch(e){return}}
+  const ac=document.getElementById('avgAccV');if(ac)ac.textContent=Math.round(+o.acc||0);
+  dots.forEach((m,i)=>{
+    let s;
+    if(i<8){const f=(o.flow&&+o.flow[i])||0;s='施肥'+(i+1)+'：'+f.toFixed(2)+' g/s';}
+    else{const c=(o.count&&+o.count[i-8])||0;s='排种'+(i-7)+'：'+c+' 粒';}
+    const cu=(o.cur&&+o.cur[i])||0,vo=(o.vol&&+o.vol[i])||0;
+    if(cu>0||vo>0)s+=' · '+cu.toFixed(1)+'A '+vo.toFixed(1)+'V';
+    m.el.title=s+' · '+m.rpm.toFixed(0)+' rpm';
+  });
+};
+window.pushCan=function(line){const c=document.getElementById('canMon');if(!c)return;c.textContent+='\n'+line;
+  const ls=c.textContent.split('\n');if(ls.length>40)c.textContent=ls.slice(-40).join('\n');c.scrollTop=c.scrollHeight;};
+// 参数页“应用”：6 个参数 + 16 电机启用 → 写回原生 SharedPreferences
+function applyParams(){
+  const f=document.querySelectorAll('#v-param .pfields input');
+  const act=[];
+  document.querySelectorAll('#mFert .mtog').forEach(c=>act.push(c.classList.contains('on')?1:0));
+  document.querySelectorAll('#mSeed .mtog').forEach(c=>act.push(c.classList.contains('on')?1:0));
+  const payload={rowSize:f[0].value,gnssL1:f[1].value,gnssL2:f[2].value,lagTime:f[3].value,forwardSpeed:f[4].value,fertApplied:f[5].value,active:act};
+  if(window.NativeBridge&&NativeBridge.saveParams)NativeBridge.saveParams(JSON.stringify(payload));
+  toast('参数已应用');
+}
+// 设置页“测试模式”开关 → 写回原生（无硬件时可在测试模式下看电机转动）
+(function(){const tg=document.getElementById('tgTest');if(tg)tg.addEventListener('change',function(){
+  if(window.NativeBridge&&NativeBridge.saveParams)NativeBridge.saveParams(JSON.stringify({testMode:tg.checked}));
+  toast(tg.checked?'测试模式：开':'测试模式：关');});})();
+// 其余设置项 → 写回原生 SharedPreferences
+function bindSet(id,key,isBool){const el=document.getElementById(id);if(!el)return;
+  el.addEventListener('change',function(){const v=isBool?el.checked:el.value;
+    if(window.NativeBridge&&NativeBridge.saveParams)NativeBridge.saveParams(JSON.stringify({[key]:v}));});}
+bindSet('tgSave','writeSaveData',true);
+bindSet('tgComp','navMark',true);
+bindSet('tgSound','errorSound',true);
+bindSet('numColor','colorStep',false);
+bindSet('numView','deltaXY',false);
+bindSet('serCanPort','canPort',false);
+bindSet('serCanBaud','canBaud',false);
+bindSet('serDb9Port','db9Port',false);
+bindSet('serDb9Baud','db9Baud',false);
+(function(){const b=document.getElementById('numSpeedAvgApply');if(b)b.addEventListener('click',function(){
+  const v=(document.getElementById('numSpeedAvg')||{}).value;
+  if(window.NativeBridge&&NativeBridge.saveParams)NativeBridge.saveParams(JSON.stringify({speedAvg:v}));toast('已应用');});})();
+// 原生注入当前设置（打开时回显真实配置）
+window.initSettings=function(o){if(typeof o==='string'){try{o=JSON.parse(o)}catch(e){return}}
+  const set=function(id,v,b){const el=document.getElementById(id);if(!el||v==null)return;
+    if(b){el.checked=!!v;return;}
+    if(el.tagName==='SELECT'&&![...el.options].some(op=>op.value==v)){const op=document.createElement('option');op.value=v;op.textContent=v;el.appendChild(op);}
+    el.value=v;};
+  set('tgTest',o.testMode,true);set('tgSave',o.writeSaveData,true);set('tgComp',o.navMark,true);set('tgSound',o.errorSound,true);
+  set('numSpeedAvg',o.speedAvg);set('numColor',o.colorStep);set('numView',o.deltaXY);
+  set('serCanPort',o.canPort);set('serCanBaud',o.canBaud);set('serDb9Port',o.db9Port);set('serDb9Baud',o.db9Baud);};
+// 可用串口列表填入 CAN/DB9 端口下拉
+window.setPorts=function(arr){if(typeof arr==='string'){try{arr=JSON.parse(arr)}catch(e){return}}
+  ['serCanPort','serDb9Port'].forEach(id=>{const el=document.getElementById(id);if(!el)return;
+    const cur=el.value;el.innerHTML='';
+    (arr||[]).forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;el.appendChild(o);});
+    if(cur&&![...el.options].some(o=>o.value===cur)){const o=document.createElement('option');o.value=cur;o.textContent=cur;el.appendChild(o);}
+    if(cur)el.value=cur;});};
+// CAN 实时监控：原生每帧刷新整块
+window.setCan=function(t){const c=document.getElementById('canMon');if(c)c.textContent=t;};
+
+/* ===== 弹窗助手 ===== */
+function openModal(id){document.getElementById(id).classList.add('show');}
+function closeModal(id){document.getElementById(id).classList.remove('show');}
+document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)m.classList.remove('show');}));
+
+/* ===== 参数页：电机启用格子（施肥1-8 / 播种ID9-16） ===== */
+function buildMotorCells(){
+  const f=document.getElementById('mFert'), s=document.getElementById('mSeed');
+  f.innerHTML='';s.innerHTML='';
+  for(let i=0;i<8;i++){
+    f.appendChild(makeTog(i+1,i+1,true));        // 施肥 1-8 → ID1-8
+    s.appendChild(makeTog(i+1,i+9,true));         // 播种 1-8 → ID9-16
+  }
+}
+function makeTog(num,id,on){
+  const d=document.createElement('div');
+  d.className='mtog '+(on?'on':'off');
+  d.innerHTML='<b>'+num+'</b><small>ID'+id+'</small><small>'+(on?'启用':'关断')+'</small>';
+  d.onclick=()=>{const o=d.classList.contains('on');d.classList.toggle('on',!o);d.classList.toggle('off',o);
+    d.querySelectorAll('small')[1].textContent=o?'关断':'启用';};
+  return d;
+}
+buildMotorCells();
+document.getElementById('paramReset').onclick=()=>openModal('resetModal');
+function doReset(){buildMotorCells();
+  document.querySelectorAll('#v-param input').forEach(inp=>inp.value=inp.previousValue||inp.defaultValue);
+  closeModal('resetModal');toast('参数已重置为默认');}
+
+/* ===== 设置页：单体设置弹窗 ===== */
+document.getElementById('openDanti').onclick=()=>{buildDanti();openModal('dantiModal');};
+let DANTI={fert:[],seed:{ratio:'1.0',hole:'12',spacing:'20'}};
+window.initDanti=function(o){if(typeof o==='string'){try{o=JSON.parse(o)}catch(e){return}}DANTI=o||DANTI;};
+function dFert(id){return (DANTI.fert||[]).find(x=>+x.id===id)||{a:'0.0',b:'0.0'};}
+// 长按触发（≥600ms），单击不响应——还原原程序“长按修改”
+function bindLongPress(el,fn){
+  let t=null;
+  const start=()=>{clearTimeout(t);t=setTimeout(fn,600);};
+  const cancel=()=>{clearTimeout(t);t=null;};
+  el.addEventListener('touchstart',start,{passive:true});
+  el.addEventListener('touchend',cancel);el.addEventListener('touchmove',cancel,{passive:true});
+  el.addEventListener('mousedown',start);el.addEventListener('mouseup',cancel);el.addEventListener('mouseleave',cancel);
+  el.addEventListener('contextmenu',e=>e.preventDefault());
+}
+function buildDanti(){
+  const L=document.getElementById('dantiList');L.innerHTML='';
+  for(let id=0;id<=16;id++){
+    const fert=id<=8;
+    const name=id===0?'施肥全局默认':(fert?'施肥单体 #'+id:'播种单体 #'+(id-8));
+    let sub;
+    if(fert){const r=dFert(id);sub='a = '+r.a+' · b = '+r.b;}
+    else{const s=DANTI.seed||{};sub='传动比 '+(s.ratio||'1.0')+' · 型孔 '+(s.hole||'12')+' · 株距 '+(s.spacing||'20')+'cm';}
+    const c=document.createElement('div');c.className='dcard';
+    c.innerHTML='<div><div class="nm'+(id===0?' def':'')+'">'+name+'</div><div class="sub">'+sub+'</div></div><div class="edit">修改 ›</div>';
+    bindLongPress(c,()=>openDantiEdit(id));
+    L.appendChild(c);
+  }
+}
+function openDantiEdit(id){
+  const fert=id<=8;
+  document.getElementById('dantiEditTitle').textContent=(id===0?'施肥全局默认':(fert?'施肥单体 #'+id:'播种单体 #'+(id-8)));
+  const fF=document.getElementById('dantiFert'),sF=document.getElementById('dantiSeed');
+  if(fert){fF.classList.remove('hidden');sF.classList.add('hidden');const r=dFert(id);
+    document.getElementById('dA').value=r.a;document.getElementById('dB').value=r.b;
+  }else{fF.classList.add('hidden');sF.classList.remove('hidden');const s=DANTI.seed||{};
+    document.getElementById('dRatio').value=s.ratio||'1.0';document.getElementById('dHole').value=s.hole||'12';document.getElementById('dSpacing').value=s.spacing||'20';}
+  openModal('dantiEditModal');
+  document.getElementById('dantiCancel').onclick=()=>closeModal('dantiEditModal');
+  document.getElementById('dantiSave').onclick=()=>{
+    let payload;
+    if(fert){const a=document.getElementById('dA').value||'0.0',b=document.getElementById('dB').value||'0.0';
+      payload={id:id,a:a,b:b};
+      let arr=DANTI.fert||[];const set=(i)=>{let f=arr.find(x=>+x.id===i);if(f){f.a=a;f.b=b;}else arr.push({id:i,a:a,b:b});};
+      set(id);if(id===0)for(let i=1;i<=8;i++)set(i);DANTI.fert=arr;
+    }else{const ratio=document.getElementById('dRatio').value||'1.0',hole=document.getElementById('dHole').value||'12',spacing=document.getElementById('dSpacing').value||'20';
+      payload={seed:true,ratio:ratio,hole:hole,spacing:spacing};DANTI.seed={ratio:ratio,hole:hole,spacing:spacing};}
+    if(window.NativeBridge&&NativeBridge.saveDanti)NativeBridge.saveDanti(JSON.stringify(payload));
+    closeModal('dantiEditModal');buildDanti();toast('单体参数已保存');
+  };
+}
+/* CAN 监控初始（串口在上方配置；接入 App 后由原生 setCan 实时刷新） */
+const canMon=document.getElementById('canMon');
+if(canMon)canMon.textContent='> 监听 CAN 总线…';
+let canSeq=0;
+setInterval(()=>{
+  if(window.NativeBridge)return; // 接入 App 后由原生 pushCan() 驱动
+  if(!document.getElementById('v-set').classList.contains('show'))return;
+  const n=1+canSeq%16, rpm=(running?(n<=8?40+Math.random()*15:200+Math.random()*80):0).toFixed(1);
+  canMon.textContent+='\n> A6 node='+n+' rpm='+rpm+' run='+(running?1:0);
+  const lines=canMon.textContent.split('\n');if(lines.length>40)canMon.textContent=lines.slice(-40).join('\n');
+  canMon.scrollTop=canMon.scrollHeight;canSeq++;
+},700);
+function showDiagLoading(){const g=document.getElementById('diagGif'),d=document.getElementById('diagLoading');
+  if(g)g.src=(Math.random()<0.5?'load1.webp':'load2.webp')+'?t='+Date.now();if(d)d.classList.add('show');}
+function hideDiagLoading(){const d=document.getElementById('diagLoading');if(d)d.classList.remove('show');}
+document.getElementById('diagBtn').onclick=()=>{
+  const o=document.getElementById('diagOut');o.classList.remove('hidden');o.textContent='正在检测…（会驱动电机扫速，请确保安全）';
+  showDiagLoading();
+  if(window.NativeBridge&&NativeBridge.runDiagnostic){NativeBridge.runDiagnostic();return;}
+  // 浏览器演示（无原生时）
+  const steps=['▌ 串口/CAN 连通性 …… 正常','▌ 节点扫描 …… 16/16 在线','▌ 扫速测试 …… OK','▌ RTK …… 固定解','▌ 检测完成'];
+  let i=0;const t=setInterval(()=>{o.textContent+='\n'+steps[i++];o.scrollTop=o.scrollHeight;if(i>=steps.length){clearInterval(t);hideDiagLoading();}},400);
+};
+// 原生诊断进度/报告回调
+window.pushDiag=function(line){const o=document.getElementById('diagOut');if(!o)return;o.classList.remove('hidden');o.textContent+='\n'+line;o.scrollTop=o.scrollHeight;};
+window.setDiag=function(report){const o=document.getElementById('diagOut');if(!o)return;o.classList.remove('hidden');o.textContent=report;o.scrollTop=o.scrollHeight;hideDiagLoading();};
+
+/* ===== 处方图：字段选择 ===== */
+let RXFIELDS=['FERT_KG','RATE','ZONE','GRID_CODE','VALUE'];
+function buildRxFields(){
+  const box=document.getElementById('rxFields');box.innerHTML='';
+  RXFIELDS.forEach((f,i)=>{const c=document.createElement('div');c.className='fchip'+(i===0?' sel':'');c.textContent=f;
+    c.onclick=()=>{box.querySelectorAll('.fchip').forEach(x=>x.classList.remove('sel'));c.classList.add('sel');};
+    box.appendChild(c);});
+}
+buildRxFields();
+// 原生选完文件后回推：文件名 + 真实字段列表
+window.setRxFile=function(name){const n=document.getElementById('rxName');if(n&&name)n.textContent=name;toast('已选择 '+name);};
+window.setRxFields=function(arr){if(typeof arr==='string'){try{arr=JSON.parse(arr)}catch(e){return}}if(arr&&arr.length){RXFIELDS=arr;buildRxFields();}};
+document.getElementById('rxBrowse').onclick=()=>{
+  if(window.NativeBridge&&NativeBridge.selectShp){NativeBridge.selectShp();toast('请选择 .shp 文件…');}
+  else{document.getElementById('rxName').textContent='VariableFert.shp';buildRxFields();toast('已选择 VariableFert.shp（演示）');}
+};
+document.getElementById('rxApply').onclick=()=>{
+  const sel=document.querySelector('#rxFields .fchip.sel');
+  if(!sel){toast('请先选择渲染字段');return;}
+  if(window.NativeBridge&&NativeBridge.loadShp)NativeBridge.loadShp(sel.textContent);
+  toast('加载渲染：'+sel.textContent);go('home');
+};
+// 地图图层操作（全屏/位置跟踪/清除/合并/导出）→ 原生
+function mapOp(op){
+  if(window.NativeBridge&&NativeBridge.mapOp){
+    NativeBridge.mapOp(op);
+    if(op==='track'){const t=document.getElementById('mtTrack');if(t)t.classList.toggle('on');}
+    toast(({fullscreen:'适应全图',track:'位置跟踪已切换',clear:'已清除已施肥图层',merge:'已合并已施肥区域',export:'已导出图层'})[op]||op);
+  }else toast('（演示）'+op);
+}
+// 上报中间“处方图区”的真实位置/尺寸 → 原生把底层地图精确放进去
+window.reportMapRect=function(){
+  if(!window.NativeBridge||!NativeBridge.setMapRect)return;
+  const m=document.getElementById('main');if(!m)return;
+  const r=m.getBoundingClientRect();
+  if(r.width>0&&r.height>0)NativeBridge.setMapRect(Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height));
+};
+window.addEventListener('resize',function(){if(window.reportMapRect)window.reportMapRect();});
+
+let tt;function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('show'),2200);}
+window.addEventListener('load',()=>setTimeout(()=>{document.getElementById('boot').classList.add('gone');const aboutBtn=document.getElementById('about');if(aboutBtn)aboutBtn.click();if(window.reportMapRect)window.reportMapRect();},200));
+</script>
+</body>
+</html>
