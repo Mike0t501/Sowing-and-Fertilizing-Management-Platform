@@ -98,25 +98,26 @@ class MySharedPreFun(private val context: Context) {
             ) ?: "4").toIntOrNull()?.coerceIn(1, 8) ?: 4
 
         // 用户设置界面的单位是cm，用于后续代码计算的单位统一转换为 m
+        // 安全解析（与 rowNumber 风格一致）：非空非数字（如 "."、"-"、"12a"）一律回退默认值，
+        // 避免 onStart 调用本函数时 NumberFormatException 造成开机崩溃循环。
         mSPParamData.rowSize =
-            sharedPre.getString(context.getString(R.string.rowSize_name), "0.0").toString()
-                .toDouble() / 100
+            (sharedPre.getString(context.getString(R.string.rowSize_name), "0.0")
+                ?.toDoubleOrNull() ?: 0.0) / 100
         mSPParamData.gnssDistanceVertical =
-            sharedPre.getString(context.getString(R.string.gnssDistanceVertical_name), "0.0")
-                .toString()
-                .toDouble() / 100
+            (sharedPre.getString(context.getString(R.string.gnssDistanceVertical_name), "0.0")
+                ?.toDoubleOrNull() ?: 0.0) / 100
         mSPParamData.gnssDistanceHorizontal =
-            sharedPre.getString(context.getString(R.string.gnssDistanceHorizontal_name), "0.0")
-                .toString().toDouble() / 100
+            (sharedPre.getString(context.getString(R.string.gnssDistanceHorizontal_name), "0.0")
+                ?.toDoubleOrNull() ?: 0.0) / 100
         mSPParamData.lagTime =
-            sharedPre.getString(context.getString(R.string.lagTime_name), "0.0").toString()
-                .toDouble()
+            sharedPre.getString(context.getString(R.string.lagTime_name), "0.0")
+                ?.toDoubleOrNull() ?: 0.0
         mSPParamData.forwardSpeed =
-            sharedPre.getString(context.getString(R.string.forwardSpeed_name), "-1.0").toString()
-                .toDouble()
+            sharedPre.getString(context.getString(R.string.forwardSpeed_name), "-1.0")
+                ?.toDoubleOrNull() ?: -1.0
         mSPParamData.fertApplied =
-            sharedPre.getString(context.getString(R.string.fertApplied_name), "-1.0").toString()
-                .toDouble()
+            sharedPre.getString(context.getString(R.string.fertApplied_name), "-1.0")
+                ?.toDoubleOrNull() ?: -1.0
 
         // --- 新增：读取UI设置的单体电机启停状态 ---
         val activeMotorsStr = sharedPre.getString("active_motors_state", "1,1,1,1,1,1,1,1") ?: "1,1,1,1,1,1,1,1"
@@ -245,6 +246,14 @@ class MySharedPreFun(private val context: Context) {
         setDefaultValueIfNullOrEmpty(
             R.string.writeSaveData_Switch_name,
             context.getString(R.string.writeSaveData_Switch_defeatValue)
+        )
+        setDefaultValueIfNullOrEmpty(
+            R.string.saveGroupFert_Switch_name,
+            context.getString(R.string.saveGroupFert_Switch_defeatValue)
+        )
+        setDefaultValueIfNullOrEmpty(
+            R.string.saveGroupDepth_Switch_name,
+            context.getString(R.string.saveGroupDepth_Switch_defeatValue)
         )
         setDefaultValueIfNullOrEmpty(
             R.string.testMode_Switch_name,

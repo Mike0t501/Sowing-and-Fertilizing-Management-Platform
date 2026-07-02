@@ -259,9 +259,16 @@ class MainActivity : AppCompatActivity() {
                                         R.string.myWriteDir_DocumentUri_name, selectWriteDirectoryLauncher, context
                                     )
                                     if (MySharedPreFun(context).getSpecificValue(R.string.writeSaveData_Switch_name) == "1") {
-                                        myWriteSaveFun.start(context = context, getData = {
-                                            myWriteSaveFun.getMySaveData(mSPParamData.rowNumber, mVariableFertViewModel)
-                                        })
+                                        val spf = MySharedPreFun(context)
+                                        val includeFert = spf.getSpecificValue(R.string.saveGroupFert_Switch_name) != "0"   // 默认开
+                                        val includeDepth = spf.getSpecificValue(R.string.saveGroupDepth_Switch_name) == "1"
+                                        myWriteSaveFun.start(
+                                            context = context,
+                                            header = myWriteSaveFun.buildSaveHeader(includeFert, includeDepth),
+                                            getData = {
+                                                myWriteSaveFun.getMySaveData(mSPParamData.rowNumber, mVariableFertViewModel, includeFert, includeDepth)
+                                            }
+                                        )
                                     }
                                 }
 
@@ -524,7 +531,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         sharedPreHelper.initSettingsParam()
-        mDB9reCANseCoroutine = DB9reCANseCoroutine()
+        // 仅首次创建，绝不在回到前台时重建：旧实例协程作用域独立于生命周期，重建会泄漏仍在发 CAN
+        // 的旧协程，并使“停止”作用到新空实例上导致电机停不下来。构造不依赖 rowNumber（polyPointExport
+        // 固定 8 路），start1/start1Simulated 每次启动已重建内部 scope，单实例复用安全。
+        if (!::mDB9reCANseCoroutine.isInitialized) {
+            mDB9reCANseCoroutine = DB9reCANseCoroutine()
+        }
         initFittingCoefficient()
         Log.d(
             "Coefficient",

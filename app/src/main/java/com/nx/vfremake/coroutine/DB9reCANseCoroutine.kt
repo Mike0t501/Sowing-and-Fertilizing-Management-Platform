@@ -10,6 +10,7 @@ import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.funClass.MyArcGisFun
 import com.nx.vfremake.funClass.MyGNSSFun
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.funClass.RmcData
 import com.nx.vfremake.mRmcData
 import com.nx.vfremake.mSPParamData
 import com.nx.vfremake.mSerialPortDB9
@@ -26,11 +27,11 @@ import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
-import kotlin.system.measureTimeMillis
 
 /**
  * 接收RMC解析存储并查询单体施肥量发送控制信息协程
@@ -41,9 +42,19 @@ class DB9reCANseCoroutine {
     // 固定按最大行数 8 分配，避免运行中机型行数增大时下标越界（rowNumber 上限为 8）
     private val polyPointExport = Array(8) { arrayOfNulls<Point>(4) }
 
+    // 每单体已落笔网格集合：键为按 ~DRAW_GRID_M 米量化的网格 id（经纬度空间哈希）。
+    // 某单体只在首次进入某网格时落笔，重复压线/来回作业不再叠加多边形——把绘制量级从
+    // 「随里程/时间线性、无上限」收敛到「= 实际驶过的网格数」，与车速、作业时长、重叠压线全部无关，
+    // 彻底消除长时间作业越画越多最终 OOM/ANR 的隐患。固定按最大行数 8 分配，防越界。
+    private val drawnCells = Array(8) { HashSet<Long>() }
+
     // 绘制图形需要持续调用函数，这个得放函数外面，才可以持续 add(Graphic)
     private val navMarkGraphicsOverlay = GraphicsOverlay() // 该图层只用于navMark，因为每次更新需要清除图层，便于管理
-    private val fertGraphicsOverlayExport = GraphicsOverlay() // 该图层只用于绘制施肥区域，每次更新是在上次基础添加，不清除
+    // 已施肥区域图层：作业期间持续累积多边形（从不清除）。用 STATIC 渲染模式——ArcGIS 对大量静态
+    // 图形以后台线程缓存渲染、按需批量刷新，避免 DYNAMIC 每帧重绘上万个多边形拖垮渲染线程（田间
+    // 实测约 10 分钟后卡死 ANR 的主因）。
+    // 渲染模式只能在构造时指定（ArcGIS 的 renderingMode 为只读属性）
+    private val fertGraphicsOverlayExport = GraphicsOverlay(GraphicsOverlay.RenderingMode.STATIC)
 
     // 定义一个协程作用域，保存作业引用的HashSet，以便于管理
     private var scope = CoroutineScope(Dispatchers.Default)
@@ -52,9 +63,32 @@ class DB9reCANseCoroutine {
     // 开始标志位
     var isRunning = false
 
+    companion object {
+        // 绘制去重网格边长（米）：处方图渔网 2.4×4m，2m 量化既够细腻又与之相称。落笔按此网格去重，
+        // 使已施肥多边形数量只与「实际驶过的网格数」相关，与 RMC 频率、车速、作业时长、重叠压线均无关，
+        // 配合 STATIC 渲染从根本上消除长时间作业多边形无界累积导致的卡死/崩溃问题。
+        private const val DRAW_GRID_M = 2.0
+
+        // 纬度 1° 对应的米数（用于经纬度→米的网格量化）
+        private const val METERS_PER_DEG_LAT = 111320.0
+
+        // 由一条绘制带的两端点（WGS84 经纬度）算出其中点所在网格的唯一键。
+        // 纬向按定值换算，经向乘 cos(lat) 修正；gx/gy 各取 32 位打包成 Long。
+        private fun cellKeyOf(p0: Point, p1: Point): Long {
+            val midLon = (p0.x + p1.x) / 2.0
+            val midLat = (p0.y + p1.y) / 2.0
+            val gy = floor(midLat * METERS_PER_DEG_LAT / DRAW_GRID_M).toLong()
+            val gx = floor(
+                midLon * METERS_PER_DEG_LAT * cos(Math.toRadians(midLat)) / DRAW_GRID_M
+            ).toLong()
+            return (gx shl 32) xor (gy and 0xffffffffL)
+        }
+    }
+
     fun shutdown() {
         scope.cancel() // 取消整个作用域，包括任何卡在 read() 里的 job
         jobs.clear()
+        drawnCells.forEach { it.clear() } // 释放去重集，下次作业从空覆盖开始
         isRunning = false
     }
 
@@ -68,6 +102,8 @@ class DB9reCANseCoroutine {
         // 重置速度滑动窗口，避免上次运行的残留速度值影响本次冷启动
         mRmcData.speedBufCount = 0
         mRmcData.speedBufHead = 0
+        // 清空绘制去重集，新作业从空覆盖重新开始落笔
+        drawnCells.forEach { it.clear() }
 
         // 在协程作用域内启动协程
         jobs.add(scope.launch {
@@ -95,13 +131,13 @@ class DB9reCANseCoroutine {
                             // 检查行是否以RMC开头，若是，则处理
                             if (line.startsWith("\$GPRMC") || line.startsWith("\$GNRMC")) {
                                 Log.d("GNSS", line)
-                                measureTimeMillis(
-                                ) {
-                                    onGNSSMsgReceived(
-                                        line,
-                                        context,
-                                        mVariableFertViewModel
-                                    )
+                                // 兜底：任何单条坏报文/越界等异常都不得杀死控制协程；CancellationException 须放行
+                                try {
+                                    onGNSSMsgReceived(line, context, mVariableFertViewModel)
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (t: Throwable) {
+                                    Log.e("DB9reCANseCoroutine", "onGNSSMsgReceived 异常（已跳过该帧）: ${t.message}", t)
                                 }
                             }
                             sb.delete(0, endOfLineIndex + 1) // 从StringBuilder中删除这行
@@ -138,6 +174,7 @@ class DB9reCANseCoroutine {
         scope = CoroutineScope(Dispatchers.Default)
         mRmcData.speedBufCount = 0
         mRmcData.speedBufHead = 0
+        drawnCells.forEach { it.clear() }
 
         // 十进制度 → RMC 的「度分」格式（纬度2位度 / 经度3位度），沿用旧实现
         fun decimalToRMCFormat(coordinate: Double, isLatitude: Boolean): String {
@@ -210,7 +247,13 @@ class DB9reCANseCoroutine {
                         speedKnots
                     )
                     Log.d("GNSS", line)
-                    onGNSSMsgReceived(line, context, mVariableFertViewModel)
+                    try {
+                        onGNSSMsgReceived(line, context, mVariableFertViewModel)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (t: Throwable) {
+                        Log.e("DB9reCANseCoroutine", "onGNSSMsgReceived 异常（已跳过该帧）: ${t.message}", t)
+                    }
                     delay(interval)
                 }
             } while (loop && isActive)
@@ -295,27 +338,43 @@ class DB9reCANseCoroutine {
 
         // 绘制已施肥区域：只画开启的单体、按真实位置；关闭的单体留空
         // （不再绘制整幅绿色带，避免只开部分单体时仍铺满整机宽度）
+        // 停车/低速门控：近零速时 RTK 航向角不可靠，幅宽横排会绕定位点旋转，逐帧缝合会把
+        // 条形带画成发散的圆疙瘩。此时暂停绘制——polyPointExport 保持上次末端不变，恢复前进后
+        // 下一次绘制自然从"上次末端 → 新位置"桥接续上，无空洞；同时避免停车时图层无限累积退化四边形。
+        // 控制逻辑（dantiPositionAndCtrl 的施肥/控深下发）已在前面照常运行，这里只门控绘制。
         val fertApplied = mVariableFertViewModel.fertApplied.value
-        for (i in 0 until mSPParamData.rowNumber) {
-            if (!(mSPParamData.activeMotors.getOrNull(i) ?: true)) continue // 关闭的单体不绘制
-            Log.d(
-                "DB9reCANseCoroutine",
-                "$i: " + fertApplied?.get(i).toString()
-            )
-            val exportMsg = doubleArrayOf(
-                mVariableFertViewModel.fertApplied.value?.get(i) ?: 0.0,
-                mVariableFertViewModel.confertflow.value?.get(i) ?: 0.0,
-                mVariableFertViewModel.monfertflow.value?.get(i) ?: 0.0,
-                mVariableFertViewModel.forwardspeed.value ?: 0.0
-            )
-            MyArcGisFun().drawPolyExport(
-                polyPoint = polyPointExport[i],
-                point = arrayOf(pointi[1][i], pointi[1][i + 1]),
-                exportMsg = exportMsg,
-                fertGraphicsOverlay = fertGraphicsOverlayExport,
-                mVariableFertViewModel = mVariableFertViewModel,
-                context = context
-            )
+        // 绘制去重：每单体只在首次进入某网格（~DRAW_GRID_M 米）时落笔。原绘制频率与 RMC 频率挂钩，
+        // 高频/慢速时同一处堆叠上万个多边形，约 10 分钟拖垮地图渲染导致卡死；即便按里程抽稀，反复压线/
+        // 来回作业仍会随面积无界累积。改为按网格去重后，多边形数量上界 = 实际驶过的网格数，与车速、
+        // 作业时长、重叠压线全部无关，从根本上消除长时间作业崩溃隐患。
+        if (mRmcData.gnssRawSpeed >= RmcData.STANDSTILL_SPEED_KMH) {
+            for (i in 0 until mSPParamData.rowNumber) {
+                if (!(mSPParamData.activeMotors.getOrNull(i) ?: true)) continue // 关闭的单体不绘制
+                val p0 = pointi[1][i]
+                val p1 = pointi[1][i + 1]
+                // 该单体本帧绘制带的网格键；已画过则跳过，但仍把 polyPointExport 起点推进到当前条末端，
+                // 避免下一次落笔从旧覆盖区跨越式拉出一条长四边形。
+                val key = cellKeyOf(p0, p1)
+                if (!drawnCells[i].add(key)) {
+                    polyPointExport[i][0] = p0
+                    polyPointExport[i][1] = p1
+                    continue
+                }
+                val exportMsg = doubleArrayOf(
+                    mVariableFertViewModel.fertApplied.value?.get(i) ?: 0.0,
+                    mVariableFertViewModel.confertflow.value?.get(i) ?: 0.0,
+                    mVariableFertViewModel.monfertflow.value?.get(i) ?: 0.0,
+                    mVariableFertViewModel.forwardspeed.value ?: 0.0
+                )
+                MyArcGisFun().drawPolyExport(
+                    polyPoint = polyPointExport[i],
+                    point = arrayOf(p0, p1),
+                    exportMsg = exportMsg,
+                    fertGraphicsOverlay = fertGraphicsOverlayExport,
+                    mVariableFertViewModel = mVariableFertViewModel,
+                    context = context
+                )
+            }
         }
         mVariableFertViewModel.fertAppliedLast.postValue(fertApplied)
     }

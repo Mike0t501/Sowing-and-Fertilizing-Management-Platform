@@ -43,6 +43,7 @@ import androidx.compose.material.IconButton
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Fullscreen
@@ -53,12 +54,14 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Merge
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -335,20 +338,18 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
     // 当前位置跟踪标志位
     val navCenterIsRunning = remember { mutableStateOf(false) }
 
-    //...检查是否设置sharedpre
-    val deltaXSharedPre =
-        MySharedPreFun(context).getSpecificValue(R.string.deltaX_name)
-    val deltaX = if (!deltaXSharedPre.isNullOrEmpty()) {
-        deltaXSharedPre.toInt()
-    } else {
-        context.resources.getInteger(R.integer.deltaX_value)
+    //...检查是否设置sharedpre：跟随缩放比例 deltaX/deltaY，可在地图右上角实时增减并持久化
+    val deltaX = remember {
+        mutableIntStateOf(
+            MySharedPreFun(context).getSpecificValue(R.string.deltaX_name)?.toIntOrNull()
+                ?: context.resources.getInteger(R.integer.deltaX_value)
+        )
     }
-    val deltaYSharedPre =
-        MySharedPreFun(context).getSpecificValue(R.string.deltaY_name)
-    val deltaY = if (!deltaYSharedPre.isNullOrEmpty()) {
-        deltaYSharedPre.toInt()
-    } else {
-        context.resources.getInteger(R.integer.deltaX_value)
+    val deltaY = remember {
+        mutableIntStateOf(
+            MySharedPreFun(context).getSpecificValue(R.string.deltaY_name)?.toIntOrNull()
+                ?: context.resources.getInteger(R.integer.deltaY_value)
+        )
     }
     //...检查是否设置sharedpre
 
@@ -357,8 +358,8 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
         while (navCenterIsRunning.value) {
             loLaDidegData?.let { (longitude, latitude, direction) ->
                 val point = Point(longitude, latitude, SpatialReferences.getWgs84())
-                val deltaXCacu = 0.000001 * deltaX
-                val deltaYCacu = 0.000001 * deltaY
+                val deltaXCacu = 0.000001 * deltaX.intValue
+                val deltaYCacu = 0.000001 * deltaY.intValue
                 // Viewpoint需要传入的参数是Envelope，这里采用显示区域来设置，上述delta修改可以改表区域大小
                 val envelope = Envelope(
                     point.x - deltaXCacu, point.y - deltaYCacu,  // 最小 X 和 Y
@@ -532,6 +533,44 @@ fun MapAndFunBontonVeiw(mapView: MapView, mVariableFertViewModel: VariableFertVi
                     }
                 },
             )
+
+            // 处方图右上角：跟随缩放比例加减控件（仅跟随开启时显示）
+            // ＋放大=减小delta（视野更近），－缩小=增大delta；X、Y同步，步长±10，范围10~500，写回SharedPreferences
+            if (navCenterIsRunning.value) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .background(Color(0x88000000), RoundedCornerShape(8.dp)),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    IconButton(onClick = {
+                        if (deltaX.intValue > 10) {
+                            deltaX.intValue -= 10
+                            deltaY.intValue -= 10
+                            MySharedPreFun(context).getMySharedPre().edit()
+                                .putString(context.getString(R.string.deltaX_name), deltaX.intValue.toString())
+                                .putString(context.getString(R.string.deltaY_name), deltaY.intValue.toString())
+                                .apply()
+                        }
+                    }) {
+                        Icon(Icons.Filled.Add, contentDescription = "放大", tint = Color.White)
+                    }
+                    IconButton(onClick = {
+                        if (deltaX.intValue < 500) {
+                            deltaX.intValue += 10
+                            deltaY.intValue += 10
+                            MySharedPreFun(context).getMySharedPre().edit()
+                                .putString(context.getString(R.string.deltaX_name), deltaX.intValue.toString())
+                                .putString(context.getString(R.string.deltaY_name), deltaY.intValue.toString())
+                                .apply()
+                        }
+                    }) {
+                        Icon(Icons.Filled.Remove, contentDescription = "缩小", tint = Color.White)
+                    }
+                }
+            }
+
             Column(
                 modifier = Modifier
                     .padding(start = dimensionResource(id = R.dimen.big_view_padding))

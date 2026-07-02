@@ -68,6 +68,7 @@ class MyWriteSaveFun {
      */
     fun start(
         context: Context,
+        header: List<String>, // CSV表头，随所选字段组动态生成
         getData: () -> List<List<String>>, // 使用lambda表达式来动态获取数据
     ) {
         // 格式化当前时间作为文件名一部分
@@ -81,6 +82,8 @@ class MyWriteSaveFun {
         // 在协程中执行数据收集和写入任务
         jobs.add(scope.launch {
             try {
+                // 先写出表头行
+                fileWriter.append(header.joinToString(",") + "\n")
                 // 开始写出
                 while (isActive) {
                     val dataGroups = getData() // List<List<Double>>
@@ -128,13 +131,45 @@ class MyWriteSaveFun {
     }
 
     /**
+     * 构造 CSV 表头，列顺序必须与 getMySaveData 严格一致
+     * @param  includeFert:是否包含施肥数据列
+     * @param  includeDepth:是否包含播深数据列
+     * @return List<String>：表头列名
+     * @note
+     */
+    fun buildSaveHeader(includeFert: Boolean, includeDepth: Boolean): List<String> {
+        val header = mutableListOf("时间戳", "序号")
+        if (includeFert) {
+            header.addAll(
+                listOf(
+                    "前进速度", "经度", "纬度", "监测电压", "电机转速",
+                    "应施肥量", "监测施肥量", "转速转换施肥量", "准确率"
+                )
+            )
+        }
+        if (includeDepth) {
+            header.addAll(
+                listOf("目标深度mm", "实际深度mm", "编码器位置", "是否在线", "报警码")
+            )
+        }
+        return header
+    }
+
+    /**
      * 保存实验数据
      * @param  n:行数，每行都做成一个List，n个List再做成一个List
      * @param  mVariableFertViewModel:存储数据的viewmodel
+     * @param  includeFert:是否包含施肥数据列
+     * @param  includeDepth:是否包含播深数据列
      * @return List<List<String>>：各行要保存的数据
      * @note
      */
-    fun getMySaveData(n: Int, mVariableFertViewModel: VariableFertViewModel): List<List<String>> {
+    fun getMySaveData(
+        n: Int,
+        mVariableFertViewModel: VariableFertViewModel,
+        includeFert: Boolean,
+        includeDepth: Boolean
+    ): List<List<String>> {
         // 因为需要用到viewmodel，这个函数要放在activity里
         val dantiLLGeo = mVariableFertViewModel.dantiLLGeo.value
         // 我这里存储的是用于计算的速度，如果要存实际速度在解析RMC里修改
@@ -149,28 +184,43 @@ class MyWriteSaveFun {
         val accuracyDoublearray = mVariableFertViewModel.accuracyDoublearray.value
         // -----------------------------------
 
+        // 播深数据：按索引 1:1 取对应电机
+        val depthMotors = mVariableFertViewModel.sowingDepthState.value?.motors
+
         val dataList = mutableListOf<List<String>>() // 创建一个可变的列表来存储数据
         for (i in 0 until n) {
             // 获取当前索引的 dantiPointX 和 dantiPointY
             val dantiPointLo = (dantiLLGeo?.getOrNull(i)?.x)
             val dantiPointLa = dantiLLGeo?.getOrNull(i)?.y
             val data = mutableListOf<String>().apply {
-                // 当数据为-1时，认为该处数据无效
+                // 序号始终写出
                 add(i.toString())
-                add(if (forwardspeed == null) "-1" else "%.2f".format(forwardspeed))
-                add(if (dantiPointLo == null) "-1" else "%.9f".format(dantiPointLo))
-                add(if (dantiPointLa == null) "-1" else "%.9f".format(dantiPointLa))
-                add(if (monAdcV?.get(i) == null) "-1" else "%.2f".format(monAdcV[i]))
-                add(if (motorSpeed?.get(i) == null) "-1" else "%.2f".format(motorSpeed[i]))
-                add(if (fertApplied?.get(i) == null) "-1" else "%.2f".format(fertApplied[i]))
+                if (includeFert) {
+                    // 当数据为-1时，认为该处数据无效
+                    add(if (forwardspeed == null) "-1" else "%.2f".format(forwardspeed))
+                    add(if (dantiPointLo == null) "-1" else "%.9f".format(dantiPointLo))
+                    add(if (dantiPointLa == null) "-1" else "%.9f".format(dantiPointLa))
+                    add(if (monAdcV?.get(i) == null) "-1" else "%.2f".format(monAdcV[i]))
+                    add(if (motorSpeed?.get(i) == null) "-1" else "%.2f".format(motorSpeed[i]))
+                    add(if (fertApplied?.get(i) == null) "-1" else "%.2f".format(fertApplied[i]))
 
-                // --- 【新增代码 2/2】将新增数据添加到列表中 ---
-                // 监测施肥量 monfertflow
-                add(if (monfertflow?.get(i) == null) "-1" else "%.2f".format(monfertflow[i]))
-                // 转速转换施肥量 confertflow
-                add(if (confertflow?.get(i) == null) "-1" else "%.2f".format(confertflow[i]))
-                // 准确率
-                add(if (accuracyDoublearray?.get(i) == null) "-1" else "%.2f".format(accuracyDoublearray[i]))
+                    // --- 【新增代码 2/2】将新增数据添加到列表中 ---
+                    // 监测施肥量 monfertflow
+                    add(if (monfertflow?.get(i) == null) "-1" else "%.2f".format(monfertflow[i]))
+                    // 转速转换施肥量 confertflow
+                    add(if (confertflow?.get(i) == null) "-1" else "%.2f".format(confertflow[i]))
+                    // 准确率
+                    add(if (accuracyDoublearray?.get(i) == null) "-1" else "%.2f".format(accuracyDoublearray[i]))
+                }
+                if (includeDepth) {
+                    // 播深电机 i 对应字段，无对应电机时写 -1
+                    val motor = depthMotors?.getOrNull(i)
+                    add(if (motor == null) "-1" else "%.2f".format(motor.targetDepth))
+                    add(if (motor == null) "-1" else "%.2f".format(motor.currentDepth))
+                    add(if (motor == null) "-1" else motor.currentPosition.toString())
+                    add(if (motor == null) "-1" else if (motor.isOnline) "1" else "0")
+                    add(if (motor == null) "-1" else motor.alarmCode.toString())
+                }
             }
             // 将当前索引的数据列表添加到 dataList 中
             dataList.add(data)

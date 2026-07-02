@@ -42,7 +42,9 @@ class MyGNSSFun {
         // 对于过滤得到的RMC语句进行解析
         rmcLines.forEach { rmcSentence ->
             val parts = rmcSentence.split(",")
-            if (parts.size > 9 && parts[0].endsWith("RMC") && parts[2] == "D" ||  parts.size > 9 && parts[0].endsWith("RMC") && parts[2] == "A") {
+            // 必须 ≥12 段：后面会访问 parts[10](磁偏角)/parts[11](校验和)。原守卫只查 size>9，
+            // 截断/畸形且状态恰为 A/D 的 RMC 会越界抛 IndexOutOfBoundsException 杀死控制协程。
+            if (parts.size >= 12 && parts[0].endsWith("RMC") && (parts[2] == "A" || parts[2] == "D")) {
                 mVariableFertViewModel.gnssIsGood.postValue(false)
                 mRmcData.timeStamp = parts[1]
                 mRmcData.status = parts[2]
@@ -50,10 +52,15 @@ class MyGNSSFun {
                 mRmcData.latitude = parseLatitude(parts[3], parts[4]) ?: 0.0
                 // 经度
                 mRmcData.longitude = parseLongitude(parts[5], parts[6]) ?: 0.0
+                // RMC原始对地速度(km/h)：始终解析，不受用户"固定前进速度"覆盖影响。
+                // 停车/低速判定（冻结航向角、暂停绘制）必须依据它——固定速度下 forwardSpeed 恒为定值、永不为0。
+                val gnssRawSpeedKmh = (parts[7].toDoubleOrNull() ?: 0.0) * 1.852
+                mRmcData.gnssRawSpeed = gnssRawSpeedKmh
+
                 // 如果用户设置了前进速度，则使用用户设置的值，否则根据GNSS信息
                 if (forwardSpeed == -1.0 || forwardSpeed <= 0) {
                     // GNSS的速度单位是节，转换成km/h
-                    mRmcData.forwardSpeed = (parts[7].toDoubleOrNull() ?: 0.0) * 1.852
+                    mRmcData.forwardSpeed = gnssRawSpeedKmh
 
                 } else {
                     // 用户设置的前进速度
@@ -62,8 +69,13 @@ class MyGNSSFun {
 
                 // 航向角GNSS里解析出来是角度，转换为弧度
                 // 三角函数计算需要弧度，api里有些是需要角度的，涉及角度弧度的api自己查查
-                mRmcData.directionDeg = parts[8].toDoubleOrNull() ?: 0.0
-                mRmcData.directionRad = Math.toRadians(mRmcData.directionDeg)
+                // 低速保持：近零速时 RTK 航向角无定义/乱跳（或空字段被 ?:0.0 当成正北），
+                // 此时保留上一帧航向角，避免施肥带绕定位点发散成圆疙瘩、位置箭头乱转。
+                val parsedHeadingDeg = parts[8].toDoubleOrNull()
+                if (gnssRawSpeedKmh >= RmcData.STANDSTILL_SPEED_KMH && parsedHeadingDeg != null) {
+                    mRmcData.directionDeg = parsedHeadingDeg
+                    mRmcData.directionRad = Math.toRadians(parsedHeadingDeg)
+                }
                 mRmcData.date = parts[9]
                 mRmcData.magneticVariation = parts[10].toDoubleOrNull() ?: 0.0
                 mRmcData.checksum = parts[11]
@@ -73,9 +85,11 @@ class MyGNSSFun {
         }
 
         // 前进速度滑动窗口平均：每条 RMC 立即更新，解决冷启动延迟与停车延迟
+        // 安全解析：值损坏时回退 5，并保证 ≥1（下方用作环形缓冲区大小与取模，0 会除零崩溃）
         val cntCompare =
-            (MySharedPreFun(context).getSpecificValue(R.string.forwardSpeedAverageNum_name)
-                ?: context.getString(R.string.forwardSpeedAverageNum_defeatValue)).toInt()
+            ((MySharedPreFun(context).getSpecificValue(R.string.forwardSpeedAverageNum_name)
+                ?: context.getString(R.string.forwardSpeedAverageNum_defeatValue))
+                .toIntOrNull() ?: 5).coerceAtLeast(1)
         // 窗口大小与设置不符时重置缓冲区（用户修改了设置）
         if (mRmcData.speedBuffer.size != cntCompare) {
             mRmcData.speedBuffer = DoubleArray(cntCompare) { 0.0 }
