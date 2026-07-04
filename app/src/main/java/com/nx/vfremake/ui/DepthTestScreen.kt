@@ -60,9 +60,11 @@ import com.nx.vfremake.coroutine.DepthTestCoroutine
 import com.nx.vfremake.coroutine.SowingDepthCoroutine
 import com.nx.vfremake.data.DepthTestConfig
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.funClass.DocuAndManageFun
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.isSystemRunning
+import com.nx.vfremake.mSPParamData
 
 /**
  * 生成梯度序列预览（与 DepthTestCoroutine.buildStageSequence 逻辑一致，仅用于界面展示）
@@ -104,6 +106,8 @@ fun DepthTestScreen(
 
     val state by viewModel.sowingDepthState.observeAsState(SowingDepthState())
     val status by viewModel.depthTestStatus.observeAsState()
+    val activeMotorsState by viewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
+    val activeMotorIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorsState)
 
     // 一键测试协程实例（页面级持有；离开页面 shutdown 时记录器自动落盘保存）
     val testCoroutine = remember { DepthTestCoroutine() }
@@ -123,6 +127,11 @@ fun DepthTestScreen(
     var busy by remember { mutableStateOf(false) }
     LaunchedEffect(status) {
         status?.let { busy = it.running }
+    }
+    LaunchedEffect(activeMotorIndices) {
+        if (activeMotorIndices.isNotEmpty() && motorIndex !in activeMotorIndices) {
+            motorIndex = activeMotorIndices.first()
+        }
     }
 
     // ── 串口与协程生命周期（与 DepthCalibrationScreen 同模式）──────────────────
@@ -160,6 +169,10 @@ fun DepthTestScreen(
     fun startTest() {
         if (isSystemRunning) {
             Toast.makeText(context, "作业进行中，无法启动性能测试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (motorIndex !in activeMotorIndices) {
+            Toast.makeText(context, "请先在参数设置页启用要测试的播种深度电机", Toast.LENGTH_SHORT).show()
             return
         }
         if (DocuAndManageFun().getWriteDirDocumentUri(context) == null) {
@@ -247,9 +260,16 @@ fun DepthTestScreen(
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("被测电机", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                    for (rowStart in listOf(0, 4)) {
+                    if (activeMotorIndices.isEmpty()) {
+                        Text(
+                            "未启用播种深度电机，请先在参数设置页开启需要测试的行。",
+                            fontSize = 13.sp,
+                            color = Color.Gray
+                        )
+                    } else {
+                    activeMotorIndices.chunked(4).forEach { rowIndices ->
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            for (i in rowStart until rowStart + 4) {
+                            rowIndices.forEach { i ->
                                 val cal = state.motors[i]
                                 val selected = motorIndex == i
                                 OutlinedButton(
@@ -282,11 +302,21 @@ fun DepthTestScreen(
                                     }
                                 }
                             }
+                            repeat(4 - rowIndices.size) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
                         }
                     }
+                    }
                     // 选中电机实时反馈
-                    val sel = state.motors[motorIndex]
+                    val selectedMotorIndex = if (motorIndex in activeMotorIndices) {
+                        motorIndex
+                    } else {
+                        activeMotorIndices.firstOrNull() ?: 0
+                    }
+                    val sel = state.motors[selectedMotorIndex]
                     Divider()
+                    if (activeMotorIndices.isNotEmpty()) {
                     Row(
                         modifier              = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
@@ -301,6 +331,7 @@ fun DepthTestScreen(
                             color    = if (!sel.limitsSet || !sel.fitValid) Color(0xFFD32F2F)
                                        else Color(0xFF388E3C)
                         )
+                    }
                     }
                 }
             }

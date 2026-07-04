@@ -6,9 +6,11 @@ import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.mSPParamData
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -112,6 +114,23 @@ class SowingDepthCoroutine {
 
                 val state  = viewModel.sowingDepthState.value ?: SowingDepthState()
                 val motors = state.motors
+                val activeMotorState = viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
+                val activeIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorState)
+                val activeIndexSet = activeIndices.toSet()
+                for (i in 0 until 8) {
+                    if (i !in activeIndexSet) {
+                        motorInitialized[i] = false
+                        motorInitCooldown[i] = 0
+                        lastSentTargetDepth[i] = Float.NaN
+                        viewModel.updateServoCalibration(i) { cal ->
+                            if (cal.isOnline || cal.isEnabled || cal.alarmCode != 0) {
+                                cal.copy(isOnline = false, isEnabled = false, alarmCode = 0)
+                            } else {
+                                cal
+                            }
+                        }
+                    }
+                }
 
                 // ════════════════════════════════════════════════════════════
                 // Phase 1：读取所有在线电机的位置（心跳维持 + 位置更新）
@@ -122,7 +141,7 @@ class SowingDepthCoroutine {
                 // 探测所有配置节点（不再用 isOnline 门控）：请求-应答存活模型下，任何 SDO 回包
                 // 都会被 CanReceiveCoroutine 标记在线，使被误判离线的电机一旦重新应答即自动恢复，
                 // 打破「离线后停止轮询 → 再无回包 → 无法自愈」的锁死。
-                for (i in 0 until 8) {
+                for (i in activeIndices) {
                     CanOpenFun.sendFrame(CanOpenFun.buildReadPositionFrame(motors[i].nodeId))
                 }
 
@@ -141,7 +160,7 @@ class SowingDepthCoroutine {
 
                 if (lastMasterEnabled && !masterEnabled) {
                     Log.i(TAG, "总开关 ON→OFF：对所有已初始化电机发 Shutdown")
-                    for (i in 0 until 8) {
+                    for (i in activeIndices) {
                         val cal = stateAfterRead.motors[i]
                         if (cal.isOnline && motorInitialized[i]) {
                             // 0x6040 = 0x0006 → Shutdown，从 Operation Enabled 经
@@ -160,7 +179,7 @@ class SowingDepthCoroutine {
                 }
                 lastMasterEnabled = masterEnabled
 
-                for (i in 0 until 8) {
+                for (i in activeIndices) {
                     val cal = stateAfterRead.motors[i]
 
                     if (!cal.isOnline) {
@@ -201,7 +220,7 @@ class SowingDepthCoroutine {
                 // ════════════════════════════════════════════════════════════
                 if (!isTestMode) {
                     val nowMs = System.currentTimeMillis()
-                    for (i in 0 until 8) {
+                    for (i in activeIndices) {
                         val cal = stateAfterRead.motors[i]
                         if (!cal.isOnline) continue
                         // lastHeardMs == 0 表示 CanReceiveCoroutine 尚未收到该节点任何帧，暂不判定
@@ -228,7 +247,7 @@ class SowingDepthCoroutine {
                 if (masterEnabled) {
                     val posSpeed = stateAfterRead.positionSpeed
 
-                    for (i in 0 until 8) {
+                    for (i in activeIndices) {
                         val cal    = stateAfterRead.motors[i]
                         val target = cal.targetDepth
 
@@ -328,7 +347,7 @@ class SowingDepthCoroutine {
                 // ════════════════════════════════════════════════════════════
                 val stateForAlarm = viewModel.sowingDepthState.value ?: stateAfterRead
 
-                for (i in 0 until 8) {
+                for (i in activeIndices) {
                     val cal = stateForAlarm.motors[i]
                     if (!cal.isOnline) continue
 

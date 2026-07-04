@@ -89,7 +89,8 @@ fun VariableFert(
         }
         composable(route = VariableFertScreen.ParamSet.name) {
             ParamSettingsScreen(
-                onClickBack = { navController.popBackStack() }
+                onClickBack = { navController.popBackStack() },
+                viewModel = mVariableFertViewModel
             )
         }
         composable(route = VariableFertScreen.Settings.name) {

@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.data.activeSowingDepthMotorIndices
+import com.nx.vfremake.data.isSowingDepthMotorActive
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
 import com.nx.vfremake.funClass.CanOpenFun
@@ -57,7 +59,11 @@ class CanReceiveCoroutine {
             MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1"
 
         if (isTestMode) {
-            for (i in 0 until 8) {
+            val activeIndices = activeSowingDepthMotorIndices(
+                mSPParamData.rowNumber,
+                mVariableFertViewModel.activeMotorsState.value ?: mSPParamData.activeMotors
+            )
+            for (i in activeIndices) {
                 mVariableFertViewModel.updateServoCalibration(i) { cal ->
                     if (!cal.isOnline) cal.copy(isOnline = true) else cal
                 }
@@ -195,14 +201,22 @@ class CanReceiveCoroutine {
             while (isActive) {
                 delay(1000)
                 if (isTestMode) {
-                    for (i in 0 until 8) {
+                    val activeIndices = activeSowingDepthMotorIndices(
+                        mSPParamData.rowNumber,
+                        mVariableFertViewModel.activeMotorsState.value ?: mSPParamData.activeMotors
+                    )
+                    for (i in activeIndices) {
                         mVariableFertViewModel.updateServoCalibration(i) { cal ->
                             if (!cal.isOnline) cal.copy(isOnline = true) else cal
                         }
                     }
                 } else {
                     val now = System.currentTimeMillis()
-                    for (i in 0 until 8) {
+                    val activeIndices = activeSowingDepthMotorIndices(
+                        mSPParamData.rowNumber,
+                        mVariableFertViewModel.activeMotorsState.value ?: mSPParamData.activeMotors
+                    )
+                    for (i in activeIndices) {
                         if (servoLastSeen[i] > 0 &&
                             now - servoLastSeen[i] > SERVO_OFFLINE_TIMEOUT_MS
                         ) {
@@ -267,6 +281,17 @@ class CanReceiveCoroutine {
                 ?.motors?.indexOfFirst { it.nodeId == canOpenNodeId } ?: -1
 
             if (motorIndex >= 0) {
+                val activeMotorState = viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
+                if (!isSowingDepthMotorActive(motorIndex, mSPParamData.rowNumber, activeMotorState)) {
+                    viewModel.updateServoCalibration(motorIndex) { cal ->
+                        if (cal.isOnline || cal.isEnabled || cal.alarmCode != 0) {
+                            cal.copy(isOnline = false, isEnabled = false, alarmCode = 0)
+                        } else {
+                            cal
+                        }
+                    }
+                    return
+                }
                 when (canOpenType) {
                     0 -> onCanOpenSdoResponse(canOpenNodeId, motorIndex, data, viewModel)
                     1 -> onCanOpenTpdo1(canOpenNodeId, motorIndex, data, viewModel)

@@ -77,6 +77,7 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -98,6 +99,8 @@ import com.esri.arcgisruntime.symbology.SimpleMarkerSymbol
 import com.esri.arcgisruntime.symbology.TextSymbol
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
 import com.nx.vfremake.funClass.ConvAndCtrlFun
@@ -1364,6 +1367,8 @@ fun MsgScreenBottom(mVariableFertViewModel: VariableFertViewModel = VariableFert
     // 让底部图表直接使用完美计算的显示数据，取代底层抖动的 confertflow
     val confertflow by mVariableFertViewModel.displayFertArray.observeAsState(DoubleArray(safeSize) { 0.0 })
     val fertApplied by mVariableFertViewModel.fertApplied.observeAsState(DoubleArray(safeSize) { 0.0 })
+    val sowingDepthState by mVariableFertViewModel.sowingDepthState.observeAsState(SowingDepthState())
+    val activeMotorsState by mVariableFertViewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
 
     Box(
         modifier = Modifier
@@ -1383,7 +1388,8 @@ fun MsgScreenBottom(mVariableFertViewModel: VariableFertViewModel = VariableFert
             ) {
                 Row(
                     modifier = Modifier.fillMaxSize(), // 【核心修复】：加上 fillMaxSize 撑开画布高度！
-                    horizontalArrangement = Arrangement.SpaceEvenly
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     // 安全地获取目标基准值
                     val midIndex = if (mSPParamData.rowNumber > 0) mSPParamData.rowNumber / 2 else 0
@@ -1400,8 +1406,201 @@ fun MsgScreenBottom(mVariableFertViewModel: VariableFertViewModel = VariableFert
                             .weight(1f)
                             .fillMaxHeight() // 强制图表拉伸到最高，图表彻底恢复显示！
                     )
+                    SowingDepthRealtimePanel(
+                        state = sowingDepthState,
+                        rowNumber = mSPParamData.rowNumber,
+                        activeMotors = activeMotorsState,
+                        modifier = Modifier
+                            .width(300.dp)
+                            .fillMaxHeight()
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SowingDepthRealtimePanel(
+    state: SowingDepthState,
+    rowNumber: Int,
+    activeMotors: BooleanArray?,
+    modifier: Modifier = Modifier
+) {
+    val activeIndices = activeSowingDepthMotorIndices(rowNumber, activeMotors)
+    val activeMotorList = activeIndices.mapNotNull { state.motors.getOrNull(it) }
+    val validMotors = activeMotorList.filter { it.isOnline && it.fitValid }
+    val avgCurrentDepth = validMotors.takeIf { it.isNotEmpty() }
+        ?.map { it.currentDepth.toDouble() }
+        ?.average()
+    val avgTargetDepth = validMotors
+        .map { it.targetDepth }
+        .filter { it > 0f }
+        .takeIf { it.isNotEmpty() }
+        ?.map { it.toDouble() }
+        ?.average()
+        ?: state.globalTargetDepth.toDouble()
+    val onlineCount = activeMotorList.count { it.isOnline }
+    val alarmCount = activeMotorList.count { it.alarmCode != 0 }
+
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xFF1F2520))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "播种深度(mm)",
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = if (state.masterEnabled) "运行" else "待机",
+                color = if (state.masterEnabled) Color(0xFF69F0AE) else Color(0xFFFFD54F),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom
+        ) {
+            DepthSummaryText(
+                label = "均深",
+                value = avgCurrentDepth?.let { "%.1f".format(Locale.CHINA, it) } ?: "--"
+            )
+            DepthSummaryText(
+                label = "目标",
+                value = "%.1f".format(Locale.CHINA, avgTargetDepth)
+            )
+            DepthSummaryText(
+                label = "在线",
+                value = "$onlineCount/${activeIndices.size}"
+            )
+            if (alarmCount > 0) {
+                DepthSummaryText(
+                    label = "报警",
+                    value = alarmCount.toString(),
+                    valueColor = Color(0xFFFF5252)
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            if (activeIndices.isEmpty()) {
+                Text(
+                    text = "未启用",
+                    color = Color(0xFFB0BEC5),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            } else {
+                activeIndices.chunked(4).forEach { rowIndices ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        rowIndices.forEach { index ->
+                        DepthMotorCell(
+                            motorIndex = index,
+                            state = state,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                        repeat(4 - rowIndices.size) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DepthSummaryText(
+    label: String,
+    value: String,
+    valueColor: Color = Color.White
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = label,
+            color = Color(0xFFB0BEC5),
+            fontSize = 11.sp,
+            maxLines = 1
+        )
+        Text(
+            text = value,
+            color = valueColor,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun DepthMotorCell(
+    motorIndex: Int,
+    state: SowingDepthState,
+    modifier: Modifier = Modifier
+) {
+    val motor = state.motors.getOrNull(motorIndex)
+    val statusColor = when {
+        motor == null || !motor.isOnline -> Color(0xFF616161)
+        motor.alarmCode != 0 -> Color(0xFFD32F2F)
+        !motor.limitsSet || !motor.fitValid -> Color(0xFFFBC02D)
+        else -> Color(0xFF43A047)
+    }
+    val textColor = if (statusColor == Color(0xFFFBC02D)) Color.Black else Color.White
+    val depthText = if (motor?.isOnline == true) {
+        "%.1f".format(Locale.CHINA, motor.currentDepth)
+    } else {
+        "--"
+    }
+
+    Row(
+        modifier = modifier
+            .height(28.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(statusColor)
+            .padding(horizontal = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = "${motorIndex + 1}",
+            color = textColor,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
+        Text(
+            text = depthText,
+            color = textColor,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
+            textAlign = TextAlign.End
+        )
     }
 }

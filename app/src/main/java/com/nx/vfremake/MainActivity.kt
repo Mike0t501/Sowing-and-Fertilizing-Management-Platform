@@ -344,7 +344,11 @@ class MainActivity : AppCompatActivity() {
                                             mVariableFertViewModel.depthPrescriptionMode.value == true
                                         ) {
                                             val warn = mVariableFertViewModel.sowingDepthState.value
-                                                ?.depthControlReadinessWarning()
+                                                ?.depthControlReadinessWarning(
+                                                    rowNumber = mSPParamData.rowNumber,
+                                                    activeMotors = mVariableFertViewModel.activeMotorsState.value
+                                                        ?: mSPParamData.activeMotors
+                                                )
                                             if (warn != null) {
                                                 mVariableFertViewModel.depthControlNotice.postValue(warn)
                                             }

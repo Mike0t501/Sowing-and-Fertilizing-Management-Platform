@@ -64,8 +64,10 @@ import androidx.compose.ui.unit.sp
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.mSPParamData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -142,6 +144,8 @@ fun SowingDepthScreen(
     }
 
     val state by viewModel.sowingDepthState.observeAsState(SowingDepthState())
+    val activeMotorsState by viewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
+    val activeMotorIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorsState)
 
     // 全局深度输入框的临时值（初始同步自 state，不随 state 每次变化而强制覆盖）
     var globalDepthInput by remember { mutableStateOf("%.1f".format(state.globalTargetDepth)) }
@@ -166,7 +170,7 @@ fun SowingDepthScreen(
         // 更新全局目标深度
         viewModel.updateSowingDepthGlobalSettings(globalTargetDepth = depth)
         // 同步到每路电机的 targetDepth
-        val updates = (0..7).associate { i ->
+        val updates = activeMotorIndices.associate { i ->
             i to { cal: ServoCalibration -> cal.copy(targetDepth = depth) }
         }
         viewModel.updateMultipleServos(updates)
@@ -212,7 +216,10 @@ fun SowingDepthScreen(
         ) { _ ->
             // 每次采样写出 8 路电机各一行（长表格式，Origin 按电机号筛选）
             val motors = viewModel.sowingDepthState.value?.motors ?: return@start emptyList()
-            motors.map { m ->
+            activeSowingDepthMotorIndices(
+                mSPParamData.rowNumber,
+                viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
+            ).mapNotNull { index -> motors.getOrNull(index) }.map { m ->
                 listOf(
                     (m.motorIndex + 1).toString(),
                     "手动",
@@ -235,7 +242,7 @@ fun SowingDepthScreen(
     // ── 辅助：全部急停 ────────────────────────────────────────────────────────
     fun emergencyStopAll() {
         scope.launch(Dispatchers.IO) {
-            state.motors.forEach { cal ->
+            activeMotorIndices.mapNotNull { state.motors.getOrNull(it) }.forEach { cal ->
                 if (cal.isOnline) {
                     CanOpenFun.sendFrame(CanOpenFun.buildQuickStopFrame(cal.nodeId))
                     delay(20L)
@@ -471,16 +478,25 @@ fun SowingDepthScreen(
                 color      = Color.Gray
             )
 
-            state.motors.forEachIndexed { i, cal ->
-                MotorStatusCard(
-                    cal             = cal,
-                    motorIndex      = i,
-                    onSingleSet     = {
-                        motorDialogInput = "%.1f".format(cal.targetDepth)
-                        motorDialogIndex = i
-                    },
-                    onCalibrate     = { onClickCalibrate(i) }
+            if (activeMotorIndices.isEmpty()) {
+                Text(
+                    "未启用播种深度电机，请先在参数设置页开启需要作业的行。",
+                    fontSize = 14.sp,
+                    color = Color.Gray
                 )
+            } else {
+                activeMotorIndices.forEach { i ->
+                    val cal = state.motors[i]
+                    MotorStatusCard(
+                        cal             = cal,
+                        motorIndex      = i,
+                        onSingleSet     = {
+                            motorDialogInput = "%.1f".format(cal.targetDepth)
+                            motorDialogIndex = i
+                        },
+                        onCalibrate     = { onClickCalibrate(i) }
+                    )
+                }
             }
 
             Spacer(Modifier.height(4.dp))
@@ -578,7 +594,8 @@ fun SowingDepthScreen(
             title            = { Text("选择要标定的电机") },
             text             = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    state.motors.forEachIndexed { i, cal ->
+                    activeMotorIndices.forEach { i ->
+                        val cal = state.motors[i]
                         val statusColor = motorStatusColor(cal)
                         OutlinedButton(
                             onClick  = { showCalibrateDialog = false; onClickCalibrate(i) },
