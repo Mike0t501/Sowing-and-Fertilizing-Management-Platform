@@ -525,7 +525,7 @@ private suspend fun runDiagnosticTest(
 }
 
 @Composable
-fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Unit = {}, onClickSimGnss: () -> Unit = {}, onReinitSerialPort: () -> Unit = {}) {
+fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Unit = {}, onClickSimGnss: () -> Unit = {}, onClickExperimentData: () -> Unit = {}, onReinitSerialPort: () -> Unit = {}) {
     val context = LocalContext.current
     val sharedPre = MySharedPreFun(context).getMySharedPre()
 
@@ -741,7 +741,7 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
 
                     Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
 
-                    AnimatedSettingRow(title = "保存实验数据", subtitle = "开启后可在下方选择保存的数据分组") {
+                    AnimatedSettingRow(title = "保存实验数据", subtitle = "开启后可选择保存的数据分组，并可查看已保存记录") {
                         Switch(
                             checked = writeSaveDataSwitchIsOnState.value,
                             onCheckedChange = { newValue ->
@@ -787,6 +787,15 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                                     },
                                     colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF4CAF50))
                                 )
+                            }
+                            Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { onClickExperimentData() }.padding(vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = "查看已保存记录", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color(0xFF1B7F4D))
+                                Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "查看已保存记录", tint = Color(0xFF1B7F4D))
                             }
                         }
                     }

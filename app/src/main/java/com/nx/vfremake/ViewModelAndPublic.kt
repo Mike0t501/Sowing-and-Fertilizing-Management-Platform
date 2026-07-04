@@ -190,6 +190,9 @@ class VariableFertViewModel : ViewModel() {
     // 控深「未下发原因」一次性提示；主界面 observe 后弹窗，消费后置 null。
     val depthControlNotice = MutableLiveData<String?>(null)
 
+    // 实验数据保存结果一次性提示；first=是否失败，second=文案。主界面 observe 后提示，消费后置 null。
+    val writeSaveNotice = MutableLiveData<Pair<Boolean, String>?>(null)
+
     /** 切换处方图控深模式（数据源开关，与 [updateMasterEnabled] 的使能门控相互独立）。 */
     fun setDepthPrescriptionMode(enabled: Boolean) {
         depthPrescriptionMode.postValue(enabled)

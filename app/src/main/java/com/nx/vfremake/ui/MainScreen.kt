@@ -742,6 +742,31 @@ fun MenuBottomBar(
     }
     //... 处方图控深提示结束
 
+    //... 实验数据保存结果一次性提示：成功 Toast，失败弹窗
+    val writeSaveNotice by mVariableFertViewModel.writeSaveNotice.observeAsState()
+    val writeSaveFailText = remember { mutableStateOf("") }
+    val showWriteSaveFail = remember { mutableStateOf(false) }
+    LaunchedEffect(writeSaveNotice) {
+        writeSaveNotice?.let { (isFail, msg) ->
+            if (isFail) {
+                writeSaveFailText.value = msg
+                showWriteSaveFail.value = true
+            } else {
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+            }
+            mVariableFertViewModel.writeSaveNotice.postValue(null)  // 消费一次，避免重复弹
+        }
+    }
+    if (showWriteSaveFail.value) {
+        ShowConfirmDialog(
+            title = "实验数据保存失败",
+            text = writeSaveFailText.value,
+            showDialog = showWriteSaveFail,
+            showDismiss = false
+        )
+    }
+    //... 实验数据保存提示结束
+
     // 菜单展开栏
     Box(
         modifier = Modifier

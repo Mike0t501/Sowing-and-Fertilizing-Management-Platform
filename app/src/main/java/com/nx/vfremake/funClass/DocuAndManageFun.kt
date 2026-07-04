@@ -16,6 +16,16 @@ import java.io.File
 import java.io.FileOutputStream
 
 
+/**
+ * 实验数据CSV文件信息（用于实验数据记录界面展示）
+ */
+data class ExperimentCsvFile(
+    val documentUri: Uri,
+    val displayName: String,
+    val lastModified: Long,
+    val sizeBytes: Long
+)
+
 class DocuAndManageFun {
     /**
      *  选择文件夹
@@ -156,6 +166,100 @@ class DocuAndManageFun {
                 inputStream.close()
                 outputStream.close()
             }
+        }
+    }
+
+    /**
+     * 获取实验数据保存目录的documentUri，并校验持久化授权仍有效
+     * @param  context:上下文
+     * @return 目录documentUri；未设置或授权已被撤销时返回null
+     * @note
+     */
+    fun getWriteDirDocumentUri(context: Context): Uri? {
+        val uriString = MySharedPreFun(context).getMySharedPre()
+            .getString(context.getString(R.string.myWriteDir_DocumentUri_name), null)
+        if (uriString.isNullOrEmpty()) return null
+        // 存储的是 buildDocumentUriUsingTree 形式，前缀即用户授权的treeUri
+        val stillGranted = context.contentResolver.persistedUriPermissions.any {
+            it.isReadPermission && uriString.startsWith(it.uri.toString())
+        }
+        return if (stillGranted) Uri.parse(uriString) else null
+    }
+
+    /**
+     * 列举保存目录下的实验数据CSV文件（fertMsg_*.csv），按修改时间倒序
+     * @param  context:上下文
+     * @return 文件信息列表；目录未设置/授权失效/查询异常时返回null
+     * @note   须在IO线程调用
+     */
+    fun listExperimentCsvFiles(context: Context): List<ExperimentCsvFile>? {
+        val dirUri = getWriteDirDocumentUri(context) ?: return null
+        return try {
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                dirUri, DocumentsContract.getDocumentId(dirUri)
+            )
+            val result = mutableListOf<ExperimentCsvFile>()
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                    DocumentsContract.Document.COLUMN_SIZE
+                ),
+                null, null, null
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val docId = cursor.getString(0) ?: continue
+                    val name = cursor.getString(1) ?: continue
+                    if (!(name.startsWith("fertMsg_") && name.endsWith(".csv"))) continue
+                    result.add(
+                        ExperimentCsvFile(
+                            documentUri = DocumentsContract.buildDocumentUriUsingTree(dirUri, docId),
+                            displayName = name,
+                            lastModified = cursor.getLong(2),
+                            sizeBytes = cursor.getLong(3)
+                        )
+                    )
+                }
+            } ?: return null
+            result.sortedByDescending { it.lastModified }
+        } catch (e: Exception) {
+            Log.e("ExperimentData", "列举实验数据文件失败", e)
+            null
+        }
+    }
+
+    /**
+     * 删除一个实验数据CSV文件
+     * @param  context:上下文
+     * @param  documentUri:文件documentUri
+     * @return 是否删除成功
+     * @note   须在IO线程调用
+     */
+    fun deleteExperimentCsvFile(context: Context, documentUri: Uri): Boolean {
+        return try {
+            DocumentsContract.deleteDocument(context.contentResolver, documentUri)
+        } catch (e: Exception) {
+            Log.e("ExperimentData", "删除实验数据文件失败", e)
+            false
+        }
+    }
+
+    /**
+     * 统计CSV文件的数据行数（总行数减去表头行）
+     * @param  context:上下文
+     * @param  documentUri:文件documentUri
+     * @return 数据行数；读取失败返回-1
+     * @note   须在IO线程调用，大文件会逐行读取
+     */
+    fun countCsvDataRows(context: Context, documentUri: Uri): Int {
+        return try {
+            context.contentResolver.openInputStream(documentUri)?.bufferedReader()
+                ?.useLines { lines -> (lines.count() - 1).coerceAtLeast(0) } ?: -1
+        } catch (e: Exception) {
+            Log.e("ExperimentData", "统计实验数据行数失败", e)
+            -1
         }
     }
 
