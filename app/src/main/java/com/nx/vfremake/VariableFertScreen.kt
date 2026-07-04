@@ -28,6 +28,7 @@ import com.esri.arcgisruntime.mapping.view.MapView
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.ui.DantiFertSettings
 import com.nx.vfremake.ui.DepthCalibrationScreen
+import com.nx.vfremake.ui.ExperimentDataScreen
 import com.nx.vfremake.ui.MainScreen
 import com.nx.vfremake.ui.ParamSettingsScreen
 import com.nx.vfremake.ui.SettingsScreen
@@ -44,7 +45,8 @@ enum class VariableFertScreen(@StringRes val title: Int) {
     DantiSettings(title = R.string.settings),
     SimGnss(title = R.string.settings),             // 模拟GNSS定位配置界面
     SowingDepth(title = R.string.settings),         // 播种深度主控制界面
-    DepthCalibration(title = R.string.settings)     // 单路电机深度校准向导（携带 motorIndex 参数）
+    DepthCalibration(title = R.string.settings),    // 单路电机深度校准向导（携带 motorIndex 参数）
+    ExperimentData(title = R.string.settings)       // 实验数据记录查看界面
 }
 
 /**
@@ -93,6 +95,7 @@ fun VariableFert(
                 onClickBack          = { navController.popBackStack() },
                 onClickDantiSettigns = { navController.navigate(VariableFertScreen.DantiSettings.name) },
                 onClickSimGnss = { navController.navigate(VariableFertScreen.SimGnss.name) },
+                onClickExperimentData = { navController.navigate(VariableFertScreen.ExperimentData.name) },
                 onReinitSerialPort = {
                     if (isSystemRunning) {
                         Toast.makeText(context, "系统运行中，请先停止后再应用", Toast.LENGTH_SHORT).show()
@@ -102,6 +105,12 @@ fun VariableFert(
                         Toast.makeText(context, if (ok) "串口已重新打开" else "串口打开失败，请检查配置", Toast.LENGTH_SHORT).show()
                     }
                 }
+            )
+        }
+        // ── 实验数据记录查看界面 ────────────────────────────────────────────
+        composable(route = VariableFertScreen.ExperimentData.name) {
+            ExperimentDataScreen(
+                onClickBack = { navController.popBackStack() }
             )
         }
         composable(route = VariableFertScreen.DantiSettings.name) {

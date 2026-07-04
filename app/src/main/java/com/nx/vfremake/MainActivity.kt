@@ -264,6 +264,7 @@ class MainActivity : AppCompatActivity() {
                                         val includeDepth = spf.getSpecificValue(R.string.saveGroupDepth_Switch_name) == "1"
                                         myWriteSaveFun.start(
                                             context = context,
+                                            mVariableFertViewModel = mVariableFertViewModel,
                                             header = myWriteSaveFun.buildSaveHeader(includeFert, includeDepth),
                                             getData = {
                                                 myWriteSaveFun.getMySaveData(mSPParamData.rowNumber, mVariableFertViewModel, includeFert, includeDepth)

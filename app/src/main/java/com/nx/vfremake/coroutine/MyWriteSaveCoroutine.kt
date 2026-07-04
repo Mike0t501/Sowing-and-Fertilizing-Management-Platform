@@ -23,6 +23,7 @@ import android.widget.Toast
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.funClass.MySharedPreFun
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -68,6 +69,7 @@ class MyWriteSaveFun {
      */
     fun start(
         context: Context,
+        mVariableFertViewModel: VariableFertViewModel, // 保存结果经 writeSaveNotice 通知主界面
         header: List<String>, // CSV表头，随所选字段组动态生成
         getData: () -> List<List<String>>, // 使用lambda表达式来动态获取数据
     ) {
@@ -76,12 +78,14 @@ class MyWriteSaveFun {
             SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
         val fileName = "fertMsg_$timeStampfilename.csv"
 
-        // 创建或打开文件
-        val fileWriter = getFileWriter(context, fileName)
-
         // 在协程中执行数据收集和写入任务
         jobs.add(scope.launch {
+            // 文件创建放在IO协程内：目录未设置/创建失败时通知用户而非主线程崩溃
+            var fileWriter: OutputStreamWriter? = null
+            var dataRowCount = 0
+            var failed = false
             try {
+                fileWriter = getFileWriter(context, fileName)
                 // 先写出表头行
                 fileWriter.append(header.joinToString(",") + "\n")
                 // 开始写出
@@ -93,14 +97,31 @@ class MyWriteSaveFun {
                     for (dataGroup in dataGroups) {
                         val dataRow = "$timeStamp," + dataGroup.joinToString(",") + "\n"
                         fileWriter.append(dataRow) // 将时间戳和数据行追加到文件中
+                        dataRowCount++
                     }
                     delay(200) // 每200毫秒收集并写入一次数据
                 }
+            } catch (e: CancellationException) {
+                throw e // shutdown 的正常取消路径，收尾统一走 finally
             } catch (e: Exception) {
                 e.printStackTrace()
+                failed = true
+                isRunning = false
+                mVariableFertViewModel.writeSaveNotice.postValue(
+                    true to "实验数据保存失败：${e.message}"
+                )
             } finally {
-                fileWriter.flush()
-                fileWriter.close() // 关闭输出流
+                try {
+                    fileWriter?.flush()
+                    fileWriter?.close() // 关闭输出流
+                } catch (e: IOException) {
+                    e.printStackTrace()
+                }
+                if (!failed && fileWriter != null) {
+                    mVariableFertViewModel.writeSaveNotice.postValue(
+                        false to "实验数据已保存：$fileName，共 $dataRowCount 条记录"
+                    )
+                }
             }
         })
         isRunning = true
@@ -117,8 +138,9 @@ class MyWriteSaveFun {
         // 从SharedPreferences获取documentUri
         val documentUri = MySharedPreFun(context).getMySharedPre()
             .getString(context.getString(R.string.myWriteDir_DocumentUri_name), null)
+            ?: throw IOException("未设置保存目录")
 
-        Log.d("writeSaveData", "$documentUri")
+        Log.d("writeSaveData", documentUri)
 
         // 使用SAF操作，因为使用的时间戳创建文件，不存在重复创建新文件的问题
         val fileUri = DocumentsContract.createDocument(
