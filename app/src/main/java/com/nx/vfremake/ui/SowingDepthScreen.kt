@@ -32,8 +32,10 @@ import androidx.compose.material.Switch
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import android.serialport.SerialPort
+import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,7 +46,9 @@ import com.nx.vfremake.R
 import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mSerialPortCAN
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
+import com.nx.vfremake.coroutine.DepthRecordFun
 import com.nx.vfremake.coroutine.SowingDepthCoroutine
+import com.nx.vfremake.funClass.DocuAndManageFun
 import java.io.File
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,15 +82,21 @@ import kotlinx.coroutines.launch
  * @param viewModel       共享 ViewModel
  * @param onClickBack     返回上级
  * @param onClickCalibrate 跳转到指定电机的校准界面
+ * @param onClickDepthTest 跳转到一键深度性能测试界面
  */
 @Composable
 fun SowingDepthScreen(
     viewModel: VariableFertViewModel,
     onClickBack: () -> Unit,
-    onClickCalibrate: (motorIndex: Int) -> Unit
+    onClickCalibrate: (motorIndex: Int) -> Unit,
+    onClickDepthTest: () -> Unit
 ) {
     val context = LocalContext.current
     val scope   = rememberCoroutineScope()
+
+    // 手动实验数据记录器（100ms 采样 8 路电机；离开页面自动落盘保存）
+    val depthRecorder = remember { DepthRecordFun() }
+    var isRecording by remember { mutableStateOf(false) }
 
     // ── 独立串口与协程生命周期 ───────────────────────────────────────────────────
     // 进入页面时自动开启 CAN 串口 + 接收/控制协程；离开时自动关闭。
@@ -115,6 +125,8 @@ fun SowingDepthScreen(
             val depthCoroutine   = SowingDepthCoroutine().also { it.start(viewModel, context) }
 
             onDispose {
+                // 记录中离开页面：自动停止并落盘保存
+                if (depthRecorder.isRunning) depthRecorder.shutdown()
                 receiveCoroutine.shutdown()
                 depthCoroutine.shutdown()
                 if (portOpenedHere) {
@@ -123,7 +135,9 @@ fun SowingDepthScreen(
                 }
             }
         } else {
-            onDispose { }
+            onDispose {
+                if (depthRecorder.isRunning) depthRecorder.shutdown()
+            }
         }
     }
 
@@ -173,6 +187,49 @@ fun SowingDepthScreen(
         if (depth <= 0f) return
         viewModel.updateServoCalibration(motorIndex) { it.copy(targetDepth = depth) }
         motorDialogIndex = null
+    }
+
+    // ── 辅助：手动实验数据记录启停 ────────────────────────────────────────────
+    fun startManualRecord() {
+        if (isSystemRunning) {
+            Toast.makeText(context, "作业进行中，实验数据由主界面记录", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (DocuAndManageFun().getWriteDirDocumentUri(context) == null) {
+            Toast.makeText(
+                context,
+                "未设置保存目录，请先在主界面开启保存实验数据并授权目录",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        depthRecorder.start(
+            context = context,
+            mVariableFertViewModel = viewModel,
+            filePrefix = "depthRec",
+            header = DepthRecordFun.buildDepthRecordHeader(),
+            intervalMs = 100L
+        ) { _ ->
+            // 每次采样写出 8 路电机各一行（长表格式，Origin 按电机号筛选）
+            val motors = viewModel.sowingDepthState.value?.motors ?: return@start emptyList()
+            motors.map { m ->
+                listOf(
+                    (m.motorIndex + 1).toString(),
+                    "手动",
+                    "%.2f".format(m.targetDepth),
+                    "%.2f".format(m.currentDepth),
+                    m.currentPosition.toString(),
+                    if (m.isOnline) "1" else "0",
+                    m.alarmCode.toString()
+                )
+            }
+        }
+        isRecording = true
+    }
+
+    fun stopManualRecord() {
+        depthRecorder.shutdown()
+        isRecording = false
     }
 
     // ── 辅助：全部急停 ────────────────────────────────────────────────────────
@@ -366,6 +423,46 @@ fun SowingDepthScreen(
                 }
             }
 
+            // ── 实验数据记录（手动）─────────────────────────────────────────
+            Card(
+                elevation       = 2.dp,
+                shape           = RoundedCornerShape(10.dp),
+                modifier        = Modifier.fillMaxWidth(),
+                backgroundColor = if (isRecording) Color(0xFFFFF8E1) else Color.White
+            ) {
+                Row(
+                    modifier              = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment     = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text("实验数据记录", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            if (isRecording) "● 记录中（100ms 采样，8 路电机）"
+                            else             "记录编码器位置/深度到 CSV，用于 Origin/Excel 分析",
+                            fontSize = 12.sp,
+                            color    = if (isRecording) Color(0xFFE65100) else Color.Gray
+                        )
+                    }
+                    Button(
+                        onClick = { if (isRecording) stopManualRecord() else startManualRecord() },
+                        colors  = ButtonDefaults.buttonColors(
+                            backgroundColor = if (isRecording) Color(0xFFD32F2F) else Color(0xFF388E3C)
+                        ),
+                        shape          = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            if (isRecording) "停止记录" else "开始记录",
+                            color = Color.White, fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+
             // ── 8 路电机状态卡片 ─────────────────────────────────────────────
             Text(
                 "电机状态",
@@ -401,6 +498,15 @@ fun SowingDepthScreen(
                 ) {
                     Text("标定设置", fontSize = 14.sp)
                 }
+                OutlinedButton(
+                    onClick  = { onClickDepthTest() },
+                    modifier = Modifier.weight(1f),
+                    shape    = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(vertical = 14.dp),
+                    border   = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF1565C0))
+                ) {
+                    Text("性能测试", color = Color(0xFF1565C0), fontSize = 14.sp)
+                }
                 Button(
                     onClick  = { emergencyStopAll() },
                     modifier = Modifier.weight(1f),
@@ -414,6 +520,32 @@ fun SowingDepthScreen(
 
             Spacer(Modifier.height(8.dp))
         }
+    }
+
+    // ── 实验数据保存结果一次性提示：成功 Toast，失败弹窗 ──────────────────────
+    // 注：与 MainScreen 的同名消费互不冲突——Navigation 下同一时刻只有一个页面在组合中
+    val writeSaveNotice by viewModel.writeSaveNotice.observeAsState()
+    val writeSaveFailText = remember { mutableStateOf("") }
+    val showWriteSaveFail = remember { mutableStateOf(false) }
+    LaunchedEffect(writeSaveNotice) {
+        writeSaveNotice?.let { (isFail, msg) ->
+            if (isFail) {
+                writeSaveFailText.value = msg
+                showWriteSaveFail.value = true
+                isRecording = false  // 保存失败时记录协程已自行终止，同步按钮状态
+            } else {
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+            }
+            viewModel.writeSaveNotice.postValue(null)  // 消费一次，避免重复弹
+        }
+    }
+    if (showWriteSaveFail.value) {
+        ShowConfirmDialog(
+            title = "实验数据保存失败",
+            text = writeSaveFailText.value,
+            showDialog = showWriteSaveFail,
+            showDismiss = false
+        )
     }
 
     // ── 单独设置弹窗 ─────────────────────────────────────────────────────────
@@ -624,14 +756,14 @@ private fun MotorStatusCard(
 // 状态颜色 / 状态文字
 // ─────────────────────────────────────────────────────────────────────────────
 
-private fun motorStatusColor(cal: ServoCalibration): Color = when {
+internal fun motorStatusColor(cal: ServoCalibration): Color = when {
     cal.alarmCode != 0         -> Color(0xFFD32F2F)   // 报警 → 红
     !cal.isOnline              -> Color(0xFF9E9E9E)   // 离线 → 灰
     cal.isOnline && !cal.isEnabled -> Color(0xFFFF8F00) // 在线未使能 → 琥珀
     else                       -> Color(0xFF388E3C)   // 在线已使能 → 绿
 }
 
-private fun motorStatusLabel(cal: ServoCalibration): String = when {
+internal fun motorStatusLabel(cal: ServoCalibration): String = when {
     cal.alarmCode != 0         -> "报警"
     !cal.isOnline              -> "离线"
     cal.isOnline && !cal.isEnabled -> "未使能"

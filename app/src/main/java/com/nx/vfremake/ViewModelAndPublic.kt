@@ -193,6 +193,9 @@ class VariableFertViewModel : ViewModel() {
     // 实验数据保存结果一次性提示；first=是否失败，second=文案。主界面 observe 后提示，消费后置 null。
     val writeSaveNotice = MutableLiveData<Pair<Boolean, String>?>(null)
 
+    // 一键深度性能测试实时状态；null=从未运行。DepthTestCoroutine postValue，DepthTestScreen 观察。
+    val depthTestStatus = MutableLiveData<com.nx.vfremake.data.DepthTestStatus?>(null)
+
     /** 切换处方图控深模式（数据源开关，与 [updateMasterEnabled] 的使能门控相互独立）。 */
     fun setDepthPrescriptionMode(enabled: Boolean) {
         depthPrescriptionMode.postValue(enabled)

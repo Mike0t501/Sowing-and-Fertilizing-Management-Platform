@@ -28,6 +28,7 @@ import com.esri.arcgisruntime.mapping.view.MapView
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.ui.DantiFertSettings
 import com.nx.vfremake.ui.DepthCalibrationScreen
+import com.nx.vfremake.ui.DepthTestScreen
 import com.nx.vfremake.ui.ExperimentDataScreen
 import com.nx.vfremake.ui.MainScreen
 import com.nx.vfremake.ui.ParamSettingsScreen
@@ -46,6 +47,7 @@ enum class VariableFertScreen(@StringRes val title: Int) {
     SimGnss(title = R.string.settings),             // 模拟GNSS定位配置界面
     SowingDepth(title = R.string.settings),         // 播种深度主控制界面
     DepthCalibration(title = R.string.settings),    // 单路电机深度校准向导（携带 motorIndex 参数）
+    DepthTest(title = R.string.settings),           // 一键播种深度性能测试界面
     ExperimentData(title = R.string.settings)       // 实验数据记录查看界面
 }
 
@@ -136,7 +138,15 @@ fun VariableFert(
                 onClickBack      = { navController.popBackStack() },
                 onClickCalibrate = { motorIndex ->
                     navController.navigate("${VariableFertScreen.DepthCalibration.name}/$motorIndex")
-                }
+                },
+                onClickDepthTest = { navController.navigate(VariableFertScreen.DepthTest.name) }
+            )
+        }
+        // ── 一键播种深度性能测试界面 ─────────────────────────────────────────
+        composable(route = VariableFertScreen.DepthTest.name) {
+            DepthTestScreen(
+                viewModel = mVariableFertViewModel,
+                onBack    = { navController.popBackStack() }
             )
         }
         // ── 单路电机深度校准向导（携带电机下标参数）──────────────────────────
