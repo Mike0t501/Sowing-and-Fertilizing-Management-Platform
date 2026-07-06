@@ -18,10 +18,9 @@ package com.nx.vfremake.coroutine
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
-import android.util.Log
 import android.widget.Toast
-import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.funClass.DocuAndManageFun
 import com.nx.vfremake.funClass.MySharedPreFun
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -132,24 +131,10 @@ class MyWriteSaveFun {
      * @param  context:上下文
      * @param  fileName:文件名
      * @return outputStream:输出流
-     * @note
+     * @note   SAF创建逻辑统一收敛到 DocuAndManageFun.createExperimentCsvWriter
      */
     private fun getFileWriter(context: Context, fileName: String): OutputStreamWriter {
-        // 从SharedPreferences获取documentUri
-        val documentUri = MySharedPreFun(context).getMySharedPre()
-            .getString(context.getString(R.string.myWriteDir_DocumentUri_name), null)
-            ?: throw IOException("未设置保存目录")
-
-        Log.d("writeSaveData", documentUri)
-
-        // 使用SAF操作，因为使用的时间戳创建文件，不存在重复创建新文件的问题
-        val fileUri = DocumentsContract.createDocument(
-            context.contentResolver, Uri.parse(documentUri), "text/csv", fileName
-        ) ?: throw IOException("文件创建失败")
-        // 获取documentUri对应的输出流
-        val outputStream = context.contentResolver.openOutputStream(fileUri, "w")
-            ?: throw IOException("写出数据输出流获取失败")
-        return OutputStreamWriter(outputStream)
+        return DocuAndManageFun().createExperimentCsvWriter(context, fileName)
     }
 
     /**

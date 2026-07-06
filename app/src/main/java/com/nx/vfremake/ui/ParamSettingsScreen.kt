@@ -40,18 +40,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.vfremake.R
+import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.mSPParamData
 
 @Composable
-fun ParamSettingsScreen(onClickBack: () -> Unit = {}) {
+fun ParamSettingsScreen(
+    onClickBack: () -> Unit = {},
+    viewModel: VariableFertViewModel
+) {
     val isPortrait = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
 
     if (isPortrait) {
-        ParamSettingsPortraitScreen(onClickBack) { ParamSettingsTextSection() }
+        ParamSettingsPortraitScreen(onClickBack, viewModel) { ParamSettingsTextSection() }
     } else {
-        ParamSettingsLandscapeScreen(onClickBack) { ParamSettingsTextSection() }
+        ParamSettingsLandscapeScreen(onClickBack, viewModel) { ParamSettingsTextSection() }
     }
-    ParamSettingsResetAndApply()
+    ParamSettingsResetAndApply(viewModel)
 }
 
 /**
@@ -112,7 +117,11 @@ fun ParamSettingsTextSection() {
 private var backPressedTime: Long = 0
 
 @Composable
-fun ParamSettingsLandscapeScreen(onClickBack: () -> Unit = {}, content: @Composable () -> Unit) {
+fun ParamSettingsLandscapeScreen(
+    onClickBack: () -> Unit = {},
+    viewModel: VariableFertViewModel,
+    content: @Composable () -> Unit
+) {
     Scaffold(
         topBar = {
             MyTopBar(title = "参数设置", onClickBack = {
@@ -129,7 +138,7 @@ fun ParamSettingsLandscapeScreen(onClickBack: () -> Unit = {}, content: @Composa
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(modifier = Modifier.fillMaxHeight().weight(1f), contentAlignment = Alignment.Center) {
-                InteractiveTractorDiagram()
+                InteractiveTractorDiagram(viewModel)
             }
             Box(modifier = Modifier.fillMaxHeight().weight(1f), contentAlignment = Alignment.Center) {
                 content()
@@ -139,7 +148,11 @@ fun ParamSettingsLandscapeScreen(onClickBack: () -> Unit = {}, content: @Composa
 }
 
 @Composable
-fun ParamSettingsPortraitScreen(onClickBack: () -> Unit = {}, content: @Composable () -> Unit) {
+fun ParamSettingsPortraitScreen(
+    onClickBack: () -> Unit = {},
+    viewModel: VariableFertViewModel,
+    content: @Composable () -> Unit
+) {
     Scaffold(
         topBar = {
             MyTopBar(title = "参数设置", onClickBack = {
@@ -155,7 +168,7 @@ fun ParamSettingsPortraitScreen(onClickBack: () -> Unit = {}, content: @Composab
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Box(modifier = Modifier.fillMaxWidth().weight(2f), contentAlignment = Alignment.Center) {
-                InteractiveTractorDiagram()
+                InteractiveTractorDiagram(viewModel)
             }
             Box(modifier = Modifier.fillMaxWidth().weight(3f), contentAlignment = Alignment.Center) {
                 content()
@@ -168,7 +181,7 @@ fun ParamSettingsPortraitScreen(onClickBack: () -> Unit = {}, content: @Composab
  * 💡 核心组件：可交互的拖拉机大图与等距离交互矩形视图
  */
 @Composable
-fun InteractiveTractorDiagram() {
+fun InteractiveTractorDiagram(viewModel: VariableFertViewModel) {
     val context = LocalContext.current
     val sharedPre = remember { MySharedPreFun(context).getMySharedPre() }
 
@@ -179,6 +192,12 @@ fun InteractiveTractorDiagram() {
         // 补齐 8 个，防止下标越界
         while (list.size < 8) list.add(true)
         mutableStateListOf(*list.toTypedArray())
+    }
+
+    fun syncActiveMotors() {
+        val activeArray = BooleanArray(8) { index -> activeMotorsState.getOrNull(index) ?: true }
+        mSPParamData.activeMotors = activeArray.copyOf()
+        viewModel.activeMotorsState.postValue(activeArray)
     }
 
     // 读取当前机型行数（4/6/8），决定渲染多少个单体方块
@@ -232,9 +251,11 @@ fun InteractiveTractorDiagram() {
                         .background(if (selected) Color(0xFF1976D2) else Color(0xFFE0E0E0))
                         .clickable {
                             rowNumberState.value = preset
+                            mSPParamData.rowNumber = preset
                             sharedPre.edit()
                                 .putString(context.getString(R.string.rowNumber_name), preset.toString())
                                 .apply()
+                            syncActiveMotors()
                         }
                         .border(
                             width = 2.dp,
@@ -274,6 +295,7 @@ fun InteractiveTractorDiagram() {
                             activeMotorsState[i] = !isActive
                             val newStateStr = activeMotorsState.joinToString(",") { if (it) "1" else "0" }
                             sharedPre.edit().putString("active_motors_state", newStateStr).apply()
+                            syncActiveMotors()
                         }
                         .border(
                             width = 2.dp,
@@ -295,7 +317,7 @@ fun InteractiveTractorDiagram() {
 }
 
 @Composable
-fun ParamSettingsResetAndApply() {
+fun ParamSettingsResetAndApply(viewModel: VariableFertViewModel) {
     val context = LocalContext.current
     val sharedPreHelper = MySharedPreFun(context)
     val paramResetState = remember { mutableStateOf(false) }
@@ -308,6 +330,8 @@ fun ParamSettingsResetAndApply() {
                 sharedPreHelper.initSettingsParam()
                 // 重置电机状态为全开
                 sharedPreHelper.getMySharedPre().edit().putString("active_motors_state", "1,1,1,1,1,1,1,1").apply()
+                mSPParamData.activeMotors = BooleanArray(8) { true }
+                viewModel.activeMotorsState.postValue(BooleanArray(8) { true })
             },
             showDialog = paramResetState
         )
@@ -315,7 +339,10 @@ fun ParamSettingsResetAndApply() {
     Box(modifier = Modifier.padding(16.dp).fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             IconButton(onClick = {
-                try { sharedPreHelper.initSettingsParam() } catch (_: Throwable) {}
+                try {
+                    sharedPreHelper.initSettingsParam()
+                    viewModel.activeMotorsState.postValue(mSPParamData.activeMotors.copyOf())
+                } catch (_: Throwable) {}
                 try {
                     val getList = listOf(R.raw.get1, R.raw.get2)
                     val idx = ((System.nanoTime() % 2 + 2) % 2).toInt()

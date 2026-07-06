@@ -6,9 +6,12 @@ import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.funClass.CanOpenFun
+import com.nx.vfremake.funClass.JogSession
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.mSPParamData
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,8 +36,9 @@ import kotlin.math.abs
  *   SowingDepthCoroutine — 根据 ViewModel 状态做决策并发送命令
  *
  * SDO 时序约定：
- *   同一 Node-ID：帧间至少等待 SDO_INTER_FRAME_DELAY_MS（20ms）
- *   不同 Node-ID：可连续发送，总线仲裁保证不冲突
+ *   所有 CANopen 帧统一经 CanOpenFun.sendFrameSequenced / sendSequence 发送，
+ *   由其内部 Mutex 强制全局 ≥20ms 帧间步调并保证多帧序列原子性——
+ *   跨协程（本协程 vs 标定页点动）的 SDO 背靠背相撞曾导致驱动器丢帧
  *
  * 参照 DB9reCANseCoroutine.kt 的协程模式（scope/jobs/shutdown/start）。
  */
@@ -49,9 +53,6 @@ class SowingDepthCoroutine {
 
         /** 主循环软间隔（ms），实际循环时间 = 此值 + 本次处理耗时 */
         private const val LOOP_INTERVAL_MS = 500L
-
-        /** 同一节点 SDO 帧间最小等待（ms） */
-        private const val SDO_INTER_FRAME_DELAY_MS = 20L
 
         /** 等待所有节点 SDO 读取回复的缓冲时间（ms） */
         private const val SDO_REPLY_WAIT_MS = 30L
@@ -90,7 +91,7 @@ class SowingDepthCoroutine {
         jobs.add(scope.launch {
             // ── 启动时广播 NMT Start，让总线上所有节点进入 Operational 状态 ──
             // Operational 状态下 PDO/SDO 均可用，是正常控制所必需的。
-            CanOpenFun.sendFrame(CanOpenFun.buildNmtFrame(CanOpenFun.Nmt.OPERATIONAL, 0x00))
+            CanOpenFun.sendFrameSequenced(CanOpenFun.buildNmtFrame(CanOpenFun.Nmt.OPERATIONAL, 0x00))
             Log.i(TAG, "NMT广播：所有节点进入Operational状态")
             delay(100)   // 等待节点响应 NMT
 
@@ -112,6 +113,23 @@ class SowingDepthCoroutine {
 
                 val state  = viewModel.sowingDepthState.value ?: SowingDepthState()
                 val motors = state.motors
+                val activeMotorState = viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
+                val activeIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorState)
+                val activeIndexSet = activeIndices.toSet()
+                for (i in 0 until 8) {
+                    if (i !in activeIndexSet) {
+                        motorInitialized[i] = false
+                        motorInitCooldown[i] = 0
+                        lastSentTargetDepth[i] = Float.NaN
+                        viewModel.updateServoCalibration(i) { cal ->
+                            if (cal.isOnline || cal.isEnabled || cal.alarmCode != 0) {
+                                cal.copy(isOnline = false, isEnabled = false, alarmCode = 0)
+                            } else {
+                                cal
+                            }
+                        }
+                    }
+                }
 
                 // ════════════════════════════════════════════════════════════
                 // Phase 1：读取所有在线电机的位置（心跳维持 + 位置更新）
@@ -122,8 +140,10 @@ class SowingDepthCoroutine {
                 // 探测所有配置节点（不再用 isOnline 门控）：请求-应答存活模型下，任何 SDO 回包
                 // 都会被 CanReceiveCoroutine 标记在线，使被误判离线的电机一旦重新应答即自动恢复，
                 // 打破「离线后停止轮询 → 再无回包 → 无法自愈」的锁死。
-                for (i in 0 until 8) {
-                    CanOpenFun.sendFrame(CanOpenFun.buildReadPositionFrame(motors[i].nodeId))
+                // sendFrameSequenced：全局 20ms 步调（8 节点 ≈160ms，500ms 周期内充裕），
+                // 既避免与点动/其他发送方的 SDO 背靠背相撞，也保护 CSM100T 桥缓冲
+                for (i in activeIndices) {
+                    CanOpenFun.sendFrameSequenced(CanOpenFun.buildReadPositionFrame(motors[i].nodeId))
                 }
 
                 // 等待 SDO 回复到达并由 CanReceiveCoroutine 写入 ViewModel
@@ -141,15 +161,16 @@ class SowingDepthCoroutine {
 
                 if (lastMasterEnabled && !masterEnabled) {
                     Log.i(TAG, "总开关 ON→OFF：对所有已初始化电机发 Shutdown")
-                    for (i in 0 until 8) {
+                    for (i in activeIndices) {
                         val cal = stateAfterRead.motors[i]
                         if (cal.isOnline && motorInitialized[i]) {
                             // 0x6040 = 0x0006 → Shutdown，从 Operation Enabled 经
-                            // "Disable Operation" 转到 "Ready to switch on"
-                            CanOpenFun.sendFrame(
+                            // "Disable Operation" 转到 "Ready to switch on"。
+                            // 注意：总开关关闭对点动中的电机也不让路——操作员关总开关
+                            // 意为全停，失效方向安全。
+                            CanOpenFun.sendFrameSequenced(
                                 CanOpenFun.buildSdoWriteFrame(cal.nodeId, 0x6040, 0x00, 2, 0x0006L)
                             )
-                            delay(SDO_INTER_FRAME_DELAY_MS)
                         }
                         motorInitialized[i]    = false
                         motorInitCooldown[i]   = 0
@@ -160,7 +181,7 @@ class SowingDepthCoroutine {
                 }
                 lastMasterEnabled = masterEnabled
 
-                for (i in 0 until 8) {
+                for (i in activeIndices) {
                     val cal = stateAfterRead.motors[i]
 
                     if (!cal.isOnline) {
@@ -173,13 +194,11 @@ class SowingDepthCoroutine {
                         continue
                     }
 
-                    if (masterEnabled && !motorInitialized[i]) {
-                        // 总开关已开启 + 电机首次上线/重新上线：DS402 完整状态机序列 + 位置模式使能
+                    if (masterEnabled && !motorInitialized[i] && !JogSession.isJogging(cal.nodeId)) {
+                        // 总开关已开启 + 电机首次上线/重新上线：DS402 完整状态机序列 + 位置模式使能。
+                        // 点动中的电机跳过——init 的 0x6060=1 / 0x0006 会掐掉正在进行的速度模式点动。
                         Log.i(TAG, "motor=$i (nodeId=${cal.nodeId}) 上线且总开关已开，执行初始化")
-                        for (frame in CanOpenFun.buildMotorInitSequence(cal.nodeId)) {
-                            CanOpenFun.sendFrame(frame)
-                            delay(SDO_INTER_FRAME_DELAY_MS)
-                        }
+                        CanOpenFun.sendSequence(CanOpenFun.buildMotorInitSequence(cal.nodeId))
                         motorInitialized[i] = true
                         motorInitCooldown[i]  = 6   // 初始化后强制重发 3s（6×500ms）
                         // 种入 targetDepth = globalTargetDepth，
@@ -201,7 +220,7 @@ class SowingDepthCoroutine {
                 // ════════════════════════════════════════════════════════════
                 if (!isTestMode) {
                     val nowMs = System.currentTimeMillis()
-                    for (i in 0 until 8) {
+                    for (i in activeIndices) {
                         val cal = stateAfterRead.motors[i]
                         if (!cal.isOnline) continue
                         // lastHeardMs == 0 表示 CanReceiveCoroutine 尚未收到该节点任何帧，暂不判定
@@ -228,9 +247,14 @@ class SowingDepthCoroutine {
                 if (masterEnabled) {
                     val posSpeed = stateAfterRead.positionSpeed
 
-                    for (i in 0 until 8) {
+                    for (i in activeIndices) {
                         val cal    = stateAfterRead.motors[i]
                         val target = cal.targetDepth
+
+                        // 点动中让路：位置模式帧会与速度模式点动打架（点动失灵/电机自行走位）。
+                        // 必须放在 cooldown 自减之前——点动期间冻结初始化后的强制重发窗口，
+                        // 否则重发窗口在点动中被白白耗尽。
+                        if (JogSession.isJogging(cal.nodeId)) continue
 
                         // (a) 在线且已使能
                         if (!cal.isOnline || !cal.isEnabled) continue
@@ -284,22 +308,17 @@ class SowingDepthCoroutine {
                             )
                         }
 
-                        // ── 发送绝对位置运动帧序列 ────────────────────────────
-                        // 先写加减速度（0x6083/0x6084），使位置运动遵循用户设定的斜率
-                        for (frame in CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, state.acceleration)) {
-                            CanOpenFun.sendFrame(frame)
-                            delay(SDO_INTER_FRAME_DELAY_MS)
-                        }
-                        // buildAbsoluteMoveFrames 返回 [可选速度, 目标位置, 控制字复位, 控制字置位]
-                        val frames = CanOpenFun.buildAbsoluteMoveFrames(
-                            nodeId       = cal.nodeId,
-                            targetPulse  = targetPulse,
-                            profileSpeed = posSpeed
+                        // ── 发送绝对位置运动帧序列（一次原子序列，防其他发送方插队）──
+                        // 先写加减速度（0x6083/0x6084），使位置运动遵循用户设定的斜率；
+                        // buildAbsoluteMoveFrames 返回 [模式, 可选速度, 目标位置, 控制字复位, 控制字置位]
+                        CanOpenFun.sendSequence(
+                            CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, state.acceleration) +
+                            CanOpenFun.buildAbsoluteMoveFrames(
+                                nodeId       = cal.nodeId,
+                                targetPulse  = targetPulse,
+                                profileSpeed = posSpeed
+                            )
                         )
-                        for (frame in frames) {
-                            CanOpenFun.sendFrame(frame)
-                            delay(SDO_INTER_FRAME_DELAY_MS)  // 同节点帧间必须等待
-                        }
 
                         // ── 记录已发送的目标（不要回写 cal.targetDepth，UI 才是其唯一写入者）─
                         lastSentTargetDepth[i] = target
@@ -328,22 +347,22 @@ class SowingDepthCoroutine {
                 // ════════════════════════════════════════════════════════════
                 val stateForAlarm = viewModel.sowingDepthState.value ?: stateAfterRead
 
-                for (i in 0 until 8) {
+                for (i in activeIndices) {
                     val cal = stateForAlarm.motors[i]
                     if (!cal.isOnline) continue
 
                     when (cal.alarmCode) {
                         1 -> {
                             Log.e(TAG, "motor=$i 正限位触发！发送急停")
-                            CanOpenFun.sendFrame(CanOpenFun.buildQuickStopFrame(cal.nodeId))
-                            delay(SDO_INTER_FRAME_DELAY_MS)
+                            // 安全项：对点动中的电机也照发——限位报警必须无条件停车；
+                            // 之后点动可经启动序列的 0x0006 自恢复
+                            CanOpenFun.sendFrameSequenced(CanOpenFun.buildQuickStopFrame(cal.nodeId))
                             // 用 per-motor 当前目标记录，避免与全局值耦合
                             lastSentTargetDepth[i] = cal.targetDepth
                         }
                         2 -> {
                             Log.e(TAG, "motor=$i 负限位触发！发送急停")
-                            CanOpenFun.sendFrame(CanOpenFun.buildQuickStopFrame(cal.nodeId))
-                            delay(SDO_INTER_FRAME_DELAY_MS)
+                            CanOpenFun.sendFrameSequenced(CanOpenFun.buildQuickStopFrame(cal.nodeId))
                             lastSentTargetDepth[i] = cal.targetDepth
                         }
                         -1 -> {

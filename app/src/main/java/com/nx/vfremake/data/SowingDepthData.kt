@@ -71,6 +71,24 @@ data class SowingDepthState(
 
 enum class CalibrationMode { DIRECT, INDIRECT }
 
+fun isSowingDepthMotorActive(
+    motorIndex: Int,
+    rowNumber: Int,
+    activeMotors: BooleanArray?
+): Boolean {
+    val enabledRowCount = rowNumber.coerceIn(0, 8)
+    if (motorIndex !in 0 until enabledRowCount) return false
+    return activeMotors?.getOrNull(motorIndex) ?: true
+}
+
+fun activeSowingDepthMotorIndices(
+    rowNumber: Int,
+    activeMotors: BooleanArray?
+): List<Int> {
+    return (0 until rowNumber.coerceIn(0, 8))
+        .filter { isSowingDepthMotorActive(it, rowNumber, activeMotors) }
+}
+
 data class IndirectCalibPoint(
     val depthMm: Float,
     val encoderPos: Int? = null
@@ -95,8 +113,15 @@ val ServoCalibration.deepDirection: Int
  * 优先级与 [com.nx.vfremake.coroutine.SowingDepthCoroutine] 的门控顺序一致：
  *   无任何在线（Phase1/2/4 全跳过）> 在线但限位未标定（Phase4 b）> 在线但拟合无效（Phase4 c）。
  */
-fun SowingDepthState.depthControlReadinessWarning(): String? {
-    val online = motors.filter { it.isOnline }
+fun SowingDepthState.depthControlReadinessWarning(
+    rowNumber: Int = 8,
+    activeMotors: BooleanArray? = null
+): String? {
+    val activeIndices = activeSowingDepthMotorIndices(rowNumber, activeMotors)
+    if (activeIndices.isEmpty()) {
+        return "未启用任何播种深度电机。\n请先在「参数设置」页开启需要作业的行。"
+    }
+    val online = activeIndices.mapNotNull { motors.getOrNull(it) }.filter { it.isOnline }
     if (online.isEmpty()) {
         return "处方图控深已开启，但未检测到任何深度伺服在线（CAN 节点 11–18 无心跳/TPDO）。\n" +
             "已发送 NMT 广播，但因无电机在线，未下发任何位置命令。\n" +

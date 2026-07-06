@@ -14,6 +14,8 @@ import androidx.core.app.ActivityCompat
 import com.nx.vfremake.R
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.io.OutputStreamWriter
 
 
 /**
@@ -187,7 +189,32 @@ class DocuAndManageFun {
     }
 
     /**
-     * 列举保存目录下的实验数据CSV文件（fertMsg_*.csv），按修改时间倒序
+     * 在实验数据保存目录下创建CSV文件并返回写入器
+     * @param  context:上下文
+     * @param  fileName:文件名（含.csv后缀）
+     * @return OutputStreamWriter输出流写入器
+     * @note   目录未设置/创建失败时抛IOException；须在IO线程调用
+     */
+    fun createExperimentCsvWriter(context: Context, fileName: String): OutputStreamWriter {
+        // 从SharedPreferences获取documentUri
+        val documentUri = MySharedPreFun(context).getMySharedPre()
+            .getString(context.getString(R.string.myWriteDir_DocumentUri_name), null)
+            ?: throw IOException("未设置保存目录")
+
+        Log.d("writeSaveData", documentUri)
+
+        // 使用SAF操作，因为使用的时间戳创建文件，不存在重复创建新文件的问题
+        val fileUri = DocumentsContract.createDocument(
+            context.contentResolver, Uri.parse(documentUri), "text/csv", fileName
+        ) ?: throw IOException("文件创建失败")
+        // 获取documentUri对应的输出流
+        val outputStream = context.contentResolver.openOutputStream(fileUri, "w")
+            ?: throw IOException("写出数据输出流获取失败")
+        return OutputStreamWriter(outputStream)
+    }
+
+    /**
+     * 列举保存目录下的实验数据CSV文件（fertMsg_/depthTest_/depthRec_ 前缀），按修改时间倒序
      * @param  context:上下文
      * @return 文件信息列表；目录未设置/授权失效/查询异常时返回null
      * @note   须在IO线程调用
@@ -212,7 +239,8 @@ class DocuAndManageFun {
                 while (cursor.moveToNext()) {
                     val docId = cursor.getString(0) ?: continue
                     val name = cursor.getString(1) ?: continue
-                    if (!(name.startsWith("fertMsg_") && name.endsWith(".csv"))) continue
+                    val prefixes = listOf("fertMsg_", "depthTest_", "depthRec_")
+                    if (!(name.endsWith(".csv") && prefixes.any { name.startsWith(it) })) continue
                     result.add(
                         ExperimentCsvFile(
                             documentUri = DocumentsContract.buildDocumentUriUsingTree(dirUri, docId),

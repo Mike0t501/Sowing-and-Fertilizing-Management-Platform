@@ -1,7 +1,12 @@
 package com.nx.vfremake.funClass
 
+import android.os.SystemClock
 import android.util.Log
 import com.nx.vfremake.mSerialPortCAN
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * CANopen 协议底层通信
@@ -347,32 +352,59 @@ object CanOpenFun {
     )
 
     /**
-     * 构建速度模式点动启动完整序列（DS402 标准流程）。
+     * 构建速度模式点动启动完整序列（DS402 标准流程，自足式）。
      *
      * 发送顺序（帧间需等待 SDO 应答，约 20ms）：
-     *   1. Disable Operation → Switched On     (0x6040 = 0x0007)
-     *   2. 切换速度模式                          (0x6060 = 0x03)
-     *   3. 写目标速度                            (0x60FF = speedRpm)
-     *   4. Enable Operation → Operation Enabled (0x6040 = 0x000F)
+     *   1. Shutdown            → Ready to Switch On (0x6040 = 0x0006)
+     *   2. Switch On           → Switched On         (0x6040 = 0x0007)
+     *   3. 切换速度模式                               (0x6060 = 0x03)
+     *   4. 写目标速度                                 (0x60FF = speedRpm)
+     *   5. Enable Operation    → Operation Enabled   (0x6040 = 0x000F)
+     *
+     * 现场失效教训：早期序列以 0x0007 开头，刚上电处于 Switch On Disabled 的驱动器
+     * 按 DS402 状态机直接忽略 0x0007，点动按钮"按了没反应"；只有总开关先跑过一次
+     * Phase 2 初始化后点动才偶然可用。前置 0x0006 后序列从任意非故障态都能走通，
+     * 点动不再依赖总开关/Phase 2。
+     * TODO：Fault 态需另发故障复位（疑似 0x6040=0x0080），待核对 docs/servo_motor_CANopen.pdf。
+     *
+     * 前缀安全：使能帧 0x000F 必须放在最后——序列被取消只发出前缀时电机不可能启动。
      *
      * @param nodeId   节点 ID
      * @param speedRpm 目标转速，有符号，正数正转，负数反转，单位 RPM
      * @return 按顺序发送的帧列表
      */
     fun buildJogStartSequence(nodeId: Int, speedRpm: Int): List<ByteArray> = listOf(
-        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x0007L),              // Disable → Switched On
+        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x0006L),              // Shutdown → Ready
+        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x0007L),              // Switch On → Switched On
         buildSdoWriteFrame(nodeId, 0x6060, 0x00, 1, 0x03L),                // 速度模式
         buildSdoWriteFrame(nodeId, 0x60FF, 0x00, 4, speedRpm.toLong()),    // 目标速度
         buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000FL)               // Enable Operation
     )
 
     /**
-     * 点动停止：将目标速度归零，电机按 0x6084 减速斜率自然减速至停止。
-     * 发送后等待减速完成（≈ jogSpeed / acceleration × 1000 ms + 200ms）即可。
-     * 丝杆自锁，无需切回位置模式；下次位置指令由 [buildAbsoluteMoveFrames] 幂等切换模式。
+     * 点动停止第一阶段：将目标速度归零，电机按 0x6084 减速斜率自然减速至停止。
+     *
+     * 此帧是安全关键帧且幂等——调用方应连发多次（间隔 ≥20ms）抗丢帧，并在减速完成
+     * （≈ jogSpeed / acceleration × 1000 ms + 200ms）后追发 [buildJogStopDisableFrames]
+     * 兜底。现场失效教训：单发一帧 v=0 被总线并发挤掉后电机一直转到机械限位。
      */
     fun buildJogVelocityZeroFrame(nodeId: Int): ByteArray =
         buildSdoWriteFrame(nodeId, 0x60FF, 0x00, 4, 0L)
+
+    /**
+     * 点动停止第二阶段（减速完成后发送）：
+     *   1. Disable Operation → Switched On (0x6040 = 0x0007)
+     *   2. 预切回位置模式                    (0x6060 = 0x01)
+     *
+     * 故意不带 0x000F 使能——退到 Switched On 后即使 v=0 全部丢失电机也物理上转不了
+     * （runaway 兜底），丝杆自锁不会掉深。后续位置控制经 [buildAbsoluteMoveFrames]
+     * 的 0x000F → 0x002F 从 Switched On 重新使能，与 Phase 4 兼容；下次点动启动
+     * 以 0x0006 开头，同样兼容。
+     */
+    fun buildJogStopDisableFrames(nodeId: Int): List<ByteArray> = listOf(
+        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x0007L),   // Disable Operation
+        buildSdoWriteFrame(nodeId, 0x6060, 0x00, 1, 0x01L)      // 预切位置模式
+    )
 
     /**
      * 构建设置加减速度帧序列。
@@ -486,17 +518,19 @@ object CanOpenFun {
     // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * 发送单帧到 CAN 串口（线程安全）。
+     * 发送单帧到 CAN 串口（仅字节级线程安全，无帧间步调）。
      *
-     * 注意：SDO 时序要求帧间至少等待回复（20ms）；调用方负责控制时序，
-     * 本方法仅保证写操作线程安全。
+     * 优先使用 [sendFrameSequenced] / [sendSequence]——它们跨协程强制全局帧间隔。
+     * 本方法仅供无法挂起的场景直接调用；SDO 时序（帧间 ≥20ms）由调用方自行负责。
      */
     fun sendFrame(frame: ByteArray) {
         val outputStream = mSerialPortCAN?.outputStream ?: run {
             Log.e(TAG, "CAN 串口未打开，无法发送 CANopen 帧")
             return
         }
-        synchronized(outputStream) {
+        // 锁稳定的 CAN_TX_LOCK 而非 outputStream：端口重开后 outputStream 实例更换，
+        // 锁身份失效会让施肥帧与 CANopen 帧字节交错（缺陷 L10）
+        synchronized(MySerialPortFun.CAN_TX_LOCK) {
             try {
                 outputStream.write(frame)
                 outputStream.flush()
@@ -506,10 +540,118 @@ object CanOpenFun {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // 全局串行化发送（所有 CANopen 发送方共用的时序仲裁）
+    //
+    // 现场失效教训：点动协程与 SowingDepthCoroutine 各自内部隔 20ms，但跨协程
+    // 的帧可背靠背落到同一节点——驱动器单 SDO 服务端丢掉后到的请求。丢 0x60FF/
+    // 0x000F = 点动不转；丢松开时的 v=0 = 电机失控转到机械限位。此处用一把
+    // Mutex + 全局最小帧间隔把所有 CANopen 帧排成串行流，多帧序列持锁原子发送，
+    // 不再可能被其他发送方的帧插队打断。
+    //
+    // 使用约定：
+    //   - 禁止持锁跨长等待（点动减速等待等必须留在锁外），锁内只有帧发送 + 20ms 间隔
+    //   - 序列须"前缀安全"：协程被取消时序列可能只发出前缀，使能帧必须放最后
+    //   - 施肥帧（slaveCanMsgSend）只共享字节级 CAN_TX_LOCK，不走此步调，时序零回归
+    // ─────────────────────────────────────────────────────────────────────
+
+    /** 全局 CANopen 最小帧间隔（ms）：SDO 请求-应答周期 + CSM100T 桥缓冲余量 */
+    const val GLOBAL_INTER_FRAME_MS = 20L
+
+    private val sdoMutex = Mutex()
+
+    /** 上一 CANopen 帧的发出时刻（elapsedRealtime，免疫系统时钟跳变）；仅持锁访问 */
+    private var lastTxElapsedMs = 0L
+
+    /** 持锁前提下：距上一帧不足 [GLOBAL_INTER_FRAME_MS] 则补足等待，再发送。 */
+    private suspend fun paceThenSend(frame: ByteArray) {
+        val sinceLast = SystemClock.elapsedRealtime() - lastTxElapsedMs
+        if (sinceLast in 0 until GLOBAL_INTER_FRAME_MS) {
+            delay(GLOBAL_INTER_FRAME_MS - sinceLast)
+        }
+        sendFrame(frame)
+        lastTxElapsedMs = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * 串行化发送单帧：与所有其他 Sequenced 发送方共享全局 20ms 步调。
+     */
+    suspend fun sendFrameSequenced(frame: ByteArray) {
+        sdoMutex.withLock { paceThenSend(frame) }
+    }
+
+    /**
+     * 串行化原子发送多帧序列：整个序列持锁发送，帧间强制 [interFrameDelayMs]，
+     * 其他发送方的帧不可能插入序列中间。
+     *
+     * 注意：调用协程被取消时序列可能只发出前缀（delay 是取消点），
+     * 构建序列时使能帧必须放在最后（前缀安全）。
+     */
+    suspend fun sendSequence(
+        frames: List<ByteArray>,
+        interFrameDelayMs: Long = GLOBAL_INTER_FRAME_MS
+    ) {
+        sdoMutex.withLock {
+            for (frame in frames) {
+                val sinceLast = SystemClock.elapsedRealtime() - lastTxElapsedMs
+                if (sinceLast in 0 until interFrameDelayMs) {
+                    delay(interFrameDelayMs - sinceLast)
+                }
+                sendFrame(frame)
+                lastTxElapsedMs = SystemClock.elapsedRealtime()
+            }
+        }
+    }
+
     /**
      * 顺序发送多帧（帧间时序/等待由调用方协程负责）。
      */
+    @Deprecated(
+        "无帧间步调且不参与全局串行化，会与其他发送方并发丢帧；改用 sendSequence",
+        ReplaceWith("sendSequence(frames)")
+    )
     fun sendFrames(frames: List<ByteArray>) {
         frames.forEach { sendFrame(it) }
+    }
+}
+
+/**
+ * 点动会话标志：标记某节点正被标定页点动占用。
+ *
+ * SowingDepthCoroutine 据此对该节点让路（跳过 Phase 2 初始化与 Phase 4 位置下发），
+ * 否则位置模式帧会与速度模式点动打架——现场表现为点动失灵或电机自行走位。
+ *
+ * 为什么是顶层 object + AtomicInteger：
+ *   - 作业模式（MainActivity）与标定页各自持有一个 SowingDepthCoroutine 实例，
+ *     两者必须读到同一份标志，不能做协程实例状态；
+ *   - LiveData 经主线程 post 有滞后且有竞态，不适合做实时互斥依据；
+ *   - 标定页同一时刻只点动一台电机，单个原子量足够。
+ *
+ * begin/end 用 CAS 语义：迟到的旧 stop 清不掉新按下建立的会话。
+ */
+object JogSession {
+
+    /** 当前点动中的 nodeId；NONE 表示无点动 */
+    private const val NONE = -1
+    private val activeNode = AtomicInteger(NONE)
+
+    /** 开始点动会话（覆盖式：新按下总是接管）。 */
+    fun begin(nodeId: Int) {
+        activeNode.set(nodeId)
+    }
+
+    /**
+     * 结束点动会话：仅当会话仍属于该节点时清除（CAS），
+     * 防止上一次迟到的 stop 收尾误清新一次按下的会话。
+     */
+    fun end(nodeId: Int) {
+        activeNode.compareAndSet(nodeId, NONE)
+    }
+
+    fun isJogging(nodeId: Int): Boolean = activeNode.get() == nodeId
+
+    /** 无条件清除（页面销毁兜底用）。 */
+    fun clearAll() {
+        activeNode.set(NONE)
     }
 }
