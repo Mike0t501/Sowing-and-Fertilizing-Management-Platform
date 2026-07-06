@@ -31,6 +31,16 @@ class MySerialPortFun {
 
     companion object {
         /**
+         * CAN 串口写出的全局互斥锁（施肥帧 + CANopen 帧共用）。
+         *
+         * 现场缺陷 L10：原先两条发送路径各自 synchronized(outputStream)，端口被
+         * ensureCanPortOpen / reinitSerialPort 重开后 outputStream 实例更换，锁身份
+         * 随之失效，两条路径的字节流可能交错写入，CSM100T 桥收到脏帧后丢弃——表现为
+         * 电机偶发不响应命令。改为锁这个稳定对象，端口重开不再破坏互斥。
+         */
+        val CAN_TX_LOCK = Any()
+
+        /**
          * 按需打开 CAN 串口（幂等）。端口已开（mSerialPortCAN != null）直接返回 true；
          * 为 null 时按 SharedPreferences 的端口名/波特率打开。
          *
@@ -146,8 +156,9 @@ class MySerialPortFun {
             Log.e("SerialPort", "SerialPort已经关闭，无法写出数据")
             return
         }
-        // 多线程（GNSS协程、停止按钮）可能同时调用此方法，需要同步保护
-        synchronized(outputStream) {
+        // 多线程（GNSS协程、停止按钮、CANopen 深度控制）可能同时写 CAN 口，
+        // 必须锁稳定的 CAN_TX_LOCK 而非 outputStream（端口重开后实例会更换，见 L10）
+        synchronized(CAN_TX_LOCK) {
             try {
                 outputStream.write(data)
                 outputStream.flush()

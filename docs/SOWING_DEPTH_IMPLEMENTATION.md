@@ -33,7 +33,12 @@
 
 3. **Bit4 切换（DS402 setpoint 触发）**：`buildAbsoluteMoveFrames` 先发 `0x6040=0x000F`（清 Bit4），再发 `0x6040=0x002F`（置 Bit4），确保 0→1 跳变。连续多次设定同一目标时必须有此切换，否则驱动器拒绝接受。
 
-4. **Jog 减速停止（两阶段）**：松开 jog 按钮 → ① 发 `0x60FF=0`（目标速度归零，按 `0x6084` 斜率减速） → ② 等 `jogSpeed×1000/accel + 200ms`（上限 4s） → ③ 发 `0x6040=0x0007 → 0x6060=1 → 0x000F`（切回位置模式+重新使能）。
+4. **Jog 启停（2026-07 硬件调试后重构，勿回退）**：
+   - **启动序列 5 帧**：`0x6040=0x0006 → 0x0007 → 0x6060=3 → 0x60FF=±v → 0x6040=0x000F`。前置 `0x0006`（Shutdown）是关键——冷上电处于 Switch On Disabled 的驱动器按 DS402 状态机直接忽略 `0x0007`，缺此帧则点动"按了没反应"，且点动被迫依赖总开关先跑 Phase 2 初始化。使能帧 `0x000F` 必须放最后（前缀安全：序列被取消只发出前缀时电机不可能启动）。
+   - **停止（两阶段 + 校验）**：① `0x60FF=0` **连发 3 次**（间隔 50ms，幂等冗余抗单帧丢失——现场曾因单发 v=0 被总线并发挤掉导致电机失控转到机械限位）→ ② 等 `jogSpeed×1000/accel + 200ms`（上限 4s，期间可被新命令抢占）→ ③ 停车校验（位置仍在变则补发 v=0，最多 2 轮）→ ④ 发 `0x6040=0x0007 → 0x6060=1`（Disable Operation + 预切位置模式，**故意不带 0x000F**：退出 Operation Enabled 后即使 v=0 全部丢失电机也物理上转不了）。后续位置控制经 `buildAbsoluteMoveFrames` 的 `0x000F → 0x002F` 从 Switched On 重新使能。
+   - **UI 层单消费者命令队列**：按下/松开只向 `Channel<JogCommand>` 投递事件，唯一消费协程串行执行启停序列（旧 JobHolder 手工接力在快速连点时会让停止的 v=0 落在新启动序列之后）。Step 2 到限监控也改投 `Stop` 命令，与手动松开同路幂等。
+   - **点动会话 `JogSession`**（`CanOpenFun.kt` 顶层 object，AtomicInteger CAS）：点动期间 `SowingDepthCoroutine` 对该节点跳过 Phase 2 初始化与 Phase 4 位置下发（位置模式帧会掐掉速度模式点动）；Phase 1 位置轮询与 Phase 5 限位急停不跳过（标定页依赖位置刷新；限位报警是安全项）。
+   - **全局 SDO 串行化**：所有 CANopen 发送方统一走 `CanOpenFun.sendFrameSequenced / sendSequence`（Mutex + 全局 ≥20ms 帧间步调，多帧序列持锁原子发送）。跨协程 SDO 背靠背落到同一节点被驱动器单 SDO 服务端丢帧，是点动时灵时不灵的另一主因。施肥帧不走此步调，仅共享字节级 `MySerialPortFun.CAN_TX_LOCK`。
 
 5. **总开关 `masterEnabled`**：不持久化，启动默认 `false`。ON→OFF 跳变：对所有已初始化电机发 `0x6040=0x0006`（Shutdown），清零 `motorInitialized[i]`、`motorInitCooldown[i]`、`lastSentTargetDepth[i]`。
 

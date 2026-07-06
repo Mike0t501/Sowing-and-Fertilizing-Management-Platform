@@ -69,7 +69,6 @@ import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.mSPParamData
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -105,7 +104,8 @@ fun SowingDepthScreen(
     // 若施肥系统正在运行（isSystemRunning=true），跳过开启：此时 SowingDepthCoroutine
     // 由 MainActivity 独占持有（处方图控深模式），本页再启一份会造成双实例同时写
     // 同一 CAN 串口、重复 DS402 初始化与冲突的绝对位移帧。CAN 串口本身可共享
-    // （slaveCanMsgSend 已 synchronized），跳过的真实原因是避免重复协程实例。
+    // （施肥帧与 CANopen 帧共用 MySerialPortFun.CAN_TX_LOCK 字节级互斥，CANopen
+    // 帧另经 CanOpenFun 全局串行化步调），跳过的真实原因是避免重复协程实例。
     DisposableEffect(Unit) {
         if (!isSystemRunning) {
             val sp       = MySharedPreFun(context).getMySharedPre()
@@ -244,8 +244,8 @@ fun SowingDepthScreen(
         scope.launch(Dispatchers.IO) {
             activeMotorIndices.mapNotNull { state.motors.getOrNull(it) }.forEach { cal ->
                 if (cal.isOnline) {
-                    CanOpenFun.sendFrame(CanOpenFun.buildQuickStopFrame(cal.nodeId))
-                    delay(20L)
+                    // sendFrameSequenced：走全局串行化步调，急停帧不会与其他发送方的帧相撞被丢
+                    CanOpenFun.sendFrameSequenced(CanOpenFun.buildQuickStopFrame(cal.nodeId))
                 }
             }
         }

@@ -193,10 +193,10 @@
 - **文件**：`ViewModelAndPublic.kt`（重复注释）、`ui/MainScreen.kt`（`overlay.let { invalidate() }` 忽略接收者）
 - **修复**：清理。
 
-### L10　`synchronized(outputStream)` 依赖流实例稳定 🔲
-- **文件**：`funClass/MySerialPortFun.kt`（`slaveCanMsgSend`）
+### L10　`synchronized(outputStream)` 依赖流实例稳定 ✅
+- **文件**：`funClass/MySerialPortFun.kt`（`slaveCanMsgSend`）、`funClass/CanOpenFun.kt`（`sendFrame`）
 - **原因/结果**：若串口每次 `getOutputStream()` 返回新包装流，互斥失效。
-- **修复**：改为锁一个专用对象。
+- **修复**：两条发送路径统一改锁 `MySerialPortFun.CAN_TX_LOCK` 专用对象（点动稳定性修复的一部分，随 feature/depthTest 提交）。CANopen 帧另经 `CanOpenFun.sendFrameSequenced/sendSequence` 全局串行化步调。
 
 ---
 

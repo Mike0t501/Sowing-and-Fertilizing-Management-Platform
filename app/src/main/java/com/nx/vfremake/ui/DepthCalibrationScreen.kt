@@ -1,6 +1,8 @@
 package com.nx.vfremake.ui
 
+import android.content.Context
 import android.util.Log
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -70,6 +72,7 @@ import com.nx.vfremake.data.deepDirection
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
 import com.nx.vfremake.coroutine.SowingDepthCoroutine
 import com.nx.vfremake.funClass.CanOpenFun
+import com.nx.vfremake.funClass.JogSession
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.isSystemRunning
@@ -77,17 +80,20 @@ import com.nx.vfremake.mSerialPortCAN
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.abs
 import kotlin.math.pow
 
-// SDO 帧间最小等待时间（与 SowingDepthCoroutine 保持一致）
-private const val SDO_DELAY = 20L
-
-/** 跨重组持有 Job 的可变引用，不触发 Compose 订阅。 */
-private class JobHolder { var job: Job? = null }
+/** 停车校验容差（编码器脉冲）：两次采样位置差超过此值视为电机仍在运动 */
+private const val STOP_VERIFY_TOLERANCE_PULSE = 200
 
 /**
  * 点动停止后等待电机自然减速完成的毫秒数：speed/accel × 1000 + 200ms 缓冲，最多 4s。
@@ -95,6 +101,209 @@ private class JobHolder { var job: Job? = null }
  */
 private fun jogDecelMs(jogSpeed: Int, acceleration: Int): Long =
     (jogSpeed.toLong() * 1000L / acceleration.toLong() + 200L).coerceAtMost(4000L)
+
+/**
+ * 点动命令：按下/松开只向队列投递事件，由唯一消费协程严格按序执行。
+ *
+ * 现场失效教训：旧实现按下/松开各自 launch 协程并用 JobHolder 手工接力，
+ * 快速连点时停止协程的 v=0 可能落在新一次启动序列之后（把新点动掐掉），
+ * 表现为按钮时灵时不灵。单消费者队列天然消除启/停序列交错。
+ */
+private sealed class JogCommand {
+    /** 速度/加速度在按下瞬间快照，避免消费时读到滑块已改动的值 */
+    data class Start(
+        val toDeep: Boolean,
+        val withLimitMonitor: Boolean,
+        val jogSpeed: Int,
+        val acceleration: Int
+    ) : JogCommand()
+
+    object Stop : JogCommand()
+}
+
+private suspend fun showJogToast(context: Context, msg: String) {
+    withContext(Dispatchers.Main) {
+        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+    }
+}
+
+/**
+ * 鲁棒点动停车（页面销毁兜底）：重开端口 → v=0 连发 3 次 → 减速等待 →
+ * Disable Operation 兜底 → 清点动会话。对静止电机幂等，可无条件调用。
+ *
+ * 旧实现 onDispose 只发一帧 v=0 且不重开端口——端口恰被上一页关闭时
+ * sendFrame 静默 no-op，离开页面即电机失控。
+ */
+private suspend fun sendRobustJogStop(context: Context, nodeId: Int, decelWaitMs: Long) {
+    withContext(NonCancellable) {
+        var portOk = MySerialPortFun.ensureCanPortOpen(context)
+        var retry  = 0
+        while (!portOk && retry < 2) {
+            delay(100)
+            portOk = MySerialPortFun.ensureCanPortOpen(context)
+            retry++
+        }
+        if (!portOk) Log.e("DepthCalib", "sendRobustJogStop: CAN 串口打开失败，仍尝试发送停止帧")
+        repeat(3) {
+            CanOpenFun.sendFrameSequenced(CanOpenFun.buildJogVelocityZeroFrame(nodeId))
+            delay(50)
+        }
+        delay(decelWaitMs)
+        CanOpenFun.sendSequence(CanOpenFun.buildJogStopDisableFrames(nodeId))
+        JogSession.clearAll()
+    }
+}
+
+/**
+ * 点动命令队列消费协程：串行处理 Start/Stop，保证任何时刻只有一条启停序列在总线上。
+ *
+ * 停止流程（两阶段 + 校验，针对现场 runaway）：
+ *   1. v=0 连发 3 次（幂等冗余，抗单帧丢失）；
+ *   2. 可抢占减速等待——期间新命令到达则直接移交（新 Start 以 0x0006 开头自然归一化状态机）；
+ *   3. 停车校验：位置仍在变则补发 v=0（最多 2 轮）；
+ *   4. Disable Operation + 预切位置模式——即使 v=0 全部丢失电机也物理上转不了（runaway 兜底）。
+ */
+private suspend fun runJogCommandConsumer(
+    context: Context,
+    viewModel: VariableFertViewModel,
+    motorIndex: Int,
+    channel: Channel<JogCommand>
+): Unit = coroutineScope {
+
+    fun freshCal(): ServoCalibration? =
+        viewModel.sowingDepthState.value?.motors?.getOrNull(motorIndex)
+
+    var monitorJob: Job? = null
+
+    suspend fun handleStart(cmd: JogCommand.Start) {
+        monitorJob?.cancel()
+        monitorJob = null
+        val cal = freshCal() ?: return
+        if (!MySerialPortFun.ensureCanPortOpen(context)) {
+            Log.e("DepthCalib", "jogStart: CAN 串口未打开，点动不可用")
+            showJogToast(context, "CAN 串口未打开，点动不可用")
+            return
+        }
+        // Step 2 到限预检：已停在目标限位上则不启动
+        if (cmd.withLimitMonitor && cal.limitsSet) {
+            val deepDir     = cal.deepDirection
+            val pos         = cal.currentPosition
+            val targetLimit = if (cmd.toDeep) cal.limitMax else cal.limitMin
+            val reachedFromAbove = (deepDir > 0) == cmd.toDeep && pos >= targetLimit
+            val reachedFromBelow = (deepDir < 0) == cmd.toDeep && pos <= targetLimit
+            if (deepDir != 0 && (reachedFromAbove || reachedFromBelow)) return
+        }
+        // 先立会话再发帧：SowingDepthCoroutine 从此刻起对该节点让路（Phase 2/4）
+        JogSession.begin(cal.nodeId)
+        CanOpenFun.sendSequence(
+            CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, cmd.acceleration) +
+                CanOpenFun.buildJogStartSequence(
+                    cal.nodeId, if (cmd.toDeep) cmd.jogSpeed else -cmd.jogSpeed
+                )
+        )
+        // Step 2 限位监控：到限时向队列投递 Stop（与手动松开同一路径，重复 Stop 幂等），
+        // 不再直接发 v=0——消除监控自动停与手动松开的并发竞态
+        if (cmd.withLimitMonitor && cal.limitsSet && cal.deepDirection != 0) {
+            val deepDir     = cal.deepDirection
+            val limitTarget = if (cmd.toDeep) cal.limitMax else cal.limitMin
+            monitorJob = launch {
+                while (isActive) {
+                    delay(100)
+                    val p = freshCal()?.currentPosition ?: break
+                    val hit = if ((deepDir > 0) == cmd.toDeep) p >= limitTarget else p <= limitTarget
+                    if (hit) {
+                        Log.d(
+                            "DepthCalib",
+                            "Step2 ${if (cmd.toDeep) "deep" else "shallow"} 到限 pos=$p target=$limitTarget，投递 Stop"
+                        )
+                        channel.trySend(JogCommand.Stop)
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    /** @return 减速等待期间抢先到达的新命令（null = 完整走完停止流程） */
+    suspend fun handleStop(lastStart: JogCommand.Start?): JogCommand? {
+        monitorJob?.cancel()
+        monitorJob = null
+        val state  = viewModel.sowingDepthState.value
+        val nodeId = freshCal()?.nodeId ?: (11 + motorIndex)
+        val speed  = lastStart?.jogSpeed ?: state?.jogSpeed ?: 2000
+        val accel  = lastStart?.acceleration ?: state?.acceleration ?: 10000
+        try {
+            // 第一阶段（不可取消）：安全关键帧必须发出
+            withContext(NonCancellable) {
+                var portOk = MySerialPortFun.ensureCanPortOpen(context)
+                var retry  = 0
+                while (!portOk && retry < 2) {
+                    delay(100)
+                    portOk = MySerialPortFun.ensureCanPortOpen(context)
+                    retry++
+                }
+                if (!portOk) {
+                    Log.e("DepthCalib", "jogStop: CAN 串口打开失败，仍尝试发送停止帧")
+                    showJogToast(context, "CAN 串口异常，停止命令可能未送达！")
+                }
+                repeat(3) {
+                    CanOpenFun.sendFrameSequenced(CanOpenFun.buildJogVelocityZeroFrame(nodeId))
+                    delay(50)
+                }
+            }
+
+            // 可抢占的减速等待：新命令到达则移交处理（会话不清，Start 会重新 begin）
+            val preempt = withTimeoutOrNull(jogDecelMs(speed, accel)) { channel.receive() }
+            if (preempt != null) return preempt
+
+            withContext(NonCancellable) {
+                // 停车校验：位置仍在变说明 v=0 可能全部丢失，补发（最多 2 轮）。
+                // 注：位置由 Phase 1 500ms 轮询刷新，采样可能读到同一旧值——
+                // 校验只是加速发现，真正的兜底是下面的 Disable Operation。
+                var round = 0
+                while (round < 2) {
+                    val p1 = freshCal()?.currentPosition
+                    delay(150)
+                    val p2 = freshCal()?.currentPosition
+                    if (p1 == null || p2 == null || abs(p2 - p1) <= STOP_VERIFY_TOLERANCE_PULSE) break
+                    Log.w("DepthCalib", "jogStop: 停车校验未过（Δ=${p2 - p1} 脉冲），补发 v=0")
+                    CanOpenFun.sendFrameSequenced(CanOpenFun.buildJogVelocityZeroFrame(nodeId))
+                    round++
+                }
+                CanOpenFun.sendSequence(CanOpenFun.buildJogStopDisableFrames(nodeId))
+            }
+            JogSession.end(nodeId)
+            return null
+        } catch (e: CancellationException) {
+            // 消费协程被取消（页面销毁）：onDispose 的 sendRobustJogStop 负责收尾 + clearAll
+            throw e
+        } catch (e: Throwable) {
+            Log.e("DepthCalib", "jogStop 异常: ${e.message}", e)
+            JogSession.end(nodeId)
+            return null
+        }
+    }
+
+    var lastStart: JogCommand.Start? = null
+    var pending:   JogCommand?       = null
+    try {
+        while (isActive) {
+            val cmd = pending ?: channel.receive()
+            pending = null
+            when (cmd) {
+                is JogCommand.Start -> {
+                    lastStart = cmd
+                    handleStart(cmd)
+                }
+                JogCommand.Stop -> pending = handleStop(lastStart)
+            }
+        }
+    } catch (e: ClosedReceiveChannelException) {
+        // 页面销毁关闭队列：正常退出，兜底停车由 onDispose 负责
+    } finally {
+        monitorJob?.cancel()
+    }
+}
 
 /**
  * 最小二乘线性拟合 depth_mm = a * encoderPos + b
@@ -161,10 +370,9 @@ fun DepthCalibrationScreen(
     var deepPressCount    by remember { mutableStateOf(0) }
     var shallowPressCount by remember { mutableStateOf(0) }
 
-    // 点动启动协程 Job 引用（Step1/Step2 共用）：onJogStop 通过 cancelAndJoin 等待启动
-    // 序列完全退出后再发送 velocity=0，防止快速轻触时两个协程交错导致电机持续运行
-    val jogStartHolder       = remember { JobHolder() }
-    val step2LimitMonHolder  = remember { JobHolder() }
+    // 点动命令队列：按下/松开只投递事件，由唯一消费协程（DisposableEffect 中启动）串行执行，
+    // 启动/停止序列不可能在总线上交错（旧 JobHolder 手工接力的竞态见 JogCommand 注释）
+    val jogChannel = remember { Channel<JogCommand>(Channel.UNLIMITED) }
 
     // ── 步骤 2 状态 ──────────────────────────────────────────────────────────
     // 跟随 cal.calibrationMode 重置（仅在持久化值变化时），保持"未保存的本地切换"行为
@@ -273,90 +481,23 @@ fun DepthCalibrationScreen(
         showSaveConfirm.value = false
     }
 
-    // ── 点动启停辅助函数 ─────────────────────────────────────────────────────
-    // 当前编码器位置快照（监控协程与限位预检共用）
-    fun currentPos(): Int = viewModel.sowingDepthState.value
-        ?.motors?.getOrNull(motorIndex)?.currentPosition ?: cal.currentPosition
-
+    // ── 点动启停：只向队列投递命令，执行全部在消费协程内 ─────────────────────
     // 启动点动：toDeep=true 朝 limitMax 方向（正速度 jogSpeed），false 朝 limitMin 方向（负速度）。
-    // withLimitMonitor=true 时启动后台监控，到限自动发 velocity=0；并先做一次到限预检。
-    fun launchJog(toDeep: Boolean, withLimitMonitor: Boolean) {
-        jogStartHolder.job?.cancel()
-        if (withLimitMonitor) {
-            step2LimitMonHolder.job?.cancel()
-            step2LimitMonHolder.job = null
-        }
-        val launched = scope.launch(Dispatchers.IO) {
-            try {
-                if (!MySerialPortFun.ensureCanPortOpen(context)) return@launch
-
-                if (withLimitMonitor && cal.limitsSet) {
-                    val deepDir = cal.deepDirection
-                    val pos     = currentPos()
-                    val targetLimit = if (toDeep) cal.limitMax else cal.limitMin
-                    val reachedDeepFromAbove   = (deepDir > 0) == toDeep && pos >= targetLimit
-                    val reachedDeepFromBelow   = (deepDir < 0) == toDeep && pos <= targetLimit
-                    if (deepDir != 0 && (reachedDeepFromAbove || reachedDeepFromBelow)) return@launch
-                }
-
-                CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, acceleration).forEach {
-                    CanOpenFun.sendFrame(it); delay(SDO_DELAY)
-                }
-                CanOpenFun.buildJogStartSequence(cal.nodeId, if (toDeep) jogSpeed else -jogSpeed)
-                    .forEach { CanOpenFun.sendFrame(it); delay(SDO_DELAY) }
-
-                if (withLimitMonitor && cal.limitsSet && cal.deepDirection != 0) {
-                    val deepDir = cal.deepDirection
-                    val limitTarget = if (toDeep) cal.limitMax else cal.limitMin
-                    step2LimitMonHolder.job = scope.launch(Dispatchers.IO) {
-                        while (true) {
-                            delay(100)
-                            val p = viewModel.sowingDepthState.value
-                                ?.motors?.getOrNull(motorIndex)?.currentPosition ?: break
-                            val hit =
-                                if ((deepDir > 0) == toDeep) p >= limitTarget else p <= limitTarget
-                            if (hit) {
-                                Log.d("DepthCalib",
-                                    "Step2 ${if (toDeep) "deep" else "shallow"} limit hit pos=$p target=$limitTarget")
-                                CanOpenFun.sendFrame(CanOpenFun.buildJogVelocityZeroFrame(cal.nodeId))
-                                break
-                            }
-                        }
-                    }
-                }
-            } catch (e: CancellationException) { throw e }
-            catch (e: Throwable) {
-                Log.e("DepthCalib", "launchJog(toDeep=$toDeep) threw: ${e.message}", e)
-            }
-        }
-        jogStartHolder.job = launched
-        // 自完成时只清自身引用，不影响后续被覆盖写入的新 Job
-        launched.invokeOnCompletion {
-            if (jogStartHolder.job === launched) jogStartHolder.job = null
-        }
+    // withLimitMonitor=true 时消费协程会做到限预检 + 启动到限自动停监控。
+    fun postJogStart(toDeep: Boolean, withLimitMonitor: Boolean) {
+        jogChannel.trySend(
+            JogCommand.Start(
+                toDeep           = toDeep,
+                withLimitMonitor = withLimitMonitor,
+                jogSpeed         = jogSpeed,       // 按下瞬间快照
+                acceleration     = acceleration
+            )
+        )
     }
 
-    // 停止点动：等待启动序列退出 → 发 velocity=0 → 等待自然减速完成。
-    fun launchJogStop(stopMonitor: Boolean) {
-        if (stopMonitor) {
-            step2LimitMonHolder.job?.cancel()
-            step2LimitMonHolder.job = null
-        }
-        val startJob = jogStartHolder.job.also { jogStartHolder.job = null }
-        scope.launch(Dispatchers.IO) {
-            try {
-                if (!MySerialPortFun.ensureCanPortOpen(context)) {
-                    startJob?.cancelAndJoin()
-                    return@launch
-                }
-                // 确保启动协程已退出后再发 velocity=0，velocity=0 必须是最后一条
-                startJob?.cancelAndJoin()
-                CanOpenFun.sendFrame(CanOpenFun.buildJogVelocityZeroFrame(cal.nodeId))
-                delay(jogDecelMs(jogSpeed, acceleration))
-            } catch (e: Throwable) {
-                Log.e("DepthCalib", "launchJogStop threw: ${e.message}", e)
-            }
-        }
+    // 停止点动：两阶段停车（v=0×3 → 减速 → Disable 兜底）在消费协程内执行
+    fun postJogStop() {
+        jogChannel.trySend(JogCommand.Stop)
     }
 
     // ── 串口与协程生命周期 ───────────────────────────────────────────────────
@@ -376,17 +517,22 @@ fun DepthCalibrationScreen(
             receiveCoroutine = null
             depthCoroutine   = null
         }
+        // 点动命令队列的唯一消费协程（监控子协程随其取消）
+        val jogConsumerJob = scope.launch(Dispatchers.IO) {
+            runJogCommandConsumer(context, viewModel, motorIndex, jogChannel)
+        }
         onDispose {
-            // 离开页面时若仍在点动，必须停车——rememberCoroutineScope 取消会杀掉点动启动协程，
-            // 但电机已经在转，需要显式发一帧 velocity=0。监控协程也要先停。
-            jogStartHolder.job?.cancel()
-            step2LimitMonHolder.job?.cancel()
-            jogStartHolder.job      = null
-            step2LimitMonHolder.job = null
+            // 离开页面时若仍在点动，必须停车——消费协程被取消后电机可能还在转。
+            // 先停消费协程与队列，再用独立作用域执行鲁棒停车（含端口重开、v=0×3、
+            // Disable 兜底、清点动会话），对静止电机幂等所以无条件执行。
+            jogConsumerJob.cancel()
+            jogChannel.close()
+            val st = viewModel.sowingDepthState.value
+            val nodeId  = st?.motors?.getOrNull(motorIndex)?.nodeId ?: (11 + motorIndex)
+            val decelMs = jogDecelMs(st?.jogSpeed ?: 2000, st?.acceleration ?: 10000)
+                .coerceAtMost(1500L)
             kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-                runCatching {
-                    CanOpenFun.sendFrame(CanOpenFun.buildJogVelocityZeroFrame(cal.nodeId))
-                }
+                runCatching { sendRobustJogStop(context, nodeId, decelMs) }
             }
             receiveCoroutine?.shutdown()
             depthCoroutine?.shutdown()
@@ -471,14 +617,14 @@ fun DepthCalibrationScreen(
                     onJogDeep = {
                         deepPressCount++
                         Log.d("DepthCalib", "Step1 deep#$deepPressCount node=${cal.nodeId} v=$jogSpeed")
-                        launchJog(toDeep = true, withLimitMonitor = false)
+                        postJogStart(toDeep = true, withLimitMonitor = false)
                     },
                     onJogShallow = {
                         shallowPressCount++
                         Log.d("DepthCalib", "Step1 shallow#$shallowPressCount node=${cal.nodeId} v=$jogSpeed")
-                        launchJog(toDeep = false, withLimitMonitor = false)
+                        postJogStart(toDeep = false, withLimitMonitor = false)
                     },
-                    onJogStop = { launchJogStop(stopMonitor = false) },
+                    onJogStop = { postJogStop() },
                     onSetLimitMax    = { pendingLimitMax = cal.currentPosition },
                     onSetLimitMin    = { pendingLimitMin = cal.currentPosition },
                     onConfirmLimits  = {
@@ -491,16 +637,13 @@ fun DepthCalibrationScreen(
                                     Log.e("DepthCalib", "onConfirmLimits: ensureCanPortOpen failed")
                                     return@withContext
                                 }
-                                // 写正向软件限位（最深）至 0x261F
-                                CanOpenFun.sendFrame(
-                                    CanOpenFun.buildSdoWriteFrame(cal.nodeId, 0x261F, 0x00, 4, lMax.toLong())
+                                // 一次原子序列写入两个软件限位：0x261F 正向（最深）、0x2620 负向（最浅）
+                                CanOpenFun.sendSequence(
+                                    listOf(
+                                        CanOpenFun.buildSdoWriteFrame(cal.nodeId, 0x261F, 0x00, 4, lMax.toLong()),
+                                        CanOpenFun.buildSdoWriteFrame(cal.nodeId, 0x2620, 0x00, 4, lMin.toLong())
+                                    )
                                 )
-                                delay(SDO_DELAY)
-                                // 写负向软件限位（最浅）至 0x2620
-                                CanOpenFun.sendFrame(
-                                    CanOpenFun.buildSdoWriteFrame(cal.nodeId, 0x2620, 0x00, 4, lMin.toLong())
-                                )
-                                delay(SDO_DELAY)
                             }
                             viewModel.updateServoCalibration(motorIndex) {
                                 it.copy(limitMin = lMin, limitMax = lMax, limitsSet = true)
@@ -539,21 +682,28 @@ fun DepthCalibrationScreen(
                         moveBusy = true
                         scope.launch(Dispatchers.IO) {
                             try {
+                                // 点动进行中禁止位置运动——位置模式帧会掐掉速度模式点动
+                                if (JogSession.isJogging(cal.nodeId)) {
+                                    Log.w("DepthCalib", "onMoveToPosition: 点动进行中，已拒绝")
+                                    showJogToast(context, "点动进行中，请先松开点动按钮")
+                                    return@launch
+                                }
                                 if (!MySerialPortFun.ensureCanPortOpen(context)) {
                                     Log.e("DepthCalib", "onMoveToPosition: ensureCanPortOpen failed")
                                     return@launch
                                 }
                                 // buildAbsoluteMoveFrames 已内嵌 0x6060=1 模式切换帧，无需另行发送
-                                CanOpenFun.buildAbsoluteMoveFrames(cal.nodeId, targetPulse, positionSpeed)
-                                    .forEach { CanOpenFun.sendFrame(it); delay(SDO_DELAY) }
+                                CanOpenFun.sendSequence(
+                                    CanOpenFun.buildAbsoluteMoveFrames(cal.nodeId, targetPulse, positionSpeed)
+                                )
                             } finally {
                                 withContext(Dispatchers.Main) { moveBusy = false }
                             }
                         }
                     },
-                    onJogDeep    = { launchJog(toDeep = true,  withLimitMonitor = true) },
-                    onJogShallow = { launchJog(toDeep = false, withLimitMonitor = true) },
-                    onJogStop    = { launchJogStop(stopMonitor = true) },
+                    onJogDeep    = { postJogStart(toDeep = true,  withLimitMonitor = true) },
+                    onJogShallow = { postJogStart(toDeep = false, withLimitMonitor = true) },
+                    onJogStop    = { postJogStop() },
                     onRecordIndirectPoint = { setIndirectPointEncoder(it, useCurrentPos = true) },
                     onClearIndirectPoint  = { setIndirectPointEncoder(it, useCurrentPos = false) },
                     onComputeFit = { computeFit() },
