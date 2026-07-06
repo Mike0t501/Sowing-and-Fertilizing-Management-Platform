@@ -52,6 +52,10 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 
+// 控深模式下处方图查询被静默跳过（table 未加载 / 深度字段未配置）的一次性日志节流标志。
+// 每条 RMC 都会走 dantiPositionAndCtrl，不节流会刷屏；loadShp 成功后复位以便下次仍能提示。
+private var depthQuerySkipLogged = false
+
 class MyArcGisFun {
 
     //...加载渲染地图有关
@@ -88,6 +92,7 @@ class MyArcGisFun {
                     depthQueryField = if (!depthField.isNullOrEmpty() &&
                         fieldListString.contains(depthField)
                     ) depthField else ""
+                    depthQuerySkipLogged = false   // 重新加载后允许再次提示跳过原因
                     // 渲染字段：控深模式优先深度字段，否则施肥字段（只显示当前工作的处方图）
                     val renderField =
                         if (depthMode && depthQueryField.isNotEmpty()) depthQueryField
@@ -764,6 +769,18 @@ class MyArcGisFun {
 
         if (depthMode) {
             // ── 播深模式：仅查深度字段、写 targetDepth，绝不下发任何施肥命令 ──
+            if (table == null || depthQueryField.isEmpty()) {
+                // 静默跳过是「电机停在种子深度、永不跟图」的隐蔽根因，必须留痕（一次性）
+                if (!depthQuerySkipLogged) {
+                    depthQuerySkipLogged = true
+                    Log.w(
+                        "depthQueryField",
+                        "控深模式已开启但处方图深度查询被跳过：" +
+                            "table${if (table == null) "未加载" else "已加载"}，" +
+                            "depthQueryField='${depthQueryField}'（空=字段未配置或不存在于shp）"
+                    )
+                }
+            }
             if (table != null && depthQueryField.isNotEmpty()) {
                 val mapDepth = FloatArray(n) { -1f }
                 for (i in 0 until n) {

@@ -111,7 +111,7 @@ class SowingDepthCoroutine {
                 // 作业模式下端口由 MySerialPortFun 持有不为 null，此调用为 no-op。
                 context?.let { MySerialPortFun.ensureCanPortOpen(it) }
 
-                val state  = viewModel.sowingDepthState.value ?: SowingDepthState()
+                val state  = viewModel.currentSowingDepthState()
                 val motors = state.motors
                 val activeMotorState = viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
                 val activeIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorState)
@@ -156,7 +156,7 @@ class SowingDepthCoroutine {
                 //                按 0x6084(Profile Decel) 减速后退出 Operation Enabled。
                 // Phase 2 init 仅当 masterEnabled=true 时执行；离线重置始终生效。
                 // ════════════════════════════════════════════════════════════
-                val stateAfterRead = viewModel.sowingDepthState.value ?: state
+                val stateAfterRead = viewModel.currentSowingDepthState()
                 val masterEnabled  = stateAfterRead.masterEnabled
 
                 if (lastMasterEnabled && !masterEnabled) {
@@ -201,13 +201,18 @@ class SowingDepthCoroutine {
                         CanOpenFun.sendSequence(CanOpenFun.buildMotorInitSequence(cal.nodeId))
                         motorInitialized[i] = true
                         motorInitCooldown[i]  = 6   // 初始化后强制重发 3s（6×500ms）
-                        // 种入 targetDepth = globalTargetDepth，
-                        // 避免首次 dispatch 跑到 0mm（cal.targetDepth 默认值）。
-                        val seedTarget = stateAfterRead.globalTargetDepth
+                        // 种子目标：仅当尚无有效目标（默认 0mm）时种入 globalTargetDepth，
+                        // 避免首次 dispatch 跑到 0mm。处方图控深模式下地图深度可能在初始化
+                        // 完成前就已写入 targetDepth，无条件覆盖会让电机先跑一趟全局深度。
                         viewModel.updateServoCalibration(i) {
-                            it.copy(isEnabled = true, targetDepth = seedTarget)
+                            it.copy(
+                                isEnabled   = true,
+                                targetDepth = if (it.targetDepth > 0f) it.targetDepth
+                                              else stateAfterRead.globalTargetDepth
+                            )
                         }
-                        Log.i(TAG, "motor=$i 初始化完成 targetDepth=${seedTarget}mm")
+                        val seededTarget = viewModel.currentSowingDepthState().motors[i].targetDepth
+                        Log.i(TAG, "motor=$i 初始化完成 targetDepth=${seededTarget}mm")
                     }
                 }
 
@@ -345,7 +350,7 @@ class SowingDepthCoroutine {
                 //
                 // 限位触发时发送急停，防止电机持续压向限位开关。
                 // ════════════════════════════════════════════════════════════
-                val stateForAlarm = viewModel.sowingDepthState.value ?: stateAfterRead
+                val stateForAlarm = viewModel.currentSowingDepthState()
 
                 for (i in activeIndices) {
                     val cal = stateForAlarm.motors[i]

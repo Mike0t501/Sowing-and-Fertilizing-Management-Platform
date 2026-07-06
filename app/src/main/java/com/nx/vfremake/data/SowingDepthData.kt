@@ -110,13 +110,30 @@ val ServoCalibration.deepDirection: Int
  * 控深就绪诊断：返回阻止处方图深度命令下发的首要原因（人类可读），全部就绪返回 null。
  *
  * 仅读状态、无副作用，供主界面在按「开始」后做一次性提示。
- * 优先级与 [com.nx.vfremake.coroutine.SowingDepthCoroutine] 的门控顺序一致：
+ * 优先级：处方图侧（未加载/深度字段缺失——电机只会停在种子深度、永不跟图，
+ * 田间排查最隐蔽，故排最前）> 电机侧，电机侧与
+ * [com.nx.vfremake.coroutine.SowingDepthCoroutine] 的门控顺序一致：
  *   无任何在线（Phase1/2/4 全跳过）> 在线但限位未标定（Phase4 b）> 在线但拟合无效（Phase4 c）。
+ *
+ * @param mapLoaded            处方图 FeatureTable 是否已加载（shapefileFeatureTable != null）
+ * @param depthFieldOk         全局 depthQueryField 是否非空（loadShp 已验证字段存在于 shp）
+ * @param configuredDepthField 用户配置的深度字段名，仅用于拼提示文案
  */
 fun SowingDepthState.depthControlReadinessWarning(
     rowNumber: Int = 8,
-    activeMotors: BooleanArray? = null
+    activeMotors: BooleanArray? = null,
+    mapLoaded: Boolean = true,
+    depthFieldOk: Boolean = true,
+    configuredDepthField: String = ""
 ): String? {
+    if (!mapLoaded) {
+        return "处方图未加载，深度不会随处方图变化。\n" +
+            "请先在主界面加载 .shp 处方图后再开始作业。"
+    }
+    if (!depthFieldOk) {
+        return "处方图中未找到播种深度字段「$configuredDepthField」，深度不会随处方图变化。\n" +
+            "请在处方图设置对话框第 3 步选择正确的深度字段（电机只会保持当前目标深度）。"
+    }
     val activeIndices = activeSowingDepthMotorIndices(rowNumber, activeMotors)
     if (activeIndices.isEmpty()) {
         return "未启用任何播种深度电机。\n请先在「参数设置」页开启需要作业的行。"

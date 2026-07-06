@@ -178,7 +178,37 @@ class VariableFertViewModel : ViewModel() {
     // 整体状态以 SowingDepthState 持有，包含 8 路电机校准配置 + 全局运动参数。
     // 初始值为全默认（nodeId=11~18，限位未设定，拟合无效），
     // 由 MainActivity 在串口初始化完成后从 MySharedPreFun.loadSowingDepthState() 更新。
-    val sowingDepthState = MutableLiveData(SowingDepthState())
+    //
+    // 线程模型（田间缺陷修复：处方图深度写入被并发覆盖丢失）：
+    //   sowingDepthStateRef 是唯一真源，所有写入经 mutateSowingDepthState 做 CAS 原子更新；
+    //   sowingDepthState LiveData 仅作 Compose UI 投影。写入方有 ArcGIS 查询回调（每条 RMC
+    //   n 路 targetDepth）、CanReceiveCoroutine 接收线程（高频位置/在线状态）、SowingDepthCoroutine，
+    //   旧实现「读 value + postValue」会互相用陈旧快照覆盖，模拟GNSS高频RMC下地图深度几乎必丢。
+    //   后台读取方一律用 currentSowingDepthState()，不要读 sowingDepthState.value（postValue 存在
+    //   主线程刷新延迟，读到的是旧快照）。
+    private val sowingDepthStateRef =
+        java.util.concurrent.atomic.AtomicReference(SowingDepthState())
+    val sowingDepthState = MutableLiveData(sowingDepthStateRef.get())
+
+    /** 后台协程/回调读取播种深度状态的唯一入口：始终返回最新原子快照。 */
+    fun currentSowingDepthState(): SowingDepthState = sowingDepthStateRef.get()
+
+    /**
+     * 对 [sowingDepthStateRef] 做 CAS 原子更新并投影到 LiveData。
+     * transform 返回原引用视为无变更（同值短路），不触发 LiveData。
+     * 注意：CAS 失败会重试，transform 必须是纯函数（现有调用全部为 copy()，满足）。
+     */
+    private fun mutateSowingDepthState(transform: (SowingDepthState) -> SowingDepthState) {
+        while (true) {
+            val current = sowingDepthStateRef.get()
+            val updated = transform(current)
+            if (updated === current) return
+            if (sowingDepthStateRef.compareAndSet(current, updated)) {
+                sowingDepthState.postValue(updated)
+                return
+            }
+        }
+    }
 
     // 处方图控深模式开关：不持久化，启动默认 false。
     // ON → dantiPositionAndCtrl 每条 RMC 把地图深度写入各电机 targetDepth。
@@ -208,25 +238,28 @@ class VariableFertViewModel : ViewModel() {
      * 内部通过 copy() 创建不可变快照，保证 LiveData 观察者能检测到变更。
      */
     fun updateServoCalibration(motorIndex: Int, updater: (ServoCalibration) -> ServoCalibration) {
-        val current = sowingDepthState.value ?: SowingDepthState()
-        if (motorIndex !in current.motors.indices) return
-        val updated = updater(current.motors[motorIndex])
-        // 同值短路：避免 LiveData 在重复点击 / 周期性刷新时触发无谓重组
-        if (updated === current.motors[motorIndex] || updated == current.motors[motorIndex]) return
-        val newMotors = current.motors.toMutableList().also { it[motorIndex] = updated }
-        sowingDepthState.postValue(current.copy(motors = newMotors))
+        mutateSowingDepthState { current ->
+            if (motorIndex !in current.motors.indices) return@mutateSowingDepthState current
+            val updated = updater(current.motors[motorIndex])
+            // 同值短路：避免 LiveData 在重复点击 / 周期性刷新时触发无谓重组
+            if (updated === current.motors[motorIndex] || updated == current.motors[motorIndex]) {
+                return@mutateSowingDepthState current
+            }
+            current.copy(motors = current.motors.toMutableList().also { it[motorIndex] = updated })
+        }
     }
 
     /**
      * 批量更新多个电机状态（例如 NMT 启动后统一使能所有已在线电机）。
      */
     fun updateMultipleServos(updates: Map<Int, (ServoCalibration) -> ServoCalibration>) {
-        val current = sowingDepthState.value ?: SowingDepthState()
-        val newMotors = current.motors.toMutableList()
-        updates.forEach { (idx, updater) ->
-            if (idx in newMotors.indices) newMotors[idx] = updater(newMotors[idx])
+        mutateSowingDepthState { current ->
+            val newMotors = current.motors.toMutableList()
+            updates.forEach { (idx, updater) ->
+                if (idx in newMotors.indices) newMotors[idx] = updater(newMotors[idx])
+            }
+            current.copy(motors = newMotors)
         }
-        sowingDepthState.postValue(current.copy(motors = newMotors))
     }
 
     /**
@@ -238,15 +271,14 @@ class VariableFertViewModel : ViewModel() {
         acceleration: Int? = null,
         globalTargetDepth: Float? = null
     ) {
-        val current = sowingDepthState.value ?: SowingDepthState()
-        sowingDepthState.postValue(
+        mutateSowingDepthState { current ->
             current.copy(
                 jogSpeed          = jogSpeed ?: current.jogSpeed,
                 positionSpeed     = positionSpeed ?: current.positionSpeed,
                 acceleration      = acceleration ?: current.acceleration,
                 globalTargetDepth = globalTargetDepth ?: current.globalTargetDepth
             )
-        )
+        }
     }
 
     /**
@@ -255,15 +287,16 @@ class VariableFertViewModel : ViewModel() {
      * false → 协程对已初始化电机发 Shutdown(0x6040=0x0006) 并停止响应深度变化。
      */
     fun updateMasterEnabled(enabled: Boolean) {
-        val current = sowingDepthState.value ?: SowingDepthState()
-        sowingDepthState.postValue(current.copy(masterEnabled = enabled))
+        mutateSowingDepthState { current ->
+            if (current.masterEnabled == enabled) current else current.copy(masterEnabled = enabled)
+        }
     }
 
     /**
      * 替换整个 [SowingDepthState]（通常在 App 启动从 SharedPreferences 恢复时调用）。
      */
     fun restoreSowingDepthState(state: SowingDepthState) {
-        sowingDepthState.postValue(state)
+        mutateSowingDepthState { state }
     }
 
     // ====== 从”开始作业”之后的时间平均统计 ======

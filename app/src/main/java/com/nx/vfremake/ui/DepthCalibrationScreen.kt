@@ -171,7 +171,7 @@ private suspend fun runJogCommandConsumer(
 ): Unit = coroutineScope {
 
     fun freshCal(): ServoCalibration? =
-        viewModel.sowingDepthState.value?.motors?.getOrNull(motorIndex)
+        viewModel.currentSowingDepthState().motors.getOrNull(motorIndex)
 
     var monitorJob: Job? = null
 
@@ -228,10 +228,10 @@ private suspend fun runJogCommandConsumer(
     suspend fun handleStop(lastStart: JogCommand.Start?): JogCommand? {
         monitorJob?.cancel()
         monitorJob = null
-        val state  = viewModel.sowingDepthState.value
+        val state  = viewModel.currentSowingDepthState()
         val nodeId = freshCal()?.nodeId ?: (11 + motorIndex)
-        val speed  = lastStart?.jogSpeed ?: state?.jogSpeed ?: 2000
-        val accel  = lastStart?.acceleration ?: state?.acceleration ?: 10000
+        val speed  = lastStart?.jogSpeed ?: state.jogSpeed
+        val accel  = lastStart?.acceleration ?: state.acceleration
         try {
             // 第一阶段（不可取消）：安全关键帧必须发出
             withContext(NonCancellable) {
@@ -474,7 +474,7 @@ fun DepthCalibrationScreen(
             )
         }
         scope.launch(Dispatchers.IO) {
-            val updated = viewModel.sowingDepthState.value?.motors?.getOrNull(motorIndex)
+            val updated = viewModel.currentSowingDepthState().motors.getOrNull(motorIndex)
                 ?: return@launch
             MySharedPreFun(context).saveSowingDepthCalibration(updated)
         }
@@ -527,9 +527,9 @@ fun DepthCalibrationScreen(
             // Disable 兜底、清点动会话），对静止电机幂等所以无条件执行。
             jogConsumerJob.cancel()
             jogChannel.close()
-            val st = viewModel.sowingDepthState.value
-            val nodeId  = st?.motors?.getOrNull(motorIndex)?.nodeId ?: (11 + motorIndex)
-            val decelMs = jogDecelMs(st?.jogSpeed ?: 2000, st?.acceleration ?: 10000)
+            val st = viewModel.currentSowingDepthState()
+            val nodeId  = st.motors.getOrNull(motorIndex)?.nodeId ?: (11 + motorIndex)
+            val decelMs = jogDecelMs(st.jogSpeed, st.acceleration)
                 .coerceAtMost(1500L)
             kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
                 runCatching { sendRobustJogStop(context, nodeId, decelMs) }
@@ -649,8 +649,8 @@ fun DepthCalibrationScreen(
                                 it.copy(limitMin = lMin, limitMax = lMax, limitsSet = true)
                             }
                             withContext(Dispatchers.IO) {
-                                val updated = viewModel.sowingDepthState.value
-                                    ?.motors?.getOrNull(motorIndex) ?: return@withContext
+                                val updated = viewModel.currentSowingDepthState()
+                                    .motors.getOrNull(motorIndex) ?: return@withContext
                                 MySharedPreFun(context).saveSowingDepthCalibration(updated)
                             }
                             limitsWriteBusy = false

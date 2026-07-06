@@ -215,7 +215,7 @@ fun SowingDepthScreen(
             intervalMs = 100L
         ) { _ ->
             // 每次采样写出 8 路电机各一行（长表格式，Origin 按电机号筛选）
-            val motors = viewModel.sowingDepthState.value?.motors ?: return@start emptyList()
+            val motors = viewModel.currentSowingDepthState().motors
             activeSowingDepthMotorIndices(
                 mSPParamData.rowNumber,
                 viewModel.activeMotorsState.value ?: mSPParamData.activeMotors

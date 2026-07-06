@@ -192,7 +192,7 @@ class MyWriteSaveFun {
         // -----------------------------------
 
         // 播深数据：按索引 1:1 取对应电机
-        val depthMotors = mVariableFertViewModel.sowingDepthState.value?.motors
+        val depthMotors = mVariableFertViewModel.currentSowingDepthState().motors
 
         val dataList = mutableListOf<List<String>>() // 创建一个可变的列表来存储数据
         for (i in 0 until n) {
@@ -221,7 +221,7 @@ class MyWriteSaveFun {
                 }
                 if (includeDepth) {
                     // 播深电机 i 对应字段，无对应电机时写 -1
-                    val motor = depthMotors?.getOrNull(i)
+                    val motor = depthMotors.getOrNull(i)
                     add(if (motor == null) "-1" else "%.2f".format(motor.targetDepth))
                     add(if (motor == null) "-1" else "%.2f".format(motor.currentDepth))
                     add(if (motor == null) "-1" else motor.currentPosition.toString())

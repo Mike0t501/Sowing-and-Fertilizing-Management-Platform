@@ -343,11 +343,16 @@ class MainActivity : AppCompatActivity() {
                                         if (isSystemRunning &&
                                             mVariableFertViewModel.depthPrescriptionMode.value == true
                                         ) {
-                                            val warn = mVariableFertViewModel.sowingDepthState.value
-                                                ?.depthControlReadinessWarning(
+                                            val warn = mVariableFertViewModel.currentSowingDepthState()
+                                                .depthControlReadinessWarning(
                                                     rowNumber = mSPParamData.rowNumber,
                                                     activeMotors = mVariableFertViewModel.activeMotorsState.value
-                                                        ?: mSPParamData.activeMotors
+                                                        ?: mSPParamData.activeMotors,
+                                                    mapLoaded = mVariableFertViewModel
+                                                        .shapefileFeatureTable.value != null,
+                                                    depthFieldOk = depthQueryField.isNotEmpty(),
+                                                    configuredDepthField = MySharedPreFun(context)
+                                                        .getSpecificValue(R.string.depthQueryField_name) ?: ""
                                                 )
                                             if (warn != null) {
                                                 mVariableFertViewModel.depthControlNotice.postValue(warn)

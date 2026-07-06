@@ -154,7 +154,7 @@ fun DepthTestScreen(
             // （返回上一页后 SowingDepthScreen 会重启协程），再取消测试协程并落盘保存
             if (testCoroutine.isRunning) {
                 val idx = viewModel.depthTestStatus.value?.motorIndex ?: motorIndex
-                val cur = viewModel.sowingDepthState.value?.motors?.getOrNull(idx)?.currentDepth
+                val cur = viewModel.currentSowingDepthState().motors.getOrNull(idx)?.currentDepth
                 if (cur != null) {
                     viewModel.updateServoCalibration(idx) { it.copy(targetDepth = cur) }
                 }

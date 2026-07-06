@@ -277,8 +277,8 @@ class CanReceiveCoroutine {
 
         if (canOpenType >= 0) {
             // 在已配置的深度舵机列表中查找对应 motorIndex
-            val motorIndex = viewModel.sowingDepthState.value
-                ?.motors?.indexOfFirst { it.nodeId == canOpenNodeId } ?: -1
+            val motorIndex = viewModel.currentSowingDepthState()
+                .motors.indexOfFirst { it.nodeId == canOpenNodeId }
 
             if (motorIndex >= 0) {
                 val activeMotorState = viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
