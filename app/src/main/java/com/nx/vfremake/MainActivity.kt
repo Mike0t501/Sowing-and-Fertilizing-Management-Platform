@@ -128,6 +128,12 @@ class MainActivity : AppCompatActivity() {
             enqueueErrorSound(getList[idx], isError = false)
         }
 
+        val sharedPreHelper = MySharedPreFun(this)
+        mVariableFertViewModel.restoreSowingDepthPersistentState(
+            sharedPreHelper.loadSowingDepthState(),
+            masterEnabledOverride = false
+        )
+
         setContent {
             VariableFert(
                 mapView,
@@ -136,7 +142,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 首次运行需要将assets里的资源复制到外部专属目录files/shpFile/下
-        val firstRunState = MySharedPreFun(this).getSpecificValue(R.string.runForTheFirstTime)
+        val firstRunState = sharedPreHelper.getSpecificValue(R.string.runForTheFirstTime)
         if (firstRunState != "1") {
             customViewModel.copyShpFilesJob = lifecycleScope.launch(Dispatchers.Default) {
                 DocuAndManageFun().copyShpFilesToExternalStorage(this@MainActivity)
@@ -327,9 +333,9 @@ class MainActivity : AppCompatActivity() {
                                 // restoreSowingDepthState 与 updateMasterEnabled 的 LiveData 顺序竞态；
                                 // 按"开始"即显式使能深度伺服（已与用户确认）。
                                 if (mVariableFertViewModel.depthPrescriptionMode.value == true) {
-                                    mVariableFertViewModel.restoreSowingDepthState(
-                                        MySharedPreFun(context).loadSowingDepthState()
-                                            .copy(masterEnabled = true)
+                                    mVariableFertViewModel.restoreSowingDepthPersistentState(
+                                        MySharedPreFun(context).loadSowingDepthState(),
+                                        masterEnabledOverride = true
                                     )
                                     if (!mSowingDepthCoroutine.isRunning) {
                                         mSowingDepthCoroutine = SowingDepthCoroutine()

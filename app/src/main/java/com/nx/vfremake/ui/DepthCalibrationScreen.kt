@@ -374,11 +374,28 @@ fun DepthCalibrationScreen(
     // 启动/停止序列不可能在总线上交错（旧 JobHolder 手工接力的竞态见 JogCommand 注释）
     val jogChannel = remember { Channel<JogCommand>(Channel.UNLIMITED) }
 
+    val restoredCalibPositions: List<Int> = remember(cal.limitMin, cal.limitMax, cal.limitsSet) {
+        if (!cal.limitsSet || cal.limitMin == cal.limitMax) emptyList()
+        else (0..4).map { i -> cal.limitMin + (cal.limitMax - cal.limitMin) * i / 4 }
+    }
+
     // ── 步骤 2 状态 ──────────────────────────────────────────────────────────
     // 跟随 cal.calibrationMode 重置（仅在持久化值变化时），保持"未保存的本地切换"行为
     var calibMode by remember(cal.calibrationMode) { mutableStateOf(cal.calibrationMode) }
-    val depthInputs = remember { Array(5) { mutableStateOf("") } }
-    var fitResult   by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+    val depthInputs = remember(motorIndex, cal.calibrationPoints, restoredCalibPositions) {
+        Array(5) { index ->
+            val encoderPos = restoredCalibPositions.getOrNull(index)
+            val savedDepth = if (encoderPos != null) {
+                cal.calibrationPoints.firstOrNull { it.first == encoderPos }?.second
+            } else {
+                null
+            }
+            mutableStateOf(savedDepth?.let { "%.1f".format(it) } ?: "")
+        }
+    }
+    var fitResult   by remember(cal.fitA, cal.fitB, cal.fitValid) {
+        mutableStateOf(if (cal.fitValid) Pair(cal.fitA, cal.fitB) else null)
+    }
     var fitErrorMsg by remember { mutableStateOf("") }
     var moveBusy    by remember { mutableStateOf(false) }
     val showSaveConfirm = remember { mutableStateOf(false) }

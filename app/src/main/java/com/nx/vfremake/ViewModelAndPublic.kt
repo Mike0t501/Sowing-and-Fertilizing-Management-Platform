@@ -299,6 +299,42 @@ class VariableFertViewModel : ViewModel() {
         mutateSowingDepthState { state }
     }
 
+    /**
+     * Restore only persisted sowing-depth fields from storage while keeping runtime feedback
+     * (online/current position/alarm/enabled/current depth/target depth) from the live state.
+     */
+    fun restoreSowingDepthPersistentState(
+        savedState: SowingDepthState,
+        masterEnabledOverride: Boolean? = null
+    ) {
+        mutateSowingDepthState { current ->
+            val mergedMotors = current.motors.mapIndexed { index, runtime ->
+                val saved = savedState.motors.getOrNull(index)
+                    ?: ServoCalibration(motorIndex = index)
+                runtime.copy(
+                    nodeId = saved.nodeId,
+                    limitMin = saved.limitMin,
+                    limitMax = saved.limitMax,
+                    limitsSet = saved.limitsSet,
+                    calibrationPoints = saved.calibrationPoints,
+                    fitA = saved.fitA,
+                    fitB = saved.fitB,
+                    fitValid = saved.fitValid,
+                    calibrationMode = saved.calibrationMode,
+                    indirectPoints = saved.indirectPoints
+                )
+            }
+            current.copy(
+                motors = mergedMotors,
+                globalTargetDepth = savedState.globalTargetDepth,
+                jogSpeed = savedState.jogSpeed,
+                positionSpeed = savedState.positionSpeed,
+                acceleration = savedState.acceleration,
+                masterEnabled = masterEnabledOverride ?: current.masterEnabled
+            )
+        }
+    }
+
     // ====== 从”开始作业”之后的时间平均统计 ======
     private var fertSumTotal = 0.0       // 施肥量累积和
     private var fertCountTotal = 0L      // 施肥量样本点个数（行 * 时间）
