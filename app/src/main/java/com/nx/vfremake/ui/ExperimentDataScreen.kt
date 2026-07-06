@@ -9,7 +9,10 @@
 package com.nx.vfremake.ui
 
 import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,11 +46,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.vfremake.R
@@ -70,6 +75,148 @@ private fun formatFileSize(bytes: Long): String = when {
     else -> "$bytes B"
 }
 
+private enum class ExperimentCsvType(
+    val prefix: String,
+    val label: String,
+    val shortLabel: String,
+    val description: String,
+    val color: Color
+) {
+    Fertilizer(
+        prefix = "fertMsg_",
+        label = "施肥记录",
+        shortLabel = "施肥",
+        description = "变量施肥作业数据",
+        color = Color(0xFF2E7D32)
+    ),
+    DepthRecord(
+        prefix = "depthRec_",
+        label = "播深记录",
+        shortLabel = "播深",
+        description = "播种深度手动记录",
+        color = Color(0xFF1565C0)
+    ),
+    DepthTest(
+        prefix = "depthTest_",
+        label = "播深测试",
+        shortLabel = "测试",
+        description = "播种深度一键测试",
+        color = Color(0xFFF57C00)
+    );
+}
+
+private fun ExperimentCsvFile.csvType(): ExperimentCsvType =
+    ExperimentCsvType.values().firstOrNull { displayName.startsWith(it.prefix) }
+        ?: ExperimentCsvType.Fertilizer
+
+@Composable
+private fun ExperimentTypeFilterBar(
+    selectedType: ExperimentCsvType?,
+    totalCount: Int,
+    typeCounts: Map<ExperimentCsvType, Int>,
+    onSelect: (ExperimentCsvType?) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ExperimentTypeFilterButton(
+                modifier = Modifier.weight(1f),
+                label = "全部记录",
+                count = totalCount,
+                selected = selectedType == null,
+                color = Color(0xFF455A64),
+                onClick = { onSelect(null) }
+            )
+            ExperimentTypeFilterButton(
+                modifier = Modifier.weight(1f),
+                label = ExperimentCsvType.Fertilizer.label,
+                count = typeCounts[ExperimentCsvType.Fertilizer] ?: 0,
+                selected = selectedType == ExperimentCsvType.Fertilizer,
+                color = ExperimentCsvType.Fertilizer.color,
+                onClick = { onSelect(ExperimentCsvType.Fertilizer) }
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ExperimentTypeFilterButton(
+                modifier = Modifier.weight(1f),
+                label = ExperimentCsvType.DepthRecord.label,
+                count = typeCounts[ExperimentCsvType.DepthRecord] ?: 0,
+                selected = selectedType == ExperimentCsvType.DepthRecord,
+                color = ExperimentCsvType.DepthRecord.color,
+                onClick = { onSelect(ExperimentCsvType.DepthRecord) }
+            )
+            ExperimentTypeFilterButton(
+                modifier = Modifier.weight(1f),
+                label = ExperimentCsvType.DepthTest.label,
+                count = typeCounts[ExperimentCsvType.DepthTest] ?: 0,
+                selected = selectedType == ExperimentCsvType.DepthTest,
+                color = ExperimentCsvType.DepthTest.color,
+                onClick = { onSelect(ExperimentCsvType.DepthTest) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ExperimentTypeFilterButton(
+    modifier: Modifier = Modifier,
+    label: String,
+    count: Int,
+    selected: Boolean,
+    color: Color,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(10.dp)
+    val backgroundColor = if (selected) color else Color.White
+    val textColor = if (selected) Color.White else Color(0xFF333333)
+    val countColor = if (selected) Color.White else color
+
+    Box(
+        modifier = modifier
+            .height(58.dp)
+            .clip(shape)
+            .background(backgroundColor)
+            .border(BorderStroke(1.dp, if (selected) color else Color(0xFFDADDE2)), shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = label,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = textColor,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = "$count 个文件",
+                fontSize = 12.sp,
+                color = countColor,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+private fun ExperimentTypeBadge(type: ExperimentCsvType) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(type.color.copy(alpha = 0.12f))
+            .border(BorderStroke(1.dp, type.color.copy(alpha = 0.35f)), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = type.shortLabel,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = type.color
+        )
+    }
+}
+
 @Composable
 fun ExperimentDataScreen(onClickBack: () -> Unit = {}) {
     val context = LocalContext.current
@@ -85,6 +232,15 @@ fun ExperimentDataScreen(onClickBack: () -> Unit = {}) {
 
     val showDeleteDialog = remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<ExperimentCsvFile?>(null) }
+    var selectedType by remember { mutableStateOf<ExperimentCsvType?>(null) }
+
+    val allFiles = files.orEmpty()
+    val typeCounts = ExperimentCsvType.values().associateWith { type ->
+        allFiles.count { it.csvType() == type }
+    }
+    val visibleFiles = selectedType?.let { type ->
+        allFiles.filter { it.csvType() == type }
+    } ?: allFiles
 
     LaunchedEffect(refreshTick) {
         loading = true
@@ -143,7 +299,7 @@ fun ExperimentDataScreen(onClickBack: () -> Unit = {}) {
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "共 ${files?.size ?: 0} 个记录文件",
+                            text = "共 ${allFiles.size} 个记录文件 · 施肥 ${typeCounts[ExperimentCsvType.Fertilizer] ?: 0} · 播深 ${typeCounts[ExperimentCsvType.DepthRecord] ?: 0} · 测试 ${typeCounts[ExperimentCsvType.DepthTest] ?: 0}",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Color(0xFF333333)
@@ -160,6 +316,16 @@ fun ExperimentDataScreen(onClickBack: () -> Unit = {}) {
             }
 
             Spacer(modifier = Modifier.height(12.dp))
+
+            if (!loading && files != null && allFiles.isNotEmpty()) {
+                ExperimentTypeFilterBar(
+                    selectedType = selectedType,
+                    totalCount = allFiles.size,
+                    typeCounts = typeCounts,
+                    onSelect = { selectedType = it }
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
             when {
                 // ── 加载中 ─────────────────────────────────────────────────
@@ -192,8 +358,20 @@ fun ExperimentDataScreen(onClickBack: () -> Unit = {}) {
                     )
                 }
                 // ── 文件列表 ───────────────────────────────────────────────
+                visibleFiles.isEmpty() -> Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "当前分类暂无记录\n可切换到其他分类查看",
+                        fontSize = 14.sp,
+                        color = Color.Gray,
+                        textAlign = TextAlign.Center
+                    )
+                }
                 else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(files!!, key = { it.documentUri.toString() }) { file ->
+                    items(visibleFiles, key = { it.documentUri.toString() }) { file ->
+                        val type = file.csvType()
                         val timeText = SimpleDateFormat(
                             "yyyy-MM-dd HH:mm:ss", Locale.getDefault()
                         ).format(Date(file.lastModified))
@@ -213,13 +391,24 @@ fun ExperimentDataScreen(onClickBack: () -> Unit = {}) {
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = file.displayName,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = Color(0xFF333333)
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        ExperimentTypeBadge(type)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            modifier = Modifier.weight(1f),
+                                            text = file.displayName,
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color(0xFF333333)
+                                        )
+                                    }
                                     Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "类型：${type.description}",
+                                        fontSize = 12.sp,
+                                        color = type.color
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = "保存时间：$timeText",
                                         fontSize = 12.sp,
