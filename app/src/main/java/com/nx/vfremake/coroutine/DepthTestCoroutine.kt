@@ -113,7 +113,7 @@ class DepthTestCoroutine {
                 }
 
                 // ── 使能：确保总开关开启且被测电机完成 DS402 初始化 ─────────
-                if (viewModel.sowingDepthState.value?.masterEnabled != true) {
+                if (!viewModel.currentSowingDepthState().masterEnabled) {
                     viewModel.updateMasterEnabled(true)
                 }
                 if (!waitForEnabled(viewModel, config.motorIndex)) {
@@ -126,23 +126,22 @@ class DepthTestCoroutine {
                 }
 
                 // ── 写运动参数（速度/加速度），Phase 4 下发时使用并持久化 ──────
-                val stateNow = viewModel.sowingDepthState.value
+                val stateNow = viewModel.currentSowingDepthState()
                 viewModel.updateSowingDepthGlobalSettings(
                     positionSpeed = config.positionSpeed,
                     acceleration = config.acceleration
                 )
                 MySharedPreFun(context).saveSowingDepthGlobalSettings(
-                    jogSpeed = stateNow?.jogSpeed ?: 2000,
+                    jogSpeed = stateNow.jogSpeed,
                     positionSpeed = config.positionSpeed,
                     acceleration = config.acceleration,
-                    globalTargetDepth = stateNow?.globalTargetDepth ?: 50f
+                    globalTargetDepth = stateNow.globalTargetDepth
                 )
-                // postValue 异步生效：等主线程应用速度/加速度后再写目标深度，否则紧随其后的
-                // updateServoCalibration 基于旧快照 copy 会把本次全局参数覆盖回旧值
+                // 状态改为原子真源后更新同步生效，等待循环保留为兜底（首轮即满足退出）
                 var settleWaited = 0L
                 while (settleWaited < 1000L) {
-                    val st = viewModel.sowingDepthState.value
-                    if (st?.positionSpeed == config.positionSpeed &&
+                    val st = viewModel.currentSowingDepthState()
+                    if (st.positionSpeed == config.positionSpeed &&
                         st.acceleration == config.acceleration
                     ) break
                     delay(POLL_MS)
@@ -161,8 +160,8 @@ class DepthTestCoroutine {
                     header = DepthRecordFun.buildDepthRecordHeader(),
                     intervalMs = 100L
                 ) { _ ->
-                    val m = viewModel.sowingDepthState.value?.motors
-                        ?.getOrNull(config.motorIndex) ?: return@start emptyList()
+                    val m = viewModel.currentSowingDepthState().motors
+                        .getOrNull(config.motorIndex) ?: return@start emptyList()
                     listOf(
                         listOf(
                             (m.motorIndex + 1).toString(),
@@ -370,7 +369,7 @@ class DepthTestCoroutine {
     }
 
     private fun motorOf(viewModel: VariableFertViewModel, motorIndex: Int): ServoCalibration? =
-        viewModel.sowingDepthState.value?.motors?.getOrNull(motorIndex)
+        viewModel.currentSowingDepthState().motors.getOrNull(motorIndex)
 
     /**
      * 发布测试状态到 UI
