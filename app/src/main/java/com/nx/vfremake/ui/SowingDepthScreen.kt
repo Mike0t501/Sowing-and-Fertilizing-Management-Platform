@@ -62,6 +62,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.data.EncoderCalibration
+import com.nx.vfremake.data.EncoderFeedbackState
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.data.activeSowingDepthMotorIndices
@@ -144,6 +146,7 @@ fun SowingDepthScreen(
     }
 
     val state by viewModel.sowingDepthState.observeAsState(SowingDepthState())
+    val encState by viewModel.encoderFeedbackState.observeAsState(EncoderFeedbackState())
     val activeMotorsState by viewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
     val activeMotorIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorsState)
 
@@ -216,6 +219,7 @@ fun SowingDepthScreen(
         ) { _ ->
             // 每次采样写出 8 路电机各一行（长表格式，Origin 按电机号筛选）
             val motors = viewModel.currentSowingDepthState().motors
+            val encoders = viewModel.currentEncoderFeedbackState().encoders
             activeSowingDepthMotorIndices(
                 mSPParamData.rowNumber,
                 viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
@@ -228,7 +232,7 @@ fun SowingDepthScreen(
                     m.currentPosition.toString(),
                     if (m.isOnline) "1" else "0",
                     m.alarmCode.toString()
-                )
+                ) + DepthRecordFun.buildEncoderColumns(encoders.getOrNull(m.motorIndex))
             }
         }
         isRecording = true
@@ -489,6 +493,7 @@ fun SowingDepthScreen(
                     val cal = state.motors[i]
                     MotorStatusCard(
                         cal             = cal,
+                        encCal          = encState.encoders.getOrNull(i),
                         motorIndex      = i,
                         onSingleSet     = {
                             motorDialogInput = "%.1f".format(cal.targetDepth)
@@ -633,6 +638,7 @@ fun SowingDepthScreen(
 @Composable
 private fun MotorStatusCard(
     cal:         ServoCalibration,
+    encCal:      EncoderCalibration?,
     motorIndex:  Int,
     onSingleSet: () -> Unit,
     onCalibrate: () -> Unit
@@ -719,6 +725,26 @@ private fun MotorStatusCard(
                         )
                     } else {
                         Text("未设置", fontSize = 14.sp, color = Color.Gray)
+                    }
+                }
+
+                // 实测深度（摆臂编码器真实入土深度，与伺服换算深度并列）
+                // 离线/未标定必须显式区分，不显示 0 值——0 是合法深度，显示 0 会误导操作员
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("实测深度", fontSize = 11.sp, color = Color.Gray)
+                    when {
+                        encCal == null || !encCal.isOnline -> Text(
+                            "离线", fontSize = 14.sp, color = Color(0xFF9E9E9E)
+                        )
+                        !encCal.fitValid -> Text(
+                            "未标定", fontSize = 14.sp, color = Color.Gray
+                        )
+                        else -> Text(
+                            "%.1f mm".format(encCal.measuredDepth),
+                            fontSize   = 18.sp,
+                            color      = Color(0xFFE65100),
+                            fontFamily = FontFamily.Monospace
+                        )
                     }
                 }
 

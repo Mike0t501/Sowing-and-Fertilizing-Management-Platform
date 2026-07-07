@@ -132,10 +132,25 @@ class DepthRecordFun {
         /**
          * 构造播深实验数据CSV表头（手动记录与一键测试统一格式）
          * 列顺序必须与 getRows 返回的行严格一致（前两列时间戳/相对时间由记录器自动写出）
+         *
+         * 向后兼容约定：旧 9 列不改动/不重排；新增列一律追加在尾部。
+         * 2026-07 追加摆臂编码器实测深度 3 列（measured_depth_mm / enc_position / enc_online），
+         * 无编码器或未标定时值为空串，旧分析脚本按列名取数不受影响。
          */
         fun buildDepthRecordHeader(): List<String> = listOf(
             "timestamp", "elapsed_ms", "motor_no", "test_stage",
-            "target_depth_mm", "current_depth_mm", "encoder_position", "is_online", "alarm_code"
+            "target_depth_mm", "current_depth_mm", "encoder_position", "is_online", "alarm_code",
+            "measured_depth_mm", "enc_position", "enc_online"
         )
+
+        /**
+         * 构造某行的摆臂编码器 CSV 追加列（与表头尾部 3 列对应）。
+         * 离线时编码值/深度写空串而非 0——0 是合法深度，写 0 会污染离线段的统计。
+         */
+        fun buildEncoderColumns(enc: com.nx.vfremake.data.EncoderCalibration?): List<String> {
+            if (enc == null || !enc.isOnline) return listOf("", "", "0")
+            val depthStr = if (enc.fitValid) "%.2f".format(enc.measuredDepth) else ""
+            return listOf(depthStr, "%.1f".format(enc.filteredPosition), "1")
+        }
     }
 }

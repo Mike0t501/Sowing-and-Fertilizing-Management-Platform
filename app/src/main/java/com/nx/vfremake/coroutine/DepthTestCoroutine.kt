@@ -162,6 +162,9 @@ class DepthTestCoroutine {
                 ) { _ ->
                     val m = viewModel.currentSowingDepthState().motors
                         .getOrNull(config.motorIndex) ?: return@start emptyList()
+                    // 尾部追加该行摆臂编码器实测深度 3 列（离线/未标定为空串，不改旧列）
+                    val enc = viewModel.currentEncoderFeedbackState()
+                        .encoders.getOrNull(config.motorIndex)
                     listOf(
                         listOf(
                             (m.motorIndex + 1).toString(),
@@ -171,7 +174,7 @@ class DepthTestCoroutine {
                             m.currentPosition.toString(),
                             if (m.isOnline) "1" else "0",
                             m.alarmCode.toString()
-                        )
+                        ) + DepthRecordFun.buildEncoderColumns(enc)
                     )
                 }
 

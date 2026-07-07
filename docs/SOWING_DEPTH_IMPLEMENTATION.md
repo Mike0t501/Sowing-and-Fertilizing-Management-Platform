@@ -773,3 +773,109 @@ Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
 | `coroutine/SowingDepthCoroutine.kt` | **无需改动** |
 | `funClass/CanOpenFun.kt` | **无需改动**（点动帧复用） |
 | `funClass/SowingDepthFun.kt` | **无需改动**（`linearFit` 复用） |
+
+---
+
+## 八、摆臂编码器实测深度反馈子系统（2026-07 已实现）
+
+### 8.1 背景与范围
+
+现有深度控制是"半开环"的：伺服反馈量是电机自身编码器位置，无法反映真实入土深度。
+每行压种轮处加装机械改造：**带弹簧张力的摆臂式压种轮，摆臂转轴处安装布瑞特单圈绝对值
+编码器（CANopen DS406 行规）**。摆臂角度与实际播深单调相关，标定拟合后可实时测量真实播深。
+
+本子系统只做**测量、标定、显示、记录**四件事。**闭环修正明确不做**（实测深度不写回
+`targetDepth`、不参与 Phase 4 决策）；将来做闭环时读 `EncoderCalibration.measuredDepth` 即可。
+
+协议手册：`docs/005 CANOPEN说明书通信协议 V2.6.pdf`（布瑞特，DS301+DS406）。
+
+### 8.2 Node-ID 分配表
+
+| 设备 | Node-ID | TPDO1 | SDO 请求/应答 | Boot-up/心跳 |
+|------|---------|-------|---------------|--------------|
+| 施肥电机（自有协议） | 1~8 | —（CAN-ID 0x0027 段） | — | — |
+| 深度伺服（DS402） | 11~18 | 0x18B~0x192 | 0x60B~0x612 / 0x58B~0x592 | 0x70B~0x712 |
+| **摆臂编码器（DS406）** | **21~28（= 21+motorIndex，与伺服一一对应）** | 0x195~0x19C | 0x615~0x61C / 0x595~0x59C | 0x715~0x71C |
+
+编码器出厂 Node-ID=1、波特率 500K（与总线一致，**禁改**）。出厂 TPDO 0x181 落在
+TPDO 路由段但不在任何白名单内，会跌落施肥解析造成数据污染——**必须先经配置工具
+（§8.6）分配 ID 后才能上总线**。
+
+### 8.3 帧路由（CanReceiveCoroutine.dispatchFrame）
+
+```
+CAN 帧 → classifyCanOpen(canId)（纯函数，段识别映射与旧版逐字节一致）
+  ├─ 非 CANopen 段（如 0x0027）────────────────→ 施肥解析（完全未改动）
+  └─ CANopen 段（SDO回复/TPDO1/心跳/TPDO2/3）
+       ├─ nodeId ∈ 伺服白名单（motors[].nodeId）──→ 伺服处理（完全未改动，优先级最高）
+       ├─ nodeId ∈ 编码器白名单（encoders[].nodeId）
+       │    ├─ TPDO1（4字节）→ onEncoderTpdo1：符号展开→限幅→滑动均值→拟合换算
+       │    ├─ SDO 应答     → onEncoderSdoResponse：叫醒 SdoReplyWaiters + 刷新在线
+       │    └─ Boot-up/心跳/TPDO2/3 → 吸收（无业务处理，防跌落施肥）
+       ├─ SDO 应答且 SdoReplyWaiters 有 waiter（如出厂 ID=1 的 0x581）→ 消费，不落施肥
+       └─ 其余 ─────────────────────────────────→ 施肥解析（容错，与旧版一致）
+```
+
+关键实现文件：
+
+| 文件 | 职责 |
+|------|------|
+| `funClass/EncoderCanOpenFun.kt` | 协议层纯函数：TPDO 4 字节解析、SDO 语义化构帧（复用 CanOpenFun 通用构帧器）、`toSignedPosition` 符号展开、`EncoderFilter` 两级滤波、`depthFromEncoder` 唯一换算入口 |
+| `funClass/CanOpenFun.kt` → `SdoReplyWaiters` | 请求-应答等待器：先注册后发送、按应答 canId 精确匹配（覆盖改 ID 后旧 ID 应答场景）、超时返回 null |
+| `data/EncoderFeedbackData.kt` | `EncoderCalibration`（持久化：nodeId/zeroSet/分辨率/标定点/fit；运行时：raw/filtered/measuredDepth/isOnline/lastHeardMs）+ `EncoderFeedbackState` |
+| `ViewModelAndPublic.kt` | `encoderFeedbackStateRef`（AtomicReference 原子真源）+ CAS 更新 + LiveData 投影；后台读取一律 `currentEncoderFeedbackState()` |
+| `funClass/MySharedPreFun.kt` | `enc_N_*` 键持久化（同 `sowing_depth_prefs` 文件） |
+| `coroutine/CanReceiveCoroutine.kt` | 路由分支、`encoderLastSeen` 看门狗（2000ms 与伺服同阈值）、测试模式模拟数据 |
+
+### 8.4 测量链与滤波
+
+```
+TPDO1 原始值（U32） → toSignedPosition（单圈回绕符号展开，需分辨率，配置工具读 6501h 持久化）
+                   → 限幅野值剔除（单帧跳变 > 分辨率5% 丢弃；连续 3 帧超限视为真实快速变化，接受并重建窗口）
+                   → 窗口 8 滑动均值（50ms × 8 = 400ms 平滑窗，摊平压种轮过垄沟/残茬弹跳）
+                   → depth_mm = fitA × filteredPos + fitB（与伺服 fittingCoefficient 体系同构；
+                     将来升级二阶多项式只改 depthFromEncoder 与拟合处）
+```
+
+在线判定：不启用编码器心跳，沿用 `servoLastSeen` 模式——TPDO/SDO 应答到达刷新
+`encoderLastSeen`，超 2000ms 置离线。带宽预算：配置工具把 1800-05 写为 **50ms**
+（出厂 20ms × 8 台 ≈ 400 帧/s 会逼近 115200bps 桥容量）；软件不假设固定上报周期。
+
+### 8.5 标定流程（DepthCalibrationScreen 步骤 3）
+
+1. **零位预设**：机具落基准态（压种轮触平整地面）→ 置零 → SDO 写 `6003-00=0`
+   → 等 0x60 应答 → 写 `1010-01="save"` → 等应答 → 提示断电重启。每步经
+   `SdoReplyWaiters` 超时报错中止；save 帧在序列最后（前缀安全）。成功后 `zeroSet=true` 持久化。
+2. **多点拟合**：机具压到某实际深度稳定后，卡尺量真实播深输入 → 记录当前【滤波后】
+   编码值配对（2~5 点）→ 共用 `buildLinearFit`（`data/SowingDepthData.kt`）最小二乘
+   → `fitValid=true`。支持删点/清空重标。
+3. 标定页实时显示原始值/滤波值/换算深度，便于现场判断信号是否正常。
+
+### 8.6 一次性配置工具（EncoderProvisioningScreen，设置页深处入口）
+
+⚠ **同一时刻总线上只能接入一台未配置的编码器（出厂 ID=1）**。逐台：
+
+1. 读 `6501-00` 验证在线并暂存物理分辨率
+2. 写 `3001-00` = 目标 ID（21+行号）——**应答仍按旧 ID（0x580+旧ID）匹配**（手册明确）
+3. 写 `1800-05` = 50（0x32，U16）
+4. 写 `1010-01` = "save"（`23 10 10 01 73 61 76 65`，序列最后）
+5. 断电重启 → 按新 ID 读 `6004-00` 验证 → 成功才把 nodeId/分辨率持久化到该行
+
+### 8.7 显示与记录
+
+- `SowingDepthScreen` 每行卡片："实测深度"与当前/目标深度并列；离线显示"离线"、
+  未标定显示"未标定"，**不显示 0 值**（0 是合法深度，会误导操作员）。
+- CSV（`DepthRecordFun`，手动 `depthRec_` 与一键测试 `depthTest_` 共用）：表头尾部追加
+  `measured_depth_mm / enc_position / enc_online` 3 列，旧 9 列不改动不重排（向后兼容）；
+  离线/未标定写空串而非 0。
+- 测试模式（`testMode_Switch`）：编码器 8 路置在线 + 200ms 模拟数据（跟随伺服
+  targetDepth ± 正弦波动），无硬件时 UI 可开发调试。
+
+### 8.8 单元测试
+
+`EncoderCanOpenFunTest.kt`：TPDO 4 字节解析、手册示例帧逐字节核对（读 6004 应答
+`43 04 60 00 E8 03 00 00`→1000、save/1800-05/3001 帧）、滤波、符号展开、最小二乘。
+`CanFrameRoutingTest.kt`：编码器帧不落施肥、伺服/施肥/未配置节点路由与改动前逐字节一致、
+SdoReplyWaiters 消费语义。
+
+变更摘要详见 `docs/ENCODER_FEEDBACK_CHANGES.md`。
