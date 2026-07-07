@@ -145,18 +145,18 @@ class MyWriteSaveFun {
      * @note
      */
     fun buildSaveHeader(includeFert: Boolean, includeDepth: Boolean): List<String> {
-        val header = mutableListOf("时间戳", "序号")
+        val header = mutableListOf("timestamp", "row_index")
         if (includeFert) {
             header.addAll(
                 listOf(
-                    "前进速度", "经度", "纬度", "监测电压", "电机转速",
-                    "应施肥量", "监测施肥量", "转速转换施肥量", "准确率"
+                    "forward_speed", "longitude", "latitude", "monitor_voltage", "motor_rpm",
+                    "target_fert_rate", "measured_fert_rate", "rpm_converted_fert_rate", "accuracy"
                 )
             )
         }
         if (includeDepth) {
             header.addAll(
-                listOf("目标深度mm", "实际深度mm", "编码器位置", "是否在线", "报警码")
+                listOf("target_depth_mm", "actual_depth_mm", "encoder_position", "is_online", "alarm_code")
             )
         }
         return header
