@@ -1,5 +1,8 @@
 package com.nx.vfremake.data
 
+import kotlin.math.abs
+import kotlin.math.pow
+
 /**
  * 单个伺服电机的配置与运行时状态
  *
@@ -87,6 +90,30 @@ fun activeSowingDepthMotorIndices(
 ): List<Int> {
     return (0 until rowNumber.coerceIn(0, 8))
         .filter { isSowingDepthMotorActive(it, rowNumber, activeMotors) }
+}
+
+/**
+ * 最小二乘线性拟合 depth_mm = a * encoderPos + b
+ *
+ * 伺服深度标定（DepthCalibrationScreen 直接/间接模式）与摆臂编码器标定共用。
+ * 深度 ≤0 的点视为未填写，参与拟合前先过滤。
+ *
+ * @param points List of (encoderPos, depthMm) pairs
+ * @return Pair(a, b) or null if < 2 valid points or degenerate data
+ */
+fun buildLinearFit(points: List<Pair<Int, Float>>): Pair<Float, Float>? {
+    val valid = points.filter { it.second > 0f }
+    if (valid.size < 2) return null
+    val n = valid.size.toDouble()
+    val sumX  = valid.sumOf { it.first.toDouble() }
+    val sumY  = valid.sumOf { it.second.toDouble() }
+    val sumXX = valid.sumOf { it.first.toDouble().pow(2) }
+    val sumXY = valid.sumOf { it.first.toDouble() * it.second.toDouble() }
+    val denom = n * sumXX - sumX * sumX
+    if (abs(denom) < 1e-10) return null
+    val a = ((n * sumXY - sumX * sumY) / denom).toFloat()
+    val b = ((sumY - a * sumX) / n).toFloat()
+    return Pair(a, b)
 }
 
 data class IndirectCalibPoint(

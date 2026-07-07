@@ -68,6 +68,7 @@ import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.CalibrationMode
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.buildLinearFit
 import com.nx.vfremake.data.deepDirection
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
 import com.nx.vfremake.coroutine.SowingDepthCoroutine
@@ -90,7 +91,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
-import kotlin.math.pow
 
 /** 停车校验容差（编码器脉冲）：两次采样位置差超过此值视为电机仍在运动 */
 private const val STOP_VERIFY_TOLERANCE_PULSE = 200
@@ -303,27 +303,6 @@ private suspend fun runJogCommandConsumer(
     } finally {
         monitorJob?.cancel()
     }
-}
-
-/**
- * 最小二乘线性拟合 depth_mm = a * encoderPos + b
- *
- * @param points List of (encoderPos, depthMm) pairs
- * @return Pair(a, b) or null if < 2 valid points or degenerate data
- */
-private fun buildLinearFit(points: List<Pair<Int, Float>>): Pair<Float, Float>? {
-    val valid = points.filter { it.second > 0f }
-    if (valid.size < 2) return null
-    val n = valid.size.toDouble()
-    val sumX  = valid.sumOf { it.first.toDouble() }
-    val sumY  = valid.sumOf { it.second.toDouble() }
-    val sumXX = valid.sumOf { it.first.toDouble().pow(2) }
-    val sumXY = valid.sumOf { it.first.toDouble() * it.second.toDouble() }
-    val denom = n * sumXX - sumX * sumX
-    if (kotlin.math.abs(denom) < 1e-10) return null
-    val a = ((n * sumXY - sumX * sumY) / denom).toFloat()
-    val b = ((sumY - a * sumX) / n).toFloat()
-    return Pair(a, b)
 }
 
 /**
