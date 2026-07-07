@@ -133,6 +133,10 @@ class MainActivity : AppCompatActivity() {
             sharedPreHelper.loadSowingDepthState(),
             masterEnabledOverride = false
         )
+        // 摆臂编码器标定（零位/分辨率/拟合）与伺服标定一样随启动恢复
+        mVariableFertViewModel.restoreEncoderPersistentState(
+            sharedPreHelper.loadEncoderFeedbackState()
+        )
 
         setContent {
             VariableFert(
