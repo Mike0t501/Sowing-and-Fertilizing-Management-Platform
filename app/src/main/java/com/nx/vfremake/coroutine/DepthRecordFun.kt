@@ -134,8 +134,8 @@ class DepthRecordFun {
          * 列顺序必须与 getRows 返回的行严格一致（前两列时间戳/相对时间由记录器自动写出）
          */
         fun buildDepthRecordHeader(): List<String> = listOf(
-            "时间戳", "相对时间ms", "电机号", "测试阶段",
-            "目标深度mm", "当前深度mm", "编码器位置", "是否在线", "报警码"
+            "timestamp", "elapsed_ms", "motor_no", "test_stage",
+            "target_depth_mm", "current_depth_mm", "encoder_position", "is_online", "alarm_code"
         )
     }
 }
