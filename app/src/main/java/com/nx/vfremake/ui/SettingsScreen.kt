@@ -525,7 +525,7 @@ private suspend fun runDiagnosticTest(
 }
 
 @Composable
-fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Unit = {}, onClickSimGnss: () -> Unit = {}, onClickExperimentData: () -> Unit = {}, onReinitSerialPort: () -> Unit = {}) {
+fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Unit = {}, onClickSimGnss: () -> Unit = {}, onClickExperimentData: () -> Unit = {}, onClickEncoderProvisioning: () -> Unit = {}, onReinitSerialPort: () -> Unit = {}) {
     val context = LocalContext.current
     val sharedPre = MySharedPreFun(context).getMySharedPre()
 
@@ -873,6 +873,20 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                                 onDecrement = { if (deltaY.intValue >= 10) { deltaY.intValue -= 5; sharedPre.edit().putString(context.getString(R.string.deltaY_name), deltaY.intValue.toString()).apply() } }
                             )
                         }
+                    }
+                    Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
+
+                    // 摆臂编码器一次性配置工具（维护用，深藏于高级参数卡片底部）
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { onClickEncoderProvisioning() }.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(text = "编码器配置工具（维护）", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color(0xFF333333))
+                            Text(text = "播深编码器首次上机：分配 Node-ID 21~28 并设置上报间隔", fontSize = 11.sp, color = Color.Gray)
+                        }
+                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "编码器配置工具", tint = Color(0xFF666666))
                     }
                 }
             }
