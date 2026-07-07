@@ -3,9 +3,12 @@ package com.nx.vfremake.funClass
 import android.os.SystemClock
 import android.util.Log
 import com.nx.vfremake.mSerialPortCAN
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -653,5 +656,68 @@ object JogSession {
     /** 无条件清除（页面销毁兜底用）。 */
     fun clearAll() {
         activeNode.set(NONE)
+    }
+}
+
+/**
+ * SDO 应答等待器：把纯推送式的接收路由（CanReceiveCoroutine → ViewModel 状态）扩展出
+ * "发一帧、等应答"的请求-应答能力，供编码器标定置零与一次性配置工具使用。
+ *
+ * 为什么需要它：
+ *   - 配置工具面对的是【未配置】的编码器（出厂 Node-ID=1，SDO 应答 0x581），
+ *     不在任何白名单内，接收路由无法把应答投递到状态容器；
+ *   - 写 3001h 改节点 ID 后，设备在保存并断电重启前仍用【旧 ID】应答（手册明确），
+ *     等待方必须能按任意 canId 精确匹配；
+ *   - 置零/配置每步都要"收到 0x60 应答再走下一步，超时报错中止"，轮询状态容器
+ *     既不可靠（同值短路）又有竞态。
+ *
+ * 匹配语义：按应答 CAN-ID（0x580+nodeId）匹配，同一 canId 同时只有一个 waiter
+ * （置零/配置流程严格串行，一步一帧一应答）；新注册覆盖旧注册（旧的自然超时）。
+ * dispatchFrame 对无主 SDO 应答先问询本对象，被消费的帧不再跌落施肥解析。
+ */
+object SdoReplyWaiters {
+
+    /** canId(0x580+nodeId) → 等待中的 deferred */
+    private val waiters = ConcurrentHashMap<Int, CompletableDeferred<ByteArray>>()
+
+    /**
+     * 接收路由调用：若有 waiter 等待该 canId 的 SDO 应答，完成它并消费该帧。
+     *
+     * @param canId   应答帧 CAN-ID（0x580 + nodeId）
+     * @param sdoData 8 字节 SDO 数据段
+     * @return true = 已被等待方消费
+     */
+    fun tryComplete(canId: Int, sdoData: ByteArray): Boolean {
+        val d = waiters.remove(canId) ?: return false
+        d.complete(sdoData)
+        return true
+    }
+
+    /**
+     * 发送一帧并等待其 SDO 应答（先注册后发送，杜绝"应答先于注册到达"的竞态）。
+     * 发送走 [CanOpenFun.sendFrameSequenced]（全局 20ms 步调）。
+     *
+     * @param frame       已封装好的发送帧
+     * @param replyCanId  期望的应答 CAN-ID（0x580 + nodeId；改 ID 场景传旧 ID）
+     * @param timeoutMs   等待超时
+     * @return 8 字节 SDO 应答数据段；超时返回 null（调用方应报错并中止流程）
+     */
+    suspend fun sendAndAwait(frame: ByteArray, replyCanId: Int, timeoutMs: Long = 1000L): ByteArray? {
+        val d = CompletableDeferred<ByteArray>()
+        waiters[replyCanId] = d
+        return try {
+            CanOpenFun.sendFrameSequenced(frame)
+            withTimeoutOrNull(timeoutMs) { d.await() }
+        } finally {
+            waiters.remove(replyCanId, d)
+        }
+    }
+
+    /** 是否有 waiter 在等待该 canId（单元测试用）。 */
+    fun hasWaiter(canId: Int): Boolean = waiters.containsKey(canId)
+
+    /** 清空全部 waiter（页面销毁/测试隔离用；被清的等待方自然超时）。 */
+    fun clearAll() {
+        waiters.clear()
     }
 }

@@ -10,7 +10,9 @@ import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.ConvAndCtrlFun
+import com.nx.vfremake.funClass.EncoderCanOpenFun
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.funClass.SdoReplyWaiters
 import com.nx.vfremake.mRmcData
 import com.nx.vfremake.canMonitorData
 import com.nx.vfremake.mSPParamData
@@ -26,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.IOException
+import kotlin.math.sin
 import kotlin.random.Random
 
 class CanReceiveCoroutine {
@@ -40,10 +43,39 @@ class CanReceiveCoroutine {
      */
     private val servoLastSeen = LongArray(8) { 0L }
 
+    /**
+     * 摆臂编码器最后收到帧的时间戳（ms），索引 = motorIndex 0~7。
+     * 沿用 servoLastSeen 模式：以 TPDO/SDO 应答到达判断在线（不启用编码器心跳），
+     * 超时阈值与伺服一致（SERVO_OFFLINE_TIMEOUT_MS）。
+     */
+    private val encoderLastSeen = LongArray(8) { 0L }
+
+    /**
+     * 每路编码器的两级滤波器（限幅野值剔除 + 滑动均值）。
+     * 仅由接收 job 串行调用，无需同步（见 EncoderFilter 线程约定）。
+     */
+    private val encoderFilters = Array(8) { EncoderCanOpenFun.EncoderFilter() }
+
     companion object {
         private const val TAG = "CanReceiveCoroutine"
-        /** 超过此时间未收到任何帧即标记离线（ms） */
+        /** 超过此时间未收到任何帧即标记离线（ms），伺服与编码器共用 */
         private const val SERVO_OFFLINE_TIMEOUT_MS = 2000L
+
+        /**
+         * 纯函数：CANopen 服务帧段识别（canId → (nodeId, type)）。
+         * type: 0=SDO回复, 1=TPDO1, 2=心跳/Boot-up, 3=TPDO2, 4=TPDO3, -1=非CANopen。
+         *
+         * 从 dispatchFrame 原地的 when 表达式提取，映射逐字节不变——提取仅为可单元
+         * 测试（验证编码器帧不跌落施肥解析、伺服/施肥路由与改动前一致）。
+         */
+        fun classifyCanOpen(canId: Int): Pair<Int, Int> = when {
+            canId in 0x581..0x5FF -> (canId - 0x580) to 0   // SDO 回复
+            canId in 0x181..0x1FF -> (canId - 0x180) to 1   // TPDO1
+            canId in 0x701..0x77F -> (canId - 0x700) to 2   // 心跳 / Boot-up
+            canId in 0x281..0x2FF -> (canId - 0x280) to 3   // TPDO2（暂不解析，防止跌落施肥逻辑）
+            canId in 0x381..0x3FF -> (canId - 0x380) to 4   // TPDO3（暂不解析，防止跌落施肥逻辑）
+            else -> -1 to -1
+        }
     }
 
     fun shutdown() {
@@ -226,9 +258,53 @@ class CanReceiveCoroutine {
                             Log.w(TAG, "伺服电机 motor=$i 离线（超过${SERVO_OFFLINE_TIMEOUT_MS}ms未收到帧）")
                         }
                     }
+                    // 摆臂编码器离线判定：同阈值，全部 8 路（离线态展示由 UI 按行过滤）
+                    for (i in 0 until 8) {
+                        if (encoderLastSeen[i] > 0 &&
+                            now - encoderLastSeen[i] > SERVO_OFFLINE_TIMEOUT_MS
+                        ) {
+                            mVariableFertViewModel.updateEncoderCalibration(i) { cal ->
+                                if (cal.isOnline) cal.copy(isOnline = false) else cal
+                            }
+                        }
+                    }
                 }
             }
         })
+
+        // ── Job 3（仅测试模式）: 编码器模拟数据 ───────────────────────────
+        // 与伺服测试模式一致：无硬件时把编码器全部置在线并生成合理模拟数据
+        // （跟随对应行伺服 targetDepth ± 缓慢正弦波动），保证标定页/主界面可开发调试。
+        if (isTestMode) {
+            jobs.add(scope.launch {
+                Log.i(TAG, "测试模式：编码器模拟数据已启动（8路在线，跟随targetDepth波动）")
+                var t = 0.0
+                while (isActive) {
+                    delay(200)
+                    t += 0.2
+                    val servoState = mVariableFertViewModel.currentSowingDepthState()
+                    for (i in 0 until 8) {
+                        val base = servoState.motors.getOrNull(i)?.targetDepth?.takeIf { it > 0f } ?: 40f
+                        val depth = base + (sin(t + i) * 1.5).toFloat()   // ±1.5mm 模拟压种轮浮动
+                        mVariableFertViewModel.updateEncoderCalibration(i) { cal ->
+                            // 有拟合时反算编码值保证显示自洽；无拟合时用 20 脉冲/mm 的合理假设
+                            val pos = if (cal.fitValid && cal.fitA != 0f) {
+                                (depth - cal.fitB) / cal.fitA
+                            } else {
+                                depth * 20f
+                            }
+                            cal.copy(
+                                rawPosition      = pos.toInt(),
+                                filteredPosition = pos,
+                                measuredDepth    = if (cal.fitValid) depth else cal.measuredDepth,
+                                isOnline         = true,
+                                lastHeardMs      = System.currentTimeMillis()
+                            )
+                        }
+                    }
+                }
+            })
+        }
 
         isRunning = true
     }
@@ -263,17 +339,9 @@ class CanReceiveCoroutine {
         // data 段：跳过 frameInfo(1) + canId(2) = 3字节，共 len-3 个数据字节
         val data = if (len > 3) frame.copyOfRange(5, 2 + len) else byteArrayOf()
 
-        // 识别是否为 CANopen 服务帧，并提取 Node-ID
-        // 用 when 表达式 + 解构赋值，避免 val 延迟赋值的编译器解析问题
-        // canOpenType: 0=SDO回复, 1=TPDO1, 2=心跳, -1=非CANopen
-        val (canOpenNodeId, canOpenType) = when {
-            canId in 0x581..0x5FF -> (canId - 0x580) to 0   // SDO 回复
-            canId in 0x181..0x1FF -> (canId - 0x180) to 1   // TPDO1
-            canId in 0x701..0x77F -> (canId - 0x700) to 2   // 心跳
-            canId in 0x281..0x2FF -> (canId - 0x280) to 3   // TPDO2（暂不解析，防止跌落施肥逻辑）
-            canId in 0x381..0x3FF -> (canId - 0x380) to 4   // TPDO3（暂不解析，防止跌落施肥逻辑）
-            else -> -1 to -1
-        }
+        // 识别是否为 CANopen 服务帧，并提取 Node-ID（纯函数提取至 companion，映射不变）
+        // canOpenType: 0=SDO回复, 1=TPDO1, 2=心跳/Boot-up, -1=非CANopen
+        val (canOpenNodeId, canOpenType) = classifyCanOpen(canId)
 
         if (canOpenType >= 0) {
             // 在已配置的深度舵机列表中查找对应 motorIndex
@@ -299,7 +367,30 @@ class CanReceiveCoroutine {
                 }
                 return  // 已处理，不再走施肥逻辑
             }
-            // Node-ID 不在已配置舵机列表中 → 跌落到施肥处理（容错）
+
+            // ── 摆臂编码器分支（伺服未匹配时才到达；伺服 11~18 逻辑保持不变）──
+            // 后台读状态用 currentEncoderFeedbackState()（原子真源），禁止读 LiveData.value
+            val encIndex = viewModel.currentEncoderFeedbackState()
+                .encoders.indexOfFirst { it.nodeId == canOpenNodeId }
+            if (encIndex >= 0) {
+                when (canOpenType) {
+                    0 -> onEncoderSdoResponse(canOpenNodeId, encIndex, data, viewModel)
+                    1 -> onEncoderTpdo1(canOpenNodeId, encIndex, data, viewModel)
+                    // 心跳/Boot-up（0x700+ID）：吸收防止跌落施肥解析即可，
+                    // 不做业务处理——编码器在线判定只看 TPDO/SDO 应答到达
+                    2 -> Log.d(TAG, "编码器 Boot-up/心跳: nodeId=$canOpenNodeId enc=$encIndex")
+                    // TPDO2/3 同样吸收
+                }
+                return  // 已处理/吸收，不再走施肥逻辑
+            }
+
+            // ── SDO 应答等待器（未配置节点，如编码器出厂 ID=1 的 0x581）────
+            // 配置工具按旧 ID 注册 waiter；被消费的应答不得跌落施肥解析
+            if (canOpenType == 0 && SdoReplyWaiters.tryComplete(canId, data)) {
+                Log.d(TAG, "SDO应答被等待器消费: canId=0x${canId.toString(16)}")
+                return
+            }
+            // Node-ID 不在已配置舵机/编码器列表中 → 跌落到施肥处理（容错）
         }
 
         // ── 施肥电机原处理逻辑（完全未改动）────────────────────────────
@@ -494,6 +585,105 @@ class CanReceiveCoroutine {
         viewModel.appendCanOpenLog("心跳 M${motorIndex+1}(N$nodeId) $nmtStateStr")
         Log.d(TAG, "心跳: motor=$motorIndex nodeId=$nodeId" +
                    " state=0x${stateVal.toString(16)} operational=$isOperational")
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 摆臂编码器帧处理器（Node-ID 21~28，DS406）
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * 处理编码器 TPDO1 帧（CAN-ID = 0x180 + Node-ID，默认 50ms 主动上报）。
+     *
+     * 数据格式（4 字节）：[当前位置 U32 小端]——与伺服 6 字节 TPDO1 不同，
+     * 走独立解析 [EncoderCanOpenFun.parseEncoderTpdo]。
+     *
+     * 处理链：符号展开 → 限幅野值剔除 → 滑动均值 → 拟合换算实测深度。
+     * 不写 appendCanOpenLog：8 路 × 50ms ≈ 160 帧/s 会瞬间冲掉 60 条伺服诊断日志。
+     *
+     * @param nodeId   发送 TPDO1 的编码器 CAN Node-ID
+     * @param encIndex 对应 ViewModel 中的编码器下标（0~7）
+     * @param data     4 字节 TPDO1 数据段
+     */
+    private fun onEncoderTpdo1(
+        nodeId: Int,
+        encIndex: Int,
+        data: ByteArray,
+        viewModel: VariableFertViewModel
+    ) {
+        val tpdo = EncoderCanOpenFun.parseEncoderTpdo(0x180 + nodeId, data) ?: run {
+            Log.w(TAG, "编码器TPDO解析失败: nodeId=$nodeId dataLen=${data.size}")
+            return
+        }
+
+        encoderLastSeen[encIndex] = System.currentTimeMillis()
+
+        // 读原子快照取分辨率/拟合系数；滤波器仅接收 job 串行访问
+        val snapshot = viewModel.currentEncoderFeedbackState().encoders[encIndex]
+        val signed = EncoderCanOpenFun.toSignedPosition(tpdo.rawPosition, snapshot.singleTurnResolution)
+        val filter = encoderFilters[encIndex]
+        filter.spikeThreshold = EncoderCanOpenFun.spikeThresholdFor(snapshot.singleTurnResolution)
+        // 离线→在线（重连/重新上电）：清空滤波窗口，避免断线前旧位置污染均值
+        if (!snapshot.isOnline) filter.reset()
+        val filtered = filter.feed(signed)
+
+        viewModel.updateEncoderCalibration(encIndex) { cal ->
+            val depth = if (cal.fitValid) {
+                EncoderCanOpenFun.depthFromEncoder(filtered, cal.fitA, cal.fitB)
+            } else {
+                cal.measuredDepth
+            }
+            cal.copy(
+                rawPosition      = signed,
+                filteredPosition = filtered,
+                measuredDepth    = depth,
+                isOnline         = true,
+                lastHeardMs      = encoderLastSeen[encIndex]
+            )
+        }
+    }
+
+    /**
+     * 处理编码器 SDO 应答帧（CAN-ID = 0x580 + Node-ID）。
+     *
+     * 双重职责：
+     *   1. 叫醒可能等待该应答的标定置零/配置流程（[SdoReplyWaiters]，不独占）；
+     *   2. 刷新在线状态（任何 SDO 回包都说明节点在总线上应答，同伺服的
+     *      请求-应答存活模型）。
+     * 测量值不从 SDO 更新——位置数据只认 TPDO（滤波链单一入口）。
+     */
+    private fun onEncoderSdoResponse(
+        nodeId: Int,
+        encIndex: Int,
+        sdoData: ByteArray,
+        viewModel: VariableFertViewModel
+    ) {
+        if (sdoData.size < 8) {
+            Log.w(TAG, "编码器SDO应答不足8字节: nodeId=$nodeId size=${sdoData.size}")
+            return
+        }
+        // 先叫醒等待方（置零流程等 0x60 应答；不独占，继续常规状态刷新）
+        SdoReplyWaiters.tryComplete(0x580 + nodeId, sdoData)
+
+        encoderLastSeen[encIndex] = System.currentTimeMillis()
+        viewModel.updateEncoderCalibration(encIndex) { cal ->
+            cal.copy(isOnline = true, lastHeardMs = encoderLastSeen[encIndex])
+        }
+
+        val cs    = sdoData[0].toInt() and 0xFF
+        val index = (sdoData[1].toInt() and 0xFF) or ((sdoData[2].toInt() and 0xFF) shl 8)
+        when (cs) {
+            0x80 -> {
+                CanOpenFun.parseSdoResponse(sdoData)   // 触发内部错误码日志
+                viewModel.appendCanOpenLog("编码器SDO错误 E${encIndex + 1}(N$nodeId) idx=0x${index.toString(16)}")
+            }
+            0x60 -> viewModel.appendCanOpenLog(
+                "编码器SDO写ACK E${encIndex + 1}(N$nodeId) idx=0x${index.toString(16).uppercase()}"
+            )
+            else -> Log.d(
+                TAG, "编码器SDO读应答: nodeId=$nodeId idx=0x${index.toString(16)}" +
+                     " val=${CanOpenFun.parseSdoResponse(sdoData)}"
+            )
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
