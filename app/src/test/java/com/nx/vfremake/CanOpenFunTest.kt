@@ -112,6 +112,30 @@ class CanOpenFunTest {
     }
 
     @Test
+    fun quickStopAndHaltUseDifferentDs402Bits() {
+        assertSdoWrite(CanOpenFun.buildQuickStopFrame(11), 11, 0x6040, 2, 0x000BL)
+        assertSdoWrite(CanOpenFun.buildHaltFrame(11), 11, 0x6040, 2, 0x010FL)
+    }
+
+    @Test
+    fun statusWordUsesDs402StandardBitsWithoutInventingLimitDirection() {
+        val status = 0x0C27 // Operation Enabled + target reached(Bit10) + internal limit(Bit11)
+        val flags = CanOpenFun.parseStatusWord(status)
+        assertTrue(flags.readyToSwitchOn)
+        assertTrue(flags.switchedOn)
+        assertTrue(flags.operationEnabled)
+        assertFalse(flags.fault)
+        assertTrue(flags.targetReached)
+        assertTrue(flags.internalLimitActive)
+        assertEquals("运行已使能", CanOpenFun.driveStateDescription(status))
+
+        val manufacturerOnly = CanOpenFun.parseStatusWord(0xC027)
+        assertTrue(manufacturerOnly.manufacturerSpecificBit14)
+        assertTrue(manufacturerOnly.manufacturerSpecificBit15)
+        assertFalse("厂商位不能被当成内部限位", manufacturerOnly.internalLimitActive)
+    }
+
+    @Test
     fun jogStopDisableFramesContainNoEnable() {
         val nodeId = 15
         val frames = CanOpenFun.buildJogStopDisableFrames(nodeId)

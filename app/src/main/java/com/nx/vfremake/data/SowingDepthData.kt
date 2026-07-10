@@ -44,7 +44,7 @@ data class ServoCalibration(
     val currentDepth: Float = 0f,         // 当前实际深度 mm（由 fitA/fitB 换算）
     val isEnabled: Boolean = false,       // 驱动器是否已使能
     val isOnline: Boolean = false,        // 是否在线（最近收到心跳或 TPDO）
-    val alarmCode: Int = 0,               // 报警代码，0 = 正常
+    val alarmCode: Int = SERVO_ALARM_NONE, // 见 SERVO_ALARM_*；由状态字/SDO 接收路径更新
     val lastHeardMs: Long = 0L            // CanReceiveCoroutine 最后收到该电机任意 CAN 帧的时间戳（ms）
 )
 
@@ -73,6 +73,17 @@ data class SowingDepthState(
 )
 
 enum class CalibrationMode { DIRECT, INDIRECT }
+
+/**
+ * 伺服运行报警分类。
+ *
+ * YZ EDS 未定义 6041h Bit14/15 为正/负限位；CiA402 将这两位保留给厂商。
+ * 因此这里只依据标准 Bit3(fault)、Bit11(internal limit active) 和 SDO abort 分类。
+ */
+const val SERVO_ALARM_NONE = 0
+const val SERVO_ALARM_DRIVE_FAULT = 1
+const val SERVO_ALARM_INTERNAL_LIMIT = 2
+const val SERVO_ALARM_SDO_ABORT = -1
 
 fun isSowingDepthMotorActive(
     motorIndex: Int,
@@ -128,7 +139,8 @@ private val DEFAULT_INDIRECT_POINTS: List<IndirectCalibPoint> =
 
 /**
  * 由 limitMin/limitMax 推出"深方向"的符号：+1 / -1 / 0(限位未分离)。
- * 仅用于点动方向判断与到限检查；写入 0x261F/0x2620 时已按浅/深字面值处理。
+ * 仅用于点动方向判断与应用层到限检查。YZ_MOTOR_SN2.eds 不包含 261Fh/2620h，
+ * 所以本项目不再声称把这两个值写成驱动器硬件限位。
  */
 val ServoCalibration.deepDirection: Int
     get() = limitMax.compareTo(limitMin)

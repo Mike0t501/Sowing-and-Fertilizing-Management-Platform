@@ -6,6 +6,10 @@ import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.data.isSowingDepthMotorActive
+import com.nx.vfremake.data.SERVO_ALARM_DRIVE_FAULT
+import com.nx.vfremake.data.SERVO_ALARM_INTERNAL_LIMIT
+import com.nx.vfremake.data.SERVO_ALARM_NONE
+import com.nx.vfremake.data.SERVO_ALARM_SDO_ABORT
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
 import com.nx.vfremake.funClass.CanOpenFun
@@ -425,8 +429,18 @@ class CanReceiveCoroutine {
             Log.w(TAG, "SDO回复数据不足8字节: nodeId=$nodeId size=${sdoData.size}")
             return
         }
+        // 配置好的伺服节点会优先进入本处理器；必须同时唤醒调试页注册的 waiter，
+        // 否则 SdoReplyWaiters 只能收到“未配置节点”的回复，伺服调试读取会全部超时。
+        val claimedByWaiter = SdoReplyWaiters.tryComplete(0x580 + nodeId, sdoData)
+
         val cs    = sdoData[0].toInt() and 0xFF
         val index = (sdoData[1].toInt() and 0xFF) or ((sdoData[2].toInt() and 0xFF) shl 8)
+
+        // 任意格式正确的 SDO 应答（包括 abort）都证明节点在线。
+        servoLastSeen[motorIndex] = System.currentTimeMillis()
+        viewModel.updateServoCalibration(motorIndex) { cal ->
+            cal.copy(isOnline = true, lastHeardMs = servoLastSeen[motorIndex])
+        }
 
         when {
             // ── 实际位置读回复（0x6064，有符号32位）─────────────────────
@@ -434,7 +448,6 @@ class CanReceiveCoroutine {
                 val pos = CanOpenFun.parseSdoResponseSigned32(sdoData) ?: return
                 // 请求-应答存活模型：任何 SDO 回包都说明节点在总线上应答 → 刷新存活时间戳并置在线，
                 // 使在线判定独立于 TPDO/心跳配置，避免静止电机被 2s 看门狗误判离线后锁死。
-                servoLastSeen[motorIndex] = System.currentTimeMillis()
                 viewModel.updateServoCalibration(motorIndex) { cal ->
                     val depth = if (cal.fitValid) cal.fitA * pos + cal.fitB else cal.currentDepth
                     cal.copy(
@@ -453,13 +466,17 @@ class CanReceiveCoroutine {
                 val sw    = (CanOpenFun.parseSdoResponse(sdoData) ?: return).toInt()
                 val flags = CanOpenFun.parseStatusWord(sw)
                 val alarm = when {
-                    flags.positiveLimitReached -> 1
-                    flags.negativeLimitReached -> 2
-                    else -> 0
+                    flags.fault -> SERVO_ALARM_DRIVE_FAULT
+                    flags.internalLimitActive -> SERVO_ALARM_INTERNAL_LIMIT
+                    else -> SERVO_ALARM_NONE
                 }
-                servoLastSeen[motorIndex] = System.currentTimeMillis()
                 viewModel.updateServoCalibration(motorIndex) { cal ->
-                    cal.copy(alarmCode = alarm, isOnline = true, lastHeardMs = servoLastSeen[motorIndex])
+                    cal.copy(
+                        alarmCode = alarm,
+                        isEnabled = flags.operationEnabled,
+                        isOnline = true,
+                        lastHeardMs = servoLastSeen[motorIndex]
+                    )
                 }
                 viewModel.appendCanOpenLog("SDO状态 M${motorIndex+1}(N$nodeId) sw=0x${sw.toString(16)} alarm=$alarm targetReached=${flags.targetReached}")
                 Log.d(TAG, "SDO状态字回复: motor=$motorIndex sw=0x${sw.toString(16)}" +
@@ -469,10 +486,6 @@ class CanReceiveCoroutine {
             // ── 写入成功应答（节点已应答 → 视为存活，刷新时间戳）───────────
             cs == 0x60 -> {
                 val subIdx = sdoData[3].toInt() and 0xFF
-                servoLastSeen[motorIndex] = System.currentTimeMillis()
-                viewModel.updateServoCalibration(motorIndex) { cal ->
-                    cal.copy(isOnline = true, lastHeardMs = servoLastSeen[motorIndex])
-                }
                 viewModel.appendCanOpenLog("SDO写ACK M${motorIndex+1}(N$nodeId) idx=0x${index.toString(16).uppercase()} sub=$subIdx")
                 Log.d(TAG, "SDO写成功: motor=$motorIndex nodeId=$nodeId" +
                            " index=0x${index.toString(16).uppercase()} sub=$subIdx")
@@ -481,8 +494,12 @@ class CanReceiveCoroutine {
             // ── SDO 错误应答（CanOpenFun 内部已打印详细错误码）──────────
             cs == 0x80 -> {
                 CanOpenFun.parseSdoResponse(sdoData)   // 触发内部错误日志
-                viewModel.updateServoCalibration(motorIndex) { cal ->
-                    if (cal.alarmCode != -1) cal.copy(alarmCode = -1) else cal
+                // 调试工具已认领的 abort 会在工具内精确展示对象/中止码，不污染运行报警。
+                // 控制循环发出的无主 SDO abort 仍标记为通信报警，避免静默失败。
+                if (!claimedByWaiter) {
+                    viewModel.updateServoCalibration(motorIndex) { cal ->
+                        if (cal.alarmCode != SERVO_ALARM_SDO_ABORT) cal.copy(alarmCode = SERVO_ALARM_SDO_ABORT) else cal
+                    }
                 }
                 viewModel.appendCanOpenLog("SDO错误 M${motorIndex+1}(N$nodeId) idx=0x${index.toString(16)}")
                 Log.e(TAG, "SDO错误应答: motor=$motorIndex nodeId=$nodeId index=0x${index.toString(16)}")
@@ -520,9 +537,9 @@ class CanReceiveCoroutine {
 
         val flags = CanOpenFun.parseStatusWord(tpdo.statusWord)
         val alarm = when {
-            flags.positiveLimitReached -> 1
-            flags.negativeLimitReached -> 2
-            else -> 0
+            flags.fault -> SERVO_ALARM_DRIVE_FAULT
+            flags.internalLimitActive -> SERVO_ALARM_INTERNAL_LIMIT
+            else -> SERVO_ALARM_NONE
         }
 
         viewModel.updateServoCalibration(motorIndex) { cal ->
@@ -535,6 +552,7 @@ class CanReceiveCoroutine {
                 currentPosition = tpdo.actualPos,
                 currentDepth    = depth,
                 isOnline        = true,
+                isEnabled       = flags.operationEnabled,
                 alarmCode       = alarm,
                 lastHeardMs     = servoLastSeen[motorIndex]
             )

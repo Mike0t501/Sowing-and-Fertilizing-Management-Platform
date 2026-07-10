@@ -313,7 +313,8 @@ private suspend fun runJogCommandConsumer(
 /**
  * 播种深度电机校准向导
  *
- * 步骤 1：点动电机到最深/最浅位置，记录编码器限位值，写入电机软件限位寄存器。
+ * 步骤 1：点动电机到最深/最浅位置，记录编码器限位值并保存为 App 软件限位。
+ *         YZ_MOTOR_SN2.eds 未声明 261Fh/2620h，不向未知厂商对象写入伪“硬限位”。
  * 步骤 2：自动计算 5 个等分编码器位置，移动到每个位置后由用户填入实际测量深度，
  *         计算线性拟合系数，保存到 SharedPreferences。
  *
@@ -736,19 +737,9 @@ fun DepthCalibrationScreen(
                         val lMax = pendingLimitMax ?: return@Step1Content
                         limitsWriteBusy = true
                         scope.launch {
-                            withContext(Dispatchers.IO) {
-                                if (!MySerialPortFun.ensureCanPortOpen(context)) {
-                                    Log.e("DepthCalib", "onConfirmLimits: ensureCanPortOpen failed")
-                                    return@withContext
-                                }
-                                // 一次原子序列写入两个软件限位：0x261F 正向（最深）、0x2620 负向（最浅）
-                                CanOpenFun.sendSequence(
-                                    listOf(
-                                        CanOpenFun.buildSdoWriteFrame(cal.nodeId, 0x261F, 0x00, 4, lMax.toLong()),
-                                        CanOpenFun.buildSdoWriteFrame(cal.nodeId, 0x2620, 0x00, 4, lMin.toLong())
-                                    )
-                                )
-                            }
+                            // EDS 中没有 261Fh/2620h；旧代码写入后也未等待 SDO ACK，却仍把
+                            // limitsSet 置 true，会把 abort 误报成保存成功。限位只在 App 控制
+                            // 下发前执行 coerceIn，并持久化到 SharedPreferences。
                             viewModel.updateServoCalibration(motorIndex) {
                                 it.copy(limitMin = lMin, limitMax = lMax, limitsSet = true)
                             }

@@ -44,6 +44,8 @@
 
 6. **`SowingDepthScreen` 与 `DepthCalibrationScreen` 均各自启动 `CanReceiveCoroutine` + `SowingDepthCoroutine`**（各自的 `DisposableEffect`），离开界面时 `onDispose` 停止。两界面之间切换会重新创建协程实例，已通过时间戳离线检测的 5s 窗口避免冷启动误判。
 
+7. **YZ EDS 审查（2026-07-10）**：`YZ_MOTOR_SN2.eds` 共 104 个可 expedited SDO 访问的数字 VAR/子对象，已逐项录入 `ServoCanOpenFun.EDS_OBJECTS`。TPDO1 的 6 字节 `[6064h实际位置 I32][6041h状态字 U16]` 解析正确。已修正四类不一致：① 已配置伺服的 SDO 回复同时投递 `SdoReplyWaiters`，调试请求不再超时；② `6041h` Bit14/15 仅作厂商位，报警改用 Bit3 Fault / Bit11 Internal limit；③ `6040h=010Fh` 明确为 Halt，真正 Quick Stop 使用 `000Bh`；④ 删除 EDS 不存在的 `261Fh/2620h` 写入，只保留 App 软件限位。`6084h` 也未列入 EDS，因既有现场减速行为暂保留兼容写入，并在伺服调试工具提供只读探测。EDS 身份默认值为 Vendor=817、Product=1、Revision=256，电子齿轮默认分子/分母为 32768/8192。
+
 ### 当前已知待开发项
 
 - `DepthCalibrationScreen` 步骤2 当前只有**直接测量模式**（5点等分，人工测量深度值）。下一步新增**间接测量模式**（挡块法），见第七节详细规格。
@@ -92,15 +94,16 @@
 | 状态字 | 0x6041-00 | 2字节 | RM | 状态反馈 |
 | 工作模式 | 0x6060-00 | 1字节 | RWM | 1=位置, 3=速度, 6=找原点, 7=插补 |
 | 实际位置 | 0x6064-00 | 4字节(有符号) | RM | 编码器计数值 |
+| 实际速度 | 0x606C-00 | 4字节(有符号) | RM | TPDO3 默认映射对象之一 |
+| 实际电流 | 0x6078-00 | 2字节(有符号) | RM | 电流反馈 |
 | 目标位置缓存 | 0x607A-00 | 4字节(有符号) | RW | 目标位置 |
 | 梯形速度 | 0x6081-00 | 4字节 | RW | 位置模式最大速度，单位RPM，范围0~3000 |
 | 电机加速度 | 0x6083-00 | 4字节 | RW | 单位(RPM/s)，<60000用内部曲线 |
 | 速度模式速度 | 0x60FF-00 | 4字节(有符号) | RWM | 速度模式目标转速，范围-3000~3000 |
 | Modbus使能 | 0x2600-00 | 2字节 | RW | 0=禁止, 1=使能 |
 | 电子齿轮分子 | 0x260A-00 | 2字节 | RW | 默认32768 |
-| 电子齿轮分母 | 0x260B-00 | 2字节 | RW | 默认1 |
-| 位置限位最小值 | 0x261F-00 | 4字节(有符号) | RW | 限位功能需开启 |
-| 位置限位最大值 | 0x2620-00 | 4字节(有符号) | RW | 限位功能需开启 |
+| 电子齿轮分母 | 0x260B-00 | 2字节 | RW | EDS 默认8192 |
+| 厂商错误码 | 0x260E-00 | 2字节 | RO | EDS 声明的错误码对象 |
 | 参数保存标志 | 0x2614-00 | 2字节 | RW | 写1=保存中, 读到2=保存完毕 |
 | 特殊功能 | 0x2619-00 | 2字节 | RW | 0=脉冲+方向 |
 | 心跳产生间隔 | 0x1017-00 | 2字节 | RWM | 单位ms, 0=不产生 |
@@ -108,14 +111,14 @@
 ### 2.4 控制字 (0x6040) 位定义
 ```
 Bit0: 启动（置1后外部脉冲控制无效）
-Bit1: 允许急停
-Bit2: 电压输出
+Bit1: Enable voltage
+Bit2: Quick stop（清零触发 DS402 Quick Stop）
 Bit3: 允许操作
 Bit4: 执行新设置点（写1后运行到新位置，自动清零）
 Bit5: 位置立即生效
 Bit6: 0=绝对位置, 1=相对位置
 Bit7: 故障复位
-Bit8: 停止（值为1时电机急停但仍自锁）
+Bit8: Halt（位置/速度模式受控暂停，不等同于 Quick Stop）
 ```
 
 常用控制字值：
@@ -123,37 +126,38 @@ Bit8: 停止（值为1时电机急停但仍自锁）
 - `0x002F`: 绝对位置 + 新位置立即执行
 - `0x004F`: 相对位置控制模式
 - `0x005F`: 相对位置 + 执行新位置点
-- `0x010F`: 停止
+- `0x000B`: DS402 Quick Stop（从 0x000F 清 Bit2）
+- `0x010F`: Halt（Bit8=1）
 
 ### 2.5 状态字 (0x6041) 位定义
 ```
+Bit0: Ready to switch on
+Bit1: Switched on
+Bit2: Operation enabled
+Bit3: Fault
+Bit5: Quick stop（1=未激活）
+Bit6: Switch on disabled
+Bit7: Warning
 Bit10: 目标达到（位置模式=到达目标位置，速度模式=到达给定速度）
-Bit12: 找原点完成
-Bit14: 到达正限位
-Bit15: 到达负限位
+Bit11: Internal limit active
+Bit12~13: 工作模式相关（位置模式 Bit12=Set-point acknowledge）
+Bit14~15: 厂商自定义；YZ EDS 未给出正/负限位定义，禁止据此判断限位方向
 ```
 
 ### 2.6 编码器参数
 - 15位绝对编码器，一圈 = 32768 脉冲
-- 电子齿轮默认：分子32768, 分母1（即1:1映射编码器原始值）
+- EDS 电子齿轮默认：分子32768, 分母8192
 
-### 2.7 限位功能开启步骤（通过SDO）
-```
-步骤1: 写 电机加速度(0x6083) = 1      // 开启限位功能
-步骤2: 写 弱磁角度(0x2604) = 131
-步骤3: 写 Modbus使能(0x2600) = 506    // 特殊保存命令
-步骤4: 重新上电
+### 2.7 限位策略
 
-步骤5: 写 限位最小值(0x261F) = min_value  // 有符号32位
-步骤6: 写 限位最大值(0x2620) = max_value  // 有符号32位
-步骤7: 写 参数保存标志(0x2614) = 1
-步骤8: 重新上电
-```
+早期草案曾把 `261Fh/2620h` 当作本机硬件限位寄存器，但它们不在
+`YZ_MOTOR_SN2.eds` 中，也没有经 SDO ACK 验证，现已撤销该流程。当前只记录 App
+软件限位，位置命令下发前使用 `coerceIn(minOf(limitMin, limitMax), maxOf(...))` 限幅。
 
 ### 2.8 SDO 绝对位置控制流程
 ```kotlin
 // 1. 使能驱动器
-SDO_Write(0x6040, 0x00, 2, 0x000F)  // 控制字=启动+电压+急停+操作
+SDO_Write(0x6040, 0x00, 2, 0x000F)  // Enable Operation
 
 // 2. 设置位置模式
 SDO_Write(0x6060, 0x00, 1, 0x01)    // 工作模式=位置模式
@@ -165,11 +169,12 @@ position = SDO_Read(0x6064, 0x00)    // 实际位置
 SDO_Write(0x6081, 0x00, 4, 1000)    // 梯形速度=1000RPM
 SDO_Write(0x6083, 0x00, 4, 20000)   // 加速度=20000RPM/s
 
-// 5. 设置绝对位置+立即执行
-SDO_Write(0x6040, 0x00, 2, 0x002F)  // 控制字=绝对+立即执行
-
-// 6. 写入目标位置
+// 5. 写入目标位置
 SDO_Write(0x607A, 0x00, 4, target)  // 目标位置
+
+// 6. Bit4 必须 0→1 跳变：先清 new set-point，再置位并立即执行
+SDO_Write(0x6040, 0x00, 2, 0x000F)
+SDO_Write(0x6040, 0x00, 2, 0x002F)
 
 // 7. 读状态字判断是否到达
 status = SDO_Read(0x6041, 0x00)
@@ -187,8 +192,11 @@ SDO_Write(0x60FF, 0x00, 4, speed)   // 例如 500 或 -500
 // 3. 启动
 SDO_Write(0x6040, 0x00, 2, 0x000F)
 
-// 4. 停止
-SDO_Write(0x6040, 0x00, 2, 0x010F)  // Bit8=1 急停
+// 4. 正常松开：先将速度归零；当前实现重复发送并在减速后 Disable Operation
+SDO_Write(0x60FF, 0x00, 4, 0)
+
+// 安全 Quick Stop：从 000Fh 清 Bit2
+SDO_Write(0x6040, 0x00, 2, 0x000B)
 ```
 
 ### 2.10 PDO（过程数据对象）- 用于实时控制
@@ -358,9 +366,9 @@ object CanOpenFun {
         buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000F)  // 启动
     )
     
-    /** 急停 */
+    /** DS402 Quick Stop */
     fun buildEmergencyStop(nodeId: Int) = 
-        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x010F)
+        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000B)
     
     /** 读取当前位置 */
     fun buildReadPosition(nodeId: Int) = 
@@ -370,12 +378,7 @@ object CanOpenFun {
     fun buildReadStatus(nodeId: Int) = 
         buildSdoReadFrame(nodeId, 0x6041, 0x00)
     
-    /** 写入限位值 */
-    fun buildSetLimits(nodeId: Int, minPos: Int, maxPos: Int): List<ByteArray> = listOf(
-        buildSdoWriteFrame(nodeId, 0x261F, 0x00, 4, minPos.toLong()),
-        buildSdoWriteFrame(nodeId, 0x2620, 0x00, 4, maxPos.toLong()),
-        buildSdoWriteFrame(nodeId, 0x2614, 0x00, 2, 1)  // 保存参数
-    )
+    // 限位只保存在 App 状态；YZ EDS 未声明 261Fh/2620h，不构造未知对象写入帧。
 
     // ============ 心跳 ============
     
@@ -598,8 +601,8 @@ SDO 是请求-回复模式。发送一条SDO写入后，需要等待回复（0x5
 
 ### 6.2 软件限位 vs 硬件限位
 - **软件限位**：在发送位置指令前，先调用 `isPositionSafe()` 检查
-- **硬件限位**：通过SDO写入电机的限位寄存器（0x261F/0x2620），电机内部也会限制
-- **两层都要做**，软件限位是第一道防线，硬件限位是保底
+- **EDS 结论**：`YZ_MOTOR_SN2.eds` 没有 `0x261F/0x2620`，不得把它们当成本机已确认的硬件限位寄存器
+- 当前实现只保存 App 软件限位，并在目标位置下发前执行限幅；若要启用驱动器硬限位，必须先取得本机厂商对象定义并验证 SDO ACK
 
 ### 6.3 点动控制实现
 点动使用速度模式。按住按钮时发送速度命令，松开按钮时发送速度=0或急停命令。

@@ -282,10 +282,17 @@ object CanOpenFun {
         buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000FL)
 
     /**
-     * 急停：写控制字（0x6040）= 0x010F。
-     *   在 0x000F 基础上置 Bit8=1（停止），电机急停但继续自锁。
+     * DS402 Quick Stop：从 Enable Operation(0x000F) 清除 Bit2，得到 0x000B。
+     *
+     * 旧实现使用 0x010F；Bit8 在位置/速度模式中表示 Halt（受控暂停），并不是
+     * DS402 状态机的 Quick Stop。安全按钮和故障/内部限位保护必须使用真正的
+     * Quick Stop 状态转换。
      */
     fun buildQuickStopFrame(nodeId: Int): ByteArray =
+        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000BL)
+
+    /** 位置/速度模式的受控暂停（Halt，Bit8=1），不等同于 Quick Stop。 */
+    fun buildHaltFrame(nodeId: Int): ByteArray =
         buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x010FL)
 
     /**
@@ -449,17 +456,26 @@ object CanOpenFun {
     /**
      * 状态字（0x6041）解析结果。
      *
-     * @property targetReached        Bit10：位置模式已到达目标位置 / 速度模式已到达目标转速
-     * @property homingDone           Bit12：找原点完成
-     * @property positiveLimitReached Bit14：到达正限位
-     * @property negativeLimitReached Bit15：到达负限位
-     * @property rawValue             原始 16 位状态字
+     * Bit0~11 按 CiA402 通用定义解析。Bit12~13 与当前工作模式相关，Bit14~15 为
+     * 厂商自定义；YZ_MOTOR_SN2.eds 没有给出 14/15 位的正负限位语义，因此不能据此
+     * 生成正/负限位报警。
      */
     data class StatusFlags(
+        val readyToSwitchOn: Boolean,
+        val switchedOn: Boolean,
+        val operationEnabled: Boolean,
+        val fault: Boolean,
+        val voltageEnabled: Boolean,
+        val quickStopInactive: Boolean,
+        val switchOnDisabled: Boolean,
+        val warning: Boolean,
+        val remote: Boolean,
         val targetReached: Boolean,
-        val homingDone: Boolean,
-        val positiveLimitReached: Boolean,
-        val negativeLimitReached: Boolean,
+        val internalLimitActive: Boolean,
+        val operationModeSpecificBit12: Boolean,
+        val operationModeSpecificBit13: Boolean,
+        val manufacturerSpecificBit14: Boolean,
+        val manufacturerSpecificBit15: Boolean,
         val rawValue: Int
     )
 
@@ -469,12 +485,36 @@ object CanOpenFun {
      * @param statusWord 状态字原始值（16 位无符号，从 SDO 读取或 TPDO 解析而来）
      */
     fun parseStatusWord(statusWord: Int): StatusFlags = StatusFlags(
-        targetReached         = (statusWord and (1 shl 10)) != 0,
-        homingDone            = (statusWord and (1 shl 12)) != 0,
-        positiveLimitReached  = (statusWord and (1 shl 14)) != 0,
-        negativeLimitReached  = (statusWord and (1 shl 15)) != 0,
-        rawValue              = statusWord
+        readyToSwitchOn           = (statusWord and (1 shl 0)) != 0,
+        switchedOn                = (statusWord and (1 shl 1)) != 0,
+        operationEnabled          = (statusWord and (1 shl 2)) != 0,
+        fault                     = (statusWord and (1 shl 3)) != 0,
+        voltageEnabled            = (statusWord and (1 shl 4)) != 0,
+        quickStopInactive         = (statusWord and (1 shl 5)) != 0,
+        switchOnDisabled          = (statusWord and (1 shl 6)) != 0,
+        warning                   = (statusWord and (1 shl 7)) != 0,
+        remote                    = (statusWord and (1 shl 9)) != 0,
+        targetReached             = (statusWord and (1 shl 10)) != 0,
+        internalLimitActive       = (statusWord and (1 shl 11)) != 0,
+        operationModeSpecificBit12 = (statusWord and (1 shl 12)) != 0,
+        operationModeSpecificBit13 = (statusWord and (1 shl 13)) != 0,
+        manufacturerSpecificBit14 = (statusWord and (1 shl 14)) != 0,
+        manufacturerSpecificBit15 = (statusWord and (1 shl 15)) != 0,
+        rawValue                  = statusWord and 0xFFFF
     )
+
+    /** 根据 CiA402 状态字低位掩码给出驱动器状态机名称。 */
+    fun driveStateDescription(statusWord: Int): String = when {
+        statusWord and 0x004F == 0x0000 -> "未准备好切换"
+        statusWord and 0x004F == 0x0040 -> "禁止切换"
+        statusWord and 0x006F == 0x0021 -> "已准备切换"
+        statusWord and 0x006F == 0x0023 -> "已切换"
+        statusWord and 0x006F == 0x0027 -> "运行已使能"
+        statusWord and 0x006F == 0x0007 -> "Quick Stop 激活"
+        statusWord and 0x004F == 0x000F -> "故障反应激活"
+        statusWord and 0x004F == 0x0008 -> "故障"
+        else -> "未知状态"
+    }
 
     // ─────────────────────────────────────────────────────────────────────
     // TPDO1 解析（电机主动上报）

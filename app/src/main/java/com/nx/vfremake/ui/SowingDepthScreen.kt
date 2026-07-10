@@ -66,6 +66,9 @@ import com.nx.vfremake.data.EncoderCalibration
 import com.nx.vfremake.data.EncoderFeedbackState
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.SERVO_ALARM_DRIVE_FAULT
+import com.nx.vfremake.data.SERVO_ALARM_INTERNAL_LIMIT
+import com.nx.vfremake.data.SERVO_ALARM_SDO_ABORT
 import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.MySharedPreFun
@@ -776,9 +779,9 @@ private fun MotorStatusCard(
             if (cal.alarmCode != 0) {
                 Spacer(Modifier.height(6.dp))
                 val alarmText = when (cal.alarmCode) {
-                    1    -> "⚠ 正向限位触发（已急停）"
-                    2    -> "⚠ 负向限位触发（已急停）"
-                    -1   -> "⚠ SDO 通信错误"
+                    SERVO_ALARM_DRIVE_FAULT -> "⚠ 驱动器故障（已 Quick Stop）"
+                    SERVO_ALARM_INTERNAL_LIMIT -> "⚠ 驱动器内部限位激活（已 Quick Stop）"
+                    SERVO_ALARM_SDO_ABORT -> "⚠ SDO 通信错误"
                     else -> "⚠ 报警码: ${cal.alarmCode}"
                 }
                 Text(

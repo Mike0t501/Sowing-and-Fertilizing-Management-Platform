@@ -525,7 +525,15 @@ private suspend fun runDiagnosticTest(
 }
 
 @Composable
-fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Unit = {}, onClickSimGnss: () -> Unit = {}, onClickExperimentData: () -> Unit = {}, onClickEncoderProvisioning: () -> Unit = {}, onReinitSerialPort: () -> Unit = {}) {
+fun SettingsScreen(
+    onClickBack: () -> Unit = {},
+    onClickDantiSettigns: () -> Unit = {},
+    onClickSimGnss: () -> Unit = {},
+    onClickExperimentData: () -> Unit = {},
+    onClickEncoderProvisioning: () -> Unit = {},
+    onClickServoDiagnostics: () -> Unit = {},
+    onReinitSerialPort: () -> Unit = {}
+) {
     val context = LocalContext.current
     val sharedPre = MySharedPreFun(context).getMySharedPre()
 
@@ -887,6 +895,20 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                             Text(text = "节点扫描、EDS 参数诊断、位置采样、NMT 控制与首次配号", fontSize = 11.sp, color = Color.Gray)
                         }
                         Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "编码器配置工具", tint = Color(0xFF666666))
+                    }
+                    Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
+
+                    // 按需求紧邻 BRT 编码器调试工具下方
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { onClickServoDiagnostics() }.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(text = "播种深度伺服电机调试工具", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color(0xFF333333))
+                            Text(text = "YZ EDS 快照、DS402 状态机、位置采样与安全对象读写", fontSize = 11.sp, color = Color.Gray)
+                        }
+                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "播种深度伺服电机调试工具", tint = Color(0xFF666666))
                     }
                 }
             }
