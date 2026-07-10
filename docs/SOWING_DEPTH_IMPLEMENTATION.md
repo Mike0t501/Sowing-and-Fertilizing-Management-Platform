@@ -820,7 +820,7 @@ CAN 帧 → classifyCanOpen(canId)（纯函数，段识别映射与旧版逐字�
 
 | 文件 | 职责 |
 |------|------|
-| `funClass/EncoderCanOpenFun.kt` | 协议层纯函数：TPDO 4 字节解析、SDO 语义化构帧（复用 CanOpenFun 通用构帧器）、`toSignedPosition` 符号展开、`EncoderFilter` 两级滤波、`depthFromEncoder` 唯一换算入口 |
+| `funClass/EncoderCanOpenFun.kt` | 协议层纯函数：TPDO 4 字节解析、EDS 60 个数值对象目录、结构化 SDO/abort 解析、SDO 语义化构帧、NMT/SYNC 调试支持、`toSignedPosition` 符号展开、`EncoderFilter` 两级滤波、`depthFromEncoder` 唯一换算入口 |
 | `funClass/CanOpenFun.kt` → `SdoReplyWaiters` | 请求-应答等待器：先注册后发送、按应答 canId 精确匹配（覆盖改 ID 后旧 ID 应答场景）、超时返回 null |
 | `data/EncoderFeedbackData.kt` | `EncoderCalibration`（持久化：nodeId/zeroSet/分辨率/标定点/fit；运行时：raw/filtered/measuredDepth/isOnline/lastHeardMs）+ `EncoderFeedbackState` |
 | `ViewModelAndPublic.kt` | `encoderFeedbackStateRef`（AtomicReference 原子真源）+ CAS 更新 + LiveData 投影；后台读取一律 `currentEncoderFeedbackState()` |
@@ -851,9 +851,28 @@ TPDO1 原始值（U32） → toSignedPosition（单圈回绕符号展开，需�
    → `fitValid=true`。支持删点/清空重标。
 3. 标定页实时显示原始值/滤波值/换算深度，便于现场判断信号是否正常。
 
-### 8.6 一次性配置工具（EncoderProvisioningScreen，设置页深处入口）
+### 8.6 软件内调试与一次性配置工具（EncoderProvisioningScreen，设置页入口）
 
-⚠ **同一时刻总线上只能接入一台未配置的编码器（出厂 ID=1）**。逐台：
+页面上半部分的 `EncoderDiagnosticsPanel` 提供：
+
+- 扫描出厂 ID 1、工作 ID 21~28 和用户指定 ID；
+- 一键读取身份、错误、通信、位置、分辨率、报警/警告等 EDS 快照，并校验 BRT 身份；
+- 浏览 EDS 全部 60 个 expedited SDO 数值对象，读取 RO/RW、二次确认写 RW、显式保存；
+- 解析并显示常见 CiA301 SDO 中止码，不再只报“设备错误”；
+- NMT 启动/停止/预运行/复位节点/复位通信、SYNC 与 `6004h` 连续采样统计；
+- `3000h` 波特率和 `3001h` Node-ID 通用写保护（后者只走下方专用配号流程）。
+
+EDS 的 `1008h/1009h/100Ah` 为可见字符串并可能需要分段 SDO，当前不在数值控制台开放；
+设备身份由 `1018h` 四个数值子项核验。
+
+推荐现场调试顺序：确认 500 kbit/s 与接线 → 扫描 ID 1/21~28 → 一键诊断并核对
+Vendor `0x0000FFFF`、Product `0x00000010`、波特率代码 6 → NMT 启动 → 连续采样
+`6004h` 并转动编码器检查方向/量程/回绕 → 按需读取或二次确认写入 EDS RW 对象 →
+显式保存。扫描失败优先检查供电、CAN-H/L、终端电阻、串口和当前 Node-ID；位置可用但
+App 离线时检查 TPDO1 COB-ID、映射与 NMT 状态。
+
+下半部分保留新设备的一次性配置流程。⚠ **同一时刻总线上只能接入一台未配置的编码器
+（出厂 ID=1）**。逐台：
 
 1. 读 `6501-00` 验证在线并暂存物理分辨率
 2. 写 `3001-00` = 目标 ID（21+行号）——**应答仍按旧 ID（0x580+旧ID）匹配**（手册明确）
@@ -873,7 +892,8 @@ TPDO1 原始值（U32） → toSignedPosition（单圈回绕符号展开，需�
 
 ### 8.8 单元测试
 
-`EncoderCanOpenFunTest.kt`：TPDO 4 字节解析、手册示例帧逐字节核对（读 6004 应答
+`EncoderCanOpenFunTest.kt`：TPDO 4 字节解析、EDS 60 个数值地址/核心属性、结构化
+expedited SDO 与 abort、RO 写保护、SYNC、手册示例帧逐字节核对（读 6004 应答
 `43 04 60 00 E8 03 00 00`→1000、save/1800-05/3001 帧）、滤波、符号展开、最小二乘。
 `CanFrameRoutingTest.kt`：编码器帧不落施肥、伺服/施肥/未配置节点路由与改动前逐字节一致、
 SdoReplyWaiters 消费语义。

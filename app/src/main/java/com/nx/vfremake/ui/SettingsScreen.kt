@@ -883,8 +883,8 @@ fun SettingsScreen(onClickBack: () -> Unit = {}, onClickDantiSettigns: () -> Uni
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Column {
-                            Text(text = "编码器配置工具（维护）", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color(0xFF333333))
-                            Text(text = "播深编码器首次上机：分配 Node-ID 21~28 并设置上报间隔", fontSize = 11.sp, color = Color.Gray)
+                            Text(text = "BRT 编码器调试工具", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color(0xFF333333))
+                            Text(text = "节点扫描、EDS 参数诊断、位置采样、NMT 控制与首次配号", fontSize = 11.sp, color = Color.Gray)
                         }
                         Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "编码器配置工具", tint = Color(0xFF666666))
                     }

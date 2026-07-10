@@ -43,6 +43,200 @@ import kotlin.math.abs
  */
 object EncoderCanOpenFun {
 
+    /** EDS 数字对象的数据类型。可见字符串需要分段 SDO，不放入本调试控制台。 */
+    enum class EdsDataType(val byteLength: Int, val signed: Boolean) {
+        U8(1, false), U16(2, false), U32(4, false), I32(4, true)
+    }
+
+    /** EDS 对象访问属性。 */
+    enum class EdsAccess { RO, RW }
+
+    /**
+     * 可由软件直接调试的 EDS 数字对象定义。
+     *
+     * @param key       稳定键，用于 UI 快照结果映射
+     * @param index     CANopen 对象索引
+     * @param subIndex  子索引
+     * @param title     现场操作员可读名称
+     * @param type      EDS 数据类型（0x0004/05/06/07）
+     * @param access    EDS AccessType
+     */
+    data class EdsObject(
+        val key: String,
+        val index: Int,
+        val subIndex: Int,
+        val title: String,
+        val type: EdsDataType,
+        val access: EdsAccess
+    ) {
+        val address: String
+            get() = "%04X-%02X".format(index, subIndex)
+    }
+
+    /**
+     * EDS 中与设备识别、通信和 DS406 运行状态直接相关的数字对象。
+     * 字符串对象 1008/1009/100A 未列入：其默认值超过 4 字节，需要分段 SDO，当前
+     * CSM100T 调试链路只实现安全、确定的 expedited SDO。设备身份由 1018h 完整覆盖。
+     */
+    val EDS_OBJECTS: List<EdsObject> = listOf(
+        EdsObject("deviceType", 0x1000, 0x00, "设备类型", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("errorRegister", 0x1001, 0x00, "错误寄存器", EdsDataType.U8, EdsAccess.RO),
+        EdsObject("errorCount", 0x1003, 0x00, "历史错误数量", EdsDataType.U8, EdsAccess.RW),
+        EdsObject("latestError", 0x1003, 0x01, "最近错误码", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("error2", 0x1003, 0x02, "历史错误 2", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("error3", 0x1003, 0x03, "历史错误 3", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("error4", 0x1003, 0x04, "历史错误 4", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("syncCobId", 0x1005, 0x00, "SYNC COB-ID", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("commCycle", 0x1006, 0x00, "通信周期(μs)", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("storeCount", 0x1010, 0x00, "保存参数子项数", EdsDataType.U8, EdsAccess.RO),
+        EdsObject("storeAll", 0x1010, 0x01, "保存全部参数", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("restoreCount", 0x1011, 0x00, "恢复默认子项数", EdsDataType.U8, EdsAccess.RO),
+        EdsObject("restoreAll", 0x1011, 0x01, "恢复全部默认值", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("emcyCobId", 0x1014, 0x00, "EMCY COB-ID", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("heartbeat", 0x1017, 0x00, "生产者心跳(ms)", EdsDataType.U16, EdsAccess.RW),
+        EdsObject("identityCount", 0x1018, 0x00, "身份子项数", EdsDataType.U8, EdsAccess.RO),
+        EdsObject("vendorId", 0x1018, 0x01, "厂商 ID", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("productCode", 0x1018, 0x02, "产品代码", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("revision", 0x1018, 0x03, "修订版本", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("serial", 0x1018, 0x04, "设备序列号", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("sdoServerCount", 0x1200, 0x00, "SDO 服务子项数", EdsDataType.U8, EdsAccess.RO),
+        EdsObject("sdoRxCobId", 0x1200, 0x01, "SDO 接收 COB-ID", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("sdoTxCobId", 0x1200, 0x02, "SDO 发送 COB-ID", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("tpdo1ParamCount", 0x1800, 0x00, "TPDO1 参数子项数", EdsDataType.U8, EdsAccess.RO),
+        EdsObject("tpdo1CobId", 0x1800, 0x01, "TPDO1 COB-ID", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("tpdo1Type", 0x1800, 0x02, "TPDO1 传输类型", EdsDataType.U8, EdsAccess.RW),
+        EdsObject("tpdo1Inhibit", 0x1800, 0x03, "TPDO1 禁止时间(100μs)", EdsDataType.U16, EdsAccess.RW),
+        EdsObject("tpdo1Event", 0x1800, 0x05, "TPDO1 事件周期(ms)", EdsDataType.U16, EdsAccess.RW),
+        EdsObject("tpdo2ParamCount", 0x1801, 0x00, "TPDO2 参数子项数", EdsDataType.U8, EdsAccess.RO),
+        EdsObject("tpdo2CobId", 0x1801, 0x01, "TPDO2 COB-ID", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("tpdo2Type", 0x1801, 0x02, "TPDO2 传输类型", EdsDataType.U8, EdsAccess.RW),
+        EdsObject("tpdo2Inhibit", 0x1801, 0x03, "TPDO2 禁止时间(100μs)", EdsDataType.U16, EdsAccess.RW),
+        EdsObject("tpdo2Event", 0x1801, 0x05, "TPDO2 事件周期(ms)", EdsDataType.U16, EdsAccess.RW),
+        EdsObject("tpdo1MapCount", 0x1A00, 0x00, "TPDO1 映射数量", EdsDataType.U8, EdsAccess.RW),
+        EdsObject("tpdo1Map", 0x1A00, 0x01, "TPDO1 映射对象", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("tpdo2MapCount", 0x1A01, 0x00, "TPDO2 映射数量", EdsDataType.U8, EdsAccess.RW),
+        EdsObject("tpdo2Map", 0x1A01, 0x01, "TPDO2 映射对象", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("operatingParameters", 0x6000, 0x00, "运行参数", EdsDataType.U16, EdsAccess.RW),
+        EdsObject("unitsPerRev", 0x6001, 0x00, "每转测量单位", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("totalRange", 0x6002, 0x00, "总测量范围", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("preset", 0x6003, 0x00, "预设值", EdsDataType.U32, EdsAccess.RW),
+        EdsObject("position", 0x6004, 0x00, "当前位置", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("cyclicTimer", 0x6200, 0x00, "循环定时器(ms)", EdsDataType.U16, EdsAccess.RW),
+        EdsObject("operatingStatus", 0x6500, 0x00, "运行状态", EdsDataType.U16, EdsAccess.RO),
+        EdsObject("physicalResolution", 0x6501, 0x00, "物理单圈分辨率", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("revolutions", 0x6502, 0x00, "可区分圈数", EdsDataType.U16, EdsAccess.RO),
+        EdsObject("alarms", 0x6503, 0x00, "报警", EdsDataType.U16, EdsAccess.RO),
+        EdsObject("supportedAlarms", 0x6504, 0x00, "支持的报警", EdsDataType.U16, EdsAccess.RO),
+        EdsObject("warnings", 0x6505, 0x00, "警告", EdsDataType.U16, EdsAccess.RO),
+        EdsObject("supportedWarnings", 0x6506, 0x00, "支持的警告", EdsDataType.U16, EdsAccess.RO),
+        EdsObject("profileVersion", 0x6507, 0x00, "行规/软件版本", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("operatingTime", 0x6508, 0x00, "运行时间", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("offset", 0x6509, 0x00, "偏移值", EdsDataType.I32, EdsAccess.RO),
+        EdsObject("moduleIdCount", 0x650A, 0x00, "模块标识子项数", EdsDataType.U8, EdsAccess.RO),
+        EdsObject("manufacturerOffset", 0x650A, 0x01, "制造商偏移值", EdsDataType.I32, EdsAccess.RO),
+        EdsObject("minPosition", 0x650A, 0x02, "最小位置", EdsDataType.I32, EdsAccess.RO),
+        EdsObject("maxPosition", 0x650A, 0x03, "最大位置", EdsDataType.I32, EdsAccess.RO),
+        EdsObject("profileSerial", 0x650B, 0x00, "DS406 序列号", EdsDataType.U32, EdsAccess.RO),
+        EdsObject("baudRate", 0x3000, 0x00, "CAN 波特率代码", EdsDataType.U8, EdsAccess.RW),
+        EdsObject("nodeId", 0x3001, 0x00, "节点 ID", EdsDataType.U8, EdsAccess.RW)
+    )
+
+    /** 一键诊断读取的最小充分对象集；均来自 EDS。 */
+    val QUICK_DIAGNOSTIC_OBJECTS: List<EdsObject> = listOf(
+        "deviceType", "vendorId", "productCode", "revision", "serial",
+        "errorRegister", "latestError", "nodeId", "baudRate", "position",
+        "operatingStatus", "physicalResolution", "unitsPerRev", "totalRange",
+        "tpdo1Type", "tpdo1Event", "alarms", "warnings"
+    ).map { key -> EDS_OBJECTS.first { it.key == key } }
+
+    /** expedited SDO 应答的结构化解析结果。 */
+    data class SdoReply(
+        val command: Int,
+        val index: Int,
+        val subIndex: Int,
+        val value: Long? = null,
+        val dataLength: Int = 0,
+        val abortCode: Long? = null
+    ) {
+        val isAbort: Boolean get() = abortCode != null
+        val isWriteAck: Boolean get() = command == 0x60
+    }
+
+    /**
+     * 解析 BRT 编码器的 expedited SDO 应答（0x4F/4B/47/43、0x60、0x80）。
+     * 返回 null 表示长度或命令符无效；SDO 中止作为 [SdoReply.abortCode] 返回，便于 UI
+     * 显示具体原因，而不是笼统的“设备返回错误”。
+     */
+    fun parseSdoReply(data: ByteArray): SdoReply? {
+        if (data.size < 8) return null
+        val command = data[0].toInt() and 0xFF
+        val index = (data[1].toInt() and 0xFF) or ((data[2].toInt() and 0xFF) shl 8)
+        val subIndex = data[3].toInt() and 0xFF
+        if (command == 0x80) {
+            return SdoReply(
+                command = command,
+                index = index,
+                subIndex = subIndex,
+                abortCode = littleEndianValue(data, 4)
+            )
+        }
+        if (command == 0x60) return SdoReply(command, index, subIndex)
+        val length = when (command) {
+            0x4F -> 1
+            0x4B -> 2
+            0x47 -> 3
+            0x43 -> 4
+            else -> return null
+        }
+        return SdoReply(
+            command = command,
+            index = index,
+            subIndex = subIndex,
+            value = littleEndianValue(data, length),
+            dataLength = length
+        )
+    }
+
+    private fun littleEndianValue(data: ByteArray, length: Int): Long {
+        var value = 0L
+        repeat(length) { i -> value = value or ((data[4 + i].toLong() and 0xFF) shl (8 * i)) }
+        return value
+    }
+
+    /** 把 EDS 数字值格式化为“十进制 / 十六进制”，有符号 I32 按补码显示。 */
+    fun formatEdsValue(obj: EdsObject, value: Long): String {
+        val decimal = if (obj.type.signed) value.toInt().toString() else value.toString()
+        val hexDigits = obj.type.byteLength * 2
+        val mask = when (obj.type.byteLength) {
+            1 -> 0xFFL
+            2 -> 0xFFFFL
+            else -> 0xFFFFFFFFL
+        }
+        val hex = (value and mask).toString(16).uppercase().padStart(hexDigits, '0')
+        return "$decimal / 0x$hex"
+    }
+
+    /** 常见 CiA301 SDO 中止码中文说明；未知码仍保留十六进制值供查手册。 */
+    fun abortDescription(code: Long): String = when (code and 0xFFFFFFFFL) {
+        0x05030000L -> "切换位未交替"
+        0x05040000L -> "SDO 协议超时"
+        0x05040001L -> "命令符无效或未知"
+        0x06010000L -> "不支持访问该对象"
+        0x06010001L -> "试图读取只写对象"
+        0x06010002L -> "试图写入只读对象"
+        0x06020000L -> "对象字典中不存在该对象"
+        0x06040041L -> "对象不能映射到 PDO"
+        0x06040042L -> "PDO 映射长度超限"
+        0x06070010L -> "数据类型或长度不匹配"
+        0x06090011L -> "子索引不存在"
+        0x06090030L -> "参数值范围超限"
+        0x06090031L -> "参数值过大"
+        0x06090032L -> "参数值过小"
+        0x08000000L -> "一般性错误"
+        0x08000020L -> "数据无法传输或保存"
+        else -> "未知中止码"
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Node-ID 分配
     // ─────────────────────────────────────────────────────────────────────
@@ -188,6 +382,38 @@ object EncoderCanOpenFun {
     /** 读当前位置值（6004-00，U32）：配置工具重启后按新 ID 验证用。 */
     fun buildReadPositionFrame(nodeId: Int): ByteArray =
         CanOpenFun.buildSdoReadFrame(nodeId, OD_POSITION, 0x00)
+
+    /** 按 [EDS_OBJECTS] 定义读取任一数字对象。 */
+    fun buildReadObjectFrame(nodeId: Int, obj: EdsObject): ByteArray =
+        CanOpenFun.buildSdoReadFrame(nodeId, obj.index, obj.subIndex)
+
+    /**
+     * 按 EDS 类型写入 RW 数字对象。
+     * 只读对象在构帧前即拒绝，避免把明显错误的维护操作发送到现场总线。
+     */
+    fun buildWriteObjectFrame(nodeId: Int, obj: EdsObject, value: Long): ByteArray {
+        require(obj.access == EdsAccess.RW) { "${obj.address} ${obj.title} 是只读对象" }
+        return CanOpenFun.buildSdoWriteFrame(
+            nodeId, obj.index, obj.subIndex, obj.type.byteLength, value
+        )
+    }
+
+    /** 触发一次 SYNC（CAN-ID 0x080、0 字节数据），用于验证同步 TPDO2。 */
+    fun buildSyncFrame(): ByteArray = CanOpenFun.wrapCanFrame(0x080, byteArrayOf())
+
+    /** 把波特率代码转换为手册定义；代码 6 = 本项目总线 500 kbit/s。 */
+    fun baudRateDescription(code: Long): String = when (code.toInt()) {
+        0 -> "10 kbit/s"
+        1 -> "20 kbit/s"
+        2 -> "50 kbit/s"
+        3 -> "100 kbit/s"
+        4 -> "125 kbit/s"
+        5 -> "250 kbit/s"
+        6 -> "500 kbit/s（本机要求）"
+        7 -> "800 kbit/s"
+        8 -> "1 Mbit/s"
+        else -> "未知代码 $code"
+    }
 
     // ─────────────────────────────────────────────────────────────────────
     // 符号展开与深度换算

@@ -149,6 +149,86 @@ class EncoderCanOpenFunTest {
         assertEquals(1000L, CanOpenFun.parseSdoResponse(reply))
     }
 
+    @Test
+    fun structuredSdoReplyParsesValueAddressAndAbort() {
+        val readReply = EncoderCanOpenFun.parseSdoReply(
+            byteArrayOf(0x43, 0x04, 0x60, 0x00, 0xE8.toByte(), 0x03, 0x00, 0x00)
+        )
+        assertNotNull(readReply)
+        assertEquals(0x6004, readReply!!.index)
+        assertEquals(0, readReply.subIndex)
+        assertEquals(4, readReply.dataLength)
+        assertEquals(1000L, readReply.value)
+        assertNull(readReply.abortCode)
+
+        // 06010002h = 试图写入只读对象，小端为 02 00 01 06
+        val abort = EncoderCanOpenFun.parseSdoReply(
+            byteArrayOf(0x80.toByte(), 0x01, 0x65, 0x00, 0x02, 0x00, 0x01, 0x06)
+        )
+        assertNotNull(abort)
+        assertEquals(0x06010002L, abort!!.abortCode)
+        assertEquals("试图写入只读对象", EncoderCanOpenFun.abortDescription(abort.abortCode!!))
+    }
+
+    @Test
+    fun structuredSdoReplySupportsAllExpeditedNumericLengths() {
+        val one = EncoderCanOpenFun.parseSdoReply(byteArrayOf(0x4F, 0x01, 0x10, 0, 0xAB.toByte(), 0, 0, 0))!!
+        val two = EncoderCanOpenFun.parseSdoReply(byteArrayOf(0x4B, 0x17, 0x10, 0, 0x34, 0x12, 0, 0))!!
+        val three = EncoderCanOpenFun.parseSdoReply(byteArrayOf(0x47, 0, 0x20, 0, 0x56, 0x34, 0x12, 0))!!
+        assertEquals(0xABL, one.value)
+        assertEquals(0x1234L, two.value)
+        assertEquals(0x123456L, three.value)
+        assertNull(EncoderCanOpenFun.parseSdoReply(byteArrayOf(0x42, 0, 0, 0, 0, 0, 0, 0)))
+    }
+
+    @Test
+    fun edsCatalogContainsBrtIdentityAndDs406CoreObjects() {
+        // 当前 BRT EDS 共 60 个 expedited SDO 可访问的数值叶子对象。
+        assertEquals(60, EncoderCanOpenFun.EDS_OBJECTS.size)
+        assertEquals(
+            "EDS 对象地址不得重复",
+            EncoderCanOpenFun.EDS_OBJECTS.size,
+            EncoderCanOpenFun.EDS_OBJECTS.map { Pair(it.index, it.subIndex) }.distinct().size
+        )
+        fun objectAt(index: Int, sub: Int) = EncoderCanOpenFun.EDS_OBJECTS.single {
+            it.index == index && it.subIndex == sub
+        }
+        assertEquals(EncoderCanOpenFun.EdsDataType.U32, objectAt(0x1018, 1).type)
+        assertEquals(EncoderCanOpenFun.EdsAccess.RO, objectAt(0x6004, 0).access)
+        assertEquals(EncoderCanOpenFun.EdsAccess.RW, objectAt(0x1800, 5).access)
+        assertEquals(EncoderCanOpenFun.EdsDataType.I32, objectAt(0x6509, 0).type)
+        assertEquals("500 kbit/s（本机要求）", EncoderCanOpenFun.baudRateDescription(6))
+    }
+
+    @Test
+    fun edsObjectFramesUseDeclaredWidthAndRejectReadOnlyWrite() {
+        val heartbeat = EncoderCanOpenFun.EDS_OBJECTS.single { it.key == "heartbeat" }
+        assertSdoBytes(
+            EncoderCanOpenFun.buildWriteObjectFrame(21, heartbeat, 1000), 21,
+            0x2B, 0x17, 0x10, 0x00, 0xE8, 0x03, 0x00, 0x00
+        )
+        val position = EncoderCanOpenFun.EDS_OBJECTS.single { it.key == "position" }
+        try {
+            EncoderCanOpenFun.buildWriteObjectFrame(21, position, 0)
+            throw AssertionError("只读 EDS 对象不应允许构建写帧")
+        } catch (_: IllegalArgumentException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun syncFrameUsesCobId80AndNoData() {
+        val (canId, data) = unwrap(EncoderCanOpenFun.buildSyncFrame())
+        assertEquals(0x080, canId)
+        assertEquals(0, data.size)
+    }
+
+    @Test
+    fun signedEdsValueFormattingUsesTwosComplement() {
+        val offset = EncoderCanOpenFun.EDS_OBJECTS.single { it.key == "offset" }
+        assertEquals("-1 / 0xFFFFFFFF", EncoderCanOpenFun.formatEdsValue(offset, 0xFFFFFFFFL))
+    }
+
     // ── 符号展开 ─────────────────────────────────────────────────────────────
 
     @Test

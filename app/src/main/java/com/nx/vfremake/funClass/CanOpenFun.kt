@@ -681,6 +681,14 @@ object SdoReplyWaiters {
     private val waiters = ConcurrentHashMap<Int, CompletableDeferred<ByteArray>>()
 
     /**
+     * 串行化完整“注册 waiter → 发送 → 等应答”事务。
+     * CanOpenFun 的发送 Mutex 只覆盖发帧瞬间；若两个维护功能同时对同一节点发 SDO，
+     * 仅靠发送串行仍可能让后注册 waiter 覆盖前一个。调试页与配号页已有 UI 互斥，
+     * 此锁作为协议层兜底，并保护未来调用者。
+     */
+    private val requestMutex = Mutex()
+
+    /**
      * 接收路由调用：若有 waiter 等待该 canId 的 SDO 应答，完成它并消费该帧。
      *
      * @param canId   应答帧 CAN-ID（0x580 + nodeId）
@@ -702,16 +710,17 @@ object SdoReplyWaiters {
      * @param timeoutMs   等待超时
      * @return 8 字节 SDO 应答数据段；超时返回 null（调用方应报错并中止流程）
      */
-    suspend fun sendAndAwait(frame: ByteArray, replyCanId: Int, timeoutMs: Long = 1000L): ByteArray? {
-        val d = CompletableDeferred<ByteArray>()
-        waiters[replyCanId] = d
-        return try {
-            CanOpenFun.sendFrameSequenced(frame)
-            withTimeoutOrNull(timeoutMs) { d.await() }
-        } finally {
-            waiters.remove(replyCanId, d)
+    suspend fun sendAndAwait(frame: ByteArray, replyCanId: Int, timeoutMs: Long = 1000L): ByteArray? =
+        requestMutex.withLock {
+            val d = CompletableDeferred<ByteArray>()
+            waiters[replyCanId] = d
+            try {
+                CanOpenFun.sendFrameSequenced(frame)
+                withTimeoutOrNull(timeoutMs) { d.await() }
+            } finally {
+                waiters.remove(replyCanId, d)
+            }
         }
-    }
 
     /** 是否有 waiter 在等待该 canId（单元测试用）。 */
     fun hasWaiter(canId: Int): Boolean = waiters.containsKey(canId)

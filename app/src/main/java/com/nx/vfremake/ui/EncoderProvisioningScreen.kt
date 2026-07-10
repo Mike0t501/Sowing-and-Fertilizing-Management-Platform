@@ -100,11 +100,19 @@ fun EncoderProvisioningScreen(
 
     suspend fun log(msg: String) = withContext(Dispatchers.Main) { stepLog.add(msg) }
 
-    /** 校验一条 SDO 应答：null=超时；CS 不符=SDO 错误。返回错误文案或 null（通过）。 */
-    fun checkReply(reply: ByteArray?, expectCs: Int): String? = when {
+    /** 校验一条 SDO 应答：同时核对 CS、索引和子索引，防止同节点的迟到应答串步。 */
+    fun checkReply(
+        reply: ByteArray?,
+        expectCs: Int,
+        expectIndex: Int,
+        expectSubIndex: Int
+    ): String? = when {
         reply == null -> "无应答（超时）"
+        reply.size < 8 -> "应答长度不足 8 字节"
         (reply[0].toInt() and 0xFF) == 0x80 -> "设备返回 SDO 错误"
         (reply[0].toInt() and 0xFF) != expectCs -> "应答命令符异常"
+        ((reply[1].toInt() and 0xFF) or ((reply[2].toInt() and 0xFF) shl 8)) != expectIndex ||
+            (reply[3].toInt() and 0xFF) != expectSubIndex -> "应答对象地址不匹配"
         else -> null
     }
 
@@ -131,7 +139,7 @@ fun EncoderProvisioningScreen(
                     EncoderCanOpenFun.buildReadResolutionFrame(oldId),
                     replyOldId, PROVISION_STEP_TIMEOUT_MS
                 )
-                checkReply(r1, 0x43)?.let {
+                checkReply(r1, 0x43, EncoderCanOpenFun.OD_PHYS_RESOLUTION, 0x00)?.let {
                     log("✗ $it。请确认：编码器已上电、总线上只有这一台未配置设备")
                     return@launch
                 }
@@ -140,7 +148,7 @@ fun EncoderProvisioningScreen(
                     log("✗ 分辨率解析失败")
                     return@launch
                 }
-                readResolution = res
+                withContext(Dispatchers.Main) { readResolution = res }
                 log("✓ 设备在线，单圈分辨率 = $res")
 
                 log("② 写节点 ID 3001h ← $targetId…")
@@ -150,7 +158,7 @@ fun EncoderProvisioningScreen(
                     EncoderCanOpenFun.buildSetNodeIdFrame(oldId, targetId),
                     replyOldId, PROVISION_STEP_TIMEOUT_MS
                 )
-                checkReply(r2, 0x60)?.let { log("✗ 写节点 ID 失败：$it"); return@launch }
+                checkReply(r2, 0x60, EncoderCanOpenFun.OD_NODE_ID, 0x00)?.let { log("✗ 写节点 ID 失败：$it"); return@launch }
                 log("✓ 节点 ID 已写入（重启前仍以旧 ID 应答）")
 
                 log("③ 写 TPDO 发送间隔 1800-05 ← ${EncoderCanOpenFun.TPDO1_EVENT_TIME_MS}ms…")
@@ -158,7 +166,7 @@ fun EncoderProvisioningScreen(
                     EncoderCanOpenFun.buildSetEventTimeFrame(oldId),
                     replyOldId, PROVISION_STEP_TIMEOUT_MS
                 )
-                checkReply(r3, 0x60)?.let { log("✗ 写发送间隔失败：$it"); return@launch }
+                checkReply(r3, 0x60, EncoderCanOpenFun.OD_TPDO1_PARAM, EncoderCanOpenFun.SUB_EVENT_TIME)?.let { log("✗ 写发送间隔失败：$it"); return@launch }
                 log("✓ 发送间隔已写入")
 
                 log("④ 保存参数 1010h ← \"save\"…")
@@ -166,7 +174,7 @@ fun EncoderProvisioningScreen(
                     EncoderCanOpenFun.buildSaveParamsFrame(oldId),
                     replyOldId, PROVISION_STEP_TIMEOUT_MS
                 )
-                checkReply(r4, 0x60)?.let { log("✗ 保存失败：$it（参数未持久化，请重试）"); return@launch }
+                checkReply(r4, 0x60, EncoderCanOpenFun.OD_STORE_PARAMS, EncoderCanOpenFun.SUB_STORE)?.let { log("✗ 保存失败：$it（参数未持久化，请重试）"); return@launch }
                 log("✓ 保存成功")
                 log("请断电重启编码器电源，然后点击「⑤ 验证」")
                 withContext(Dispatchers.Main) { configDone = true }
@@ -190,7 +198,7 @@ fun EncoderProvisioningScreen(
                     EncoderCanOpenFun.buildReadPositionFrame(targetId),
                     0x580 + targetId, PROVISION_STEP_TIMEOUT_MS
                 )
-                checkReply(r, 0x43)?.let {
+                checkReply(r, 0x43, EncoderCanOpenFun.OD_POSITION, 0x00)?.let {
                     log("✗ 验证失败：$it。请确认编码器已断电重启")
                     return@launch
                 }
@@ -230,7 +238,7 @@ fun EncoderProvisioningScreen(
     }
 
     Scaffold(
-        topBar = { MyTopBar("编码器配置工具（维护）", onBack) }
+        topBar = { MyTopBar("BRT 编码器调试工具", onBack) }
     ) { paddingValues ->
         Column(
             modifier = Modifier
@@ -240,6 +248,18 @@ fun EncoderProvisioningScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            EncoderDiagnosticsPanel(
+                viewModel = viewModel,
+                externalBusy = busy,
+                onExternalBusyChange = { busy = it }
+            )
+
+            Text(
+                "首次上机配置（逐台配号）",
+                fontSize = 18.sp,
+                color = Color(0xFF0D47A1)
+            )
+
             // 醒目警示
             Card(
                 backgroundColor = Color(0xFFFFF3CD),
