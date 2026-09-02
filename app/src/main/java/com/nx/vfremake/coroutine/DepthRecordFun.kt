@@ -90,6 +90,10 @@ class DepthRecordFun {
             val t0 = SystemClock.elapsedRealtime()
             try {
                 fileWriter = DocuAndManageFun().createExperimentCsvWriter(context, fileName)
+                // 写出 UTF-8 BOM：test_stage 列含中文（手动记录固定为"手动"，一键测试为
+                // "运行 20.0→40.0""停留""超时"等）。文件是 UTF-8 无 BOM，Excel 在中文
+                // Windows 上默认按 GBK 打开会乱码（"手动"→"鎵嬪姩"）；BOM 让 Excel 正确识别 UTF-8。
+                fileWriter.write(0xFEFF)  // BOM 字符 U+FEFF，UTF-8 写出为 EF BB BF
                 // 先写出表头行
                 fileWriter.append(header.joinToString(",") + "\n")
                 // 开始写出
