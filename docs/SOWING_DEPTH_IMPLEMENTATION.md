@@ -44,6 +44,8 @@
 
 6. **`SowingDepthScreen` 与 `DepthCalibrationScreen` 均各自启动 `CanReceiveCoroutine` + `SowingDepthCoroutine`**（各自的 `DisposableEffect`），离开界面时 `onDispose` 停止。两界面之间切换会重新创建协程实例，已通过时间戳离线检测的 5s 窗口避免冷启动误判。
 
+7. **YZ EDS 审查（2026-07-10）**：`YZ_MOTOR_SN2.eds` 共 104 个可 expedited SDO 访问的数字 VAR/子对象，已逐项录入 `ServoCanOpenFun.EDS_OBJECTS`。TPDO1 的 6 字节 `[6064h实际位置 I32][6041h状态字 U16]` 解析正确。已修正四类不一致：① 已配置伺服的 SDO 回复同时投递 `SdoReplyWaiters`，调试请求不再超时；② `6041h` Bit14/15 仅作厂商位，报警改用 Bit3 Fault / Bit11 Internal limit；③ `6040h=010Fh` 明确为 Halt，真正 Quick Stop 使用 `000Bh`；④ 删除 EDS 不存在的 `261Fh/2620h` 写入，只保留 App 软件限位。`6084h` 也未列入 EDS，因既有现场减速行为暂保留兼容写入，并在伺服调试工具提供只读探测。EDS 身份默认值为 Vendor=817、Product=1、Revision=256，电子齿轮默认分子/分母为 32768/8192。
+
 ### 当前已知待开发项
 
 - `DepthCalibrationScreen` 步骤2 当前只有**直接测量模式**（5点等分，人工测量深度值）。下一步新增**间接测量模式**（挡块法），见第七节详细规格。
@@ -92,15 +94,16 @@
 | 状态字 | 0x6041-00 | 2字节 | RM | 状态反馈 |
 | 工作模式 | 0x6060-00 | 1字节 | RWM | 1=位置, 3=速度, 6=找原点, 7=插补 |
 | 实际位置 | 0x6064-00 | 4字节(有符号) | RM | 编码器计数值 |
+| 实际速度 | 0x606C-00 | 4字节(有符号) | RM | TPDO3 默认映射对象之一 |
+| 实际电流 | 0x6078-00 | 2字节(有符号) | RM | 电流反馈 |
 | 目标位置缓存 | 0x607A-00 | 4字节(有符号) | RW | 目标位置 |
 | 梯形速度 | 0x6081-00 | 4字节 | RW | 位置模式最大速度，单位RPM，范围0~3000 |
 | 电机加速度 | 0x6083-00 | 4字节 | RW | 单位(RPM/s)，<60000用内部曲线 |
 | 速度模式速度 | 0x60FF-00 | 4字节(有符号) | RWM | 速度模式目标转速，范围-3000~3000 |
 | Modbus使能 | 0x2600-00 | 2字节 | RW | 0=禁止, 1=使能 |
 | 电子齿轮分子 | 0x260A-00 | 2字节 | RW | 默认32768 |
-| 电子齿轮分母 | 0x260B-00 | 2字节 | RW | 默认1 |
-| 位置限位最小值 | 0x261F-00 | 4字节(有符号) | RW | 限位功能需开启 |
-| 位置限位最大值 | 0x2620-00 | 4字节(有符号) | RW | 限位功能需开启 |
+| 电子齿轮分母 | 0x260B-00 | 2字节 | RW | EDS 默认8192 |
+| 厂商错误码 | 0x260E-00 | 2字节 | RO | EDS 声明的错误码对象 |
 | 参数保存标志 | 0x2614-00 | 2字节 | RW | 写1=保存中, 读到2=保存完毕 |
 | 特殊功能 | 0x2619-00 | 2字节 | RW | 0=脉冲+方向 |
 | 心跳产生间隔 | 0x1017-00 | 2字节 | RWM | 单位ms, 0=不产生 |
@@ -108,14 +111,14 @@
 ### 2.4 控制字 (0x6040) 位定义
 ```
 Bit0: 启动（置1后外部脉冲控制无效）
-Bit1: 允许急停
-Bit2: 电压输出
+Bit1: Enable voltage
+Bit2: Quick stop（清零触发 DS402 Quick Stop）
 Bit3: 允许操作
 Bit4: 执行新设置点（写1后运行到新位置，自动清零）
 Bit5: 位置立即生效
 Bit6: 0=绝对位置, 1=相对位置
 Bit7: 故障复位
-Bit8: 停止（值为1时电机急停但仍自锁）
+Bit8: Halt（位置/速度模式受控暂停，不等同于 Quick Stop）
 ```
 
 常用控制字值：
@@ -123,37 +126,38 @@ Bit8: 停止（值为1时电机急停但仍自锁）
 - `0x002F`: 绝对位置 + 新位置立即执行
 - `0x004F`: 相对位置控制模式
 - `0x005F`: 相对位置 + 执行新位置点
-- `0x010F`: 停止
+- `0x000B`: DS402 Quick Stop（从 0x000F 清 Bit2）
+- `0x010F`: Halt（Bit8=1）
 
 ### 2.5 状态字 (0x6041) 位定义
 ```
+Bit0: Ready to switch on
+Bit1: Switched on
+Bit2: Operation enabled
+Bit3: Fault
+Bit5: Quick stop（1=未激活）
+Bit6: Switch on disabled
+Bit7: Warning
 Bit10: 目标达到（位置模式=到达目标位置，速度模式=到达给定速度）
-Bit12: 找原点完成
-Bit14: 到达正限位
-Bit15: 到达负限位
+Bit11: Internal limit active
+Bit12~13: 工作模式相关（位置模式 Bit12=Set-point acknowledge）
+Bit14~15: 厂商自定义；YZ EDS 未给出正/负限位定义，禁止据此判断限位方向
 ```
 
 ### 2.6 编码器参数
 - 15位绝对编码器，一圈 = 32768 脉冲
-- 电子齿轮默认：分子32768, 分母1（即1:1映射编码器原始值）
+- EDS 电子齿轮默认：分子32768, 分母8192
 
-### 2.7 限位功能开启步骤（通过SDO）
-```
-步骤1: 写 电机加速度(0x6083) = 1      // 开启限位功能
-步骤2: 写 弱磁角度(0x2604) = 131
-步骤3: 写 Modbus使能(0x2600) = 506    // 特殊保存命令
-步骤4: 重新上电
+### 2.7 限位策略
 
-步骤5: 写 限位最小值(0x261F) = min_value  // 有符号32位
-步骤6: 写 限位最大值(0x2620) = max_value  // 有符号32位
-步骤7: 写 参数保存标志(0x2614) = 1
-步骤8: 重新上电
-```
+早期草案曾把 `261Fh/2620h` 当作本机硬件限位寄存器，但它们不在
+`YZ_MOTOR_SN2.eds` 中，也没有经 SDO ACK 验证，现已撤销该流程。当前只记录 App
+软件限位，位置命令下发前使用 `coerceIn(minOf(limitMin, limitMax), maxOf(...))` 限幅。
 
 ### 2.8 SDO 绝对位置控制流程
 ```kotlin
 // 1. 使能驱动器
-SDO_Write(0x6040, 0x00, 2, 0x000F)  // 控制字=启动+电压+急停+操作
+SDO_Write(0x6040, 0x00, 2, 0x000F)  // Enable Operation
 
 // 2. 设置位置模式
 SDO_Write(0x6060, 0x00, 1, 0x01)    // 工作模式=位置模式
@@ -165,11 +169,12 @@ position = SDO_Read(0x6064, 0x00)    // 实际位置
 SDO_Write(0x6081, 0x00, 4, 1000)    // 梯形速度=1000RPM
 SDO_Write(0x6083, 0x00, 4, 20000)   // 加速度=20000RPM/s
 
-// 5. 设置绝对位置+立即执行
-SDO_Write(0x6040, 0x00, 2, 0x002F)  // 控制字=绝对+立即执行
-
-// 6. 写入目标位置
+// 5. 写入目标位置
 SDO_Write(0x607A, 0x00, 4, target)  // 目标位置
+
+// 6. Bit4 必须 0→1 跳变：先清 new set-point，再置位并立即执行
+SDO_Write(0x6040, 0x00, 2, 0x000F)
+SDO_Write(0x6040, 0x00, 2, 0x002F)
 
 // 7. 读状态字判断是否到达
 status = SDO_Read(0x6041, 0x00)
@@ -187,8 +192,11 @@ SDO_Write(0x60FF, 0x00, 4, speed)   // 例如 500 或 -500
 // 3. 启动
 SDO_Write(0x6040, 0x00, 2, 0x000F)
 
-// 4. 停止
-SDO_Write(0x6040, 0x00, 2, 0x010F)  // Bit8=1 急停
+// 4. 正常松开：先将速度归零；当前实现重复发送并在减速后 Disable Operation
+SDO_Write(0x60FF, 0x00, 4, 0)
+
+// 安全 Quick Stop：从 000Fh 清 Bit2
+SDO_Write(0x6040, 0x00, 2, 0x000B)
 ```
 
 ### 2.10 PDO（过程数据对象）- 用于实时控制
@@ -358,9 +366,9 @@ object CanOpenFun {
         buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000F)  // 启动
     )
     
-    /** 急停 */
+    /** DS402 Quick Stop */
     fun buildEmergencyStop(nodeId: Int) = 
-        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x010F)
+        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000B)
     
     /** 读取当前位置 */
     fun buildReadPosition(nodeId: Int) = 
@@ -370,12 +378,7 @@ object CanOpenFun {
     fun buildReadStatus(nodeId: Int) = 
         buildSdoReadFrame(nodeId, 0x6041, 0x00)
     
-    /** 写入限位值 */
-    fun buildSetLimits(nodeId: Int, minPos: Int, maxPos: Int): List<ByteArray> = listOf(
-        buildSdoWriteFrame(nodeId, 0x261F, 0x00, 4, minPos.toLong()),
-        buildSdoWriteFrame(nodeId, 0x2620, 0x00, 4, maxPos.toLong()),
-        buildSdoWriteFrame(nodeId, 0x2614, 0x00, 2, 1)  // 保存参数
-    )
+    // 限位只保存在 App 状态；YZ EDS 未声明 261Fh/2620h，不构造未知对象写入帧。
 
     // ============ 心跳 ============
     
@@ -598,8 +601,8 @@ SDO 是请求-回复模式。发送一条SDO写入后，需要等待回复（0x5
 
 ### 6.2 软件限位 vs 硬件限位
 - **软件限位**：在发送位置指令前，先调用 `isPositionSafe()` 检查
-- **硬件限位**：通过SDO写入电机的限位寄存器（0x261F/0x2620），电机内部也会限制
-- **两层都要做**，软件限位是第一道防线，硬件限位是保底
+- **EDS 结论**：`YZ_MOTOR_SN2.eds` 没有 `0x261F/0x2620`，不得把它们当成本机已确认的硬件限位寄存器
+- 当前实现只保存 App 软件限位，并在目标位置下发前执行限幅；若要启用驱动器硬限位，必须先取得本机厂商对象定义并验证 SDO ACK
 
 ### 6.3 点动控制实现
 点动使用速度模式。按住按钮时发送速度命令，松开按钮时发送速度=0或急停命令。
@@ -773,3 +776,129 @@ Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
 | `coroutine/SowingDepthCoroutine.kt` | **无需改动** |
 | `funClass/CanOpenFun.kt` | **无需改动**（点动帧复用） |
 | `funClass/SowingDepthFun.kt` | **无需改动**（`linearFit` 复用） |
+
+---
+
+## 八、摆臂编码器实测深度反馈子系统（2026-07 已实现）
+
+### 8.1 背景与范围
+
+现有深度控制是"半开环"的：伺服反馈量是电机自身编码器位置，无法反映真实入土深度。
+每行压种轮处加装机械改造：**带弹簧张力的摆臂式压种轮，摆臂转轴处安装布瑞特单圈绝对值
+编码器（CANopen DS406 行规）**。摆臂角度与实际播深单调相关，标定拟合后可实时测量真实播深。
+
+本子系统只做**测量、标定、显示、记录**四件事。**闭环修正明确不做**（实测深度不写回
+`targetDepth`、不参与 Phase 4 决策）；将来做闭环时读 `EncoderCalibration.measuredDepth` 即可。
+
+协议手册：`docs/005 CANOPEN说明书通信协议 V2.6.pdf`（布瑞特，DS301+DS406）。
+
+### 8.2 Node-ID 分配表
+
+| 设备 | Node-ID | TPDO1 | SDO 请求/应答 | Boot-up/心跳 |
+|------|---------|-------|---------------|--------------|
+| 施肥电机（自有协议） | 1~8 | —（CAN-ID 0x0027 段） | — | — |
+| 深度伺服（DS402） | 11~18 | 0x18B~0x192 | 0x60B~0x612 / 0x58B~0x592 | 0x70B~0x712 |
+| **摆臂编码器（DS406）** | **21~28（= 21+motorIndex，与伺服一一对应）** | 0x195~0x19C | 0x615~0x61C / 0x595~0x59C | 0x715~0x71C |
+
+编码器出厂 Node-ID=1、波特率 500K（与总线一致，**禁改**）。出厂 TPDO 0x181 落在
+TPDO 路由段但不在任何白名单内，会跌落施肥解析造成数据污染——**必须先经配置工具
+（§8.6）分配 ID 后才能上总线**。
+
+### 8.3 帧路由（CanReceiveCoroutine.dispatchFrame）
+
+```
+CAN 帧 → classifyCanOpen(canId)（纯函数，段识别映射与旧版逐字节一致）
+  ├─ 非 CANopen 段（如 0x0027）────────────────→ 施肥解析（完全未改动）
+  └─ CANopen 段（SDO回复/TPDO1/心跳/TPDO2/3）
+       ├─ nodeId ∈ 伺服白名单（motors[].nodeId）──→ 伺服处理（完全未改动，优先级最高）
+       ├─ nodeId ∈ 编码器白名单（encoders[].nodeId）
+       │    ├─ TPDO1（4字节）→ onEncoderTpdo1：符号展开→限幅→滑动均值→拟合换算
+       │    ├─ SDO 应答     → onEncoderSdoResponse：叫醒 SdoReplyWaiters + 刷新在线
+       │    └─ Boot-up/心跳/TPDO2/3 → 吸收（无业务处理，防跌落施肥）
+       ├─ SDO 应答且 SdoReplyWaiters 有 waiter（如出厂 ID=1 的 0x581）→ 消费，不落施肥
+       └─ 其余 ─────────────────────────────────→ 施肥解析（容错，与旧版一致）
+```
+
+关键实现文件：
+
+| 文件 | 职责 |
+|------|------|
+| `funClass/EncoderCanOpenFun.kt` | 协议层纯函数：TPDO 4 字节解析、EDS 60 个数值对象目录、结构化 SDO/abort 解析、SDO 语义化构帧、NMT/SYNC 调试支持、`toSignedPosition` 符号展开、`EncoderFilter` 两级滤波、`depthFromEncoder` 唯一换算入口 |
+| `funClass/CanOpenFun.kt` → `SdoReplyWaiters` | 请求-应答等待器：先注册后发送、按应答 canId 精确匹配（覆盖改 ID 后旧 ID 应答场景）、超时返回 null |
+| `data/EncoderFeedbackData.kt` | `EncoderCalibration`（持久化：nodeId/zeroSet/分辨率/标定点/fit；运行时：raw/filtered/measuredDepth/isOnline/lastHeardMs）+ `EncoderFeedbackState` |
+| `ViewModelAndPublic.kt` | `encoderFeedbackStateRef`（AtomicReference 原子真源）+ CAS 更新 + LiveData 投影；后台读取一律 `currentEncoderFeedbackState()` |
+| `funClass/MySharedPreFun.kt` | `enc_N_*` 键持久化（同 `sowing_depth_prefs` 文件） |
+| `coroutine/CanReceiveCoroutine.kt` | 路由分支、`encoderLastSeen` 看门狗（2000ms 与伺服同阈值）、测试模式模拟数据 |
+
+### 8.4 测量链与滤波
+
+```
+TPDO1 原始值（U32） → toSignedPosition（单圈回绕符号展开，需分辨率，配置工具读 6501h 持久化）
+                   → 限幅野值剔除（单帧跳变 > 分辨率5% 丢弃；连续 3 帧超限视为真实快速变化，接受并重建窗口）
+                   → 窗口 8 滑动均值（50ms × 8 = 400ms 平滑窗，摊平压种轮过垄沟/残茬弹跳）
+                   → depth_mm = fitA × filteredPos + fitB（与伺服 fittingCoefficient 体系同构；
+                     将来升级二阶多项式只改 depthFromEncoder 与拟合处）
+```
+
+在线判定：不启用编码器心跳，沿用 `servoLastSeen` 模式——TPDO/SDO 应答到达刷新
+`encoderLastSeen`，超 2000ms 置离线。带宽预算：配置工具把 1800-05 写为 **50ms**
+（出厂 20ms × 8 台 ≈ 400 帧/s 会逼近 115200bps 桥容量）；软件不假设固定上报周期。
+
+### 8.5 标定流程（DepthCalibrationScreen 步骤 3）
+
+1. **零位预设**：机具落基准态（压种轮触平整地面）→ 置零 → SDO 写 `6003-00=0`
+   → 等 0x60 应答 → 写 `1010-01="save"` → 等应答 → 提示断电重启。每步经
+   `SdoReplyWaiters` 超时报错中止；save 帧在序列最后（前缀安全）。成功后 `zeroSet=true` 持久化。
+2. **多点拟合**：机具压到某实际深度稳定后，卡尺量真实播深输入 → 记录当前【滤波后】
+   编码值配对（2~5 点）→ 共用 `buildLinearFit`（`data/SowingDepthData.kt`）最小二乘
+   → `fitValid=true`。支持删点/清空重标。
+3. 标定页实时显示原始值/滤波值/换算深度，便于现场判断信号是否正常。
+
+### 8.6 软件内调试与一次性配置工具（EncoderProvisioningScreen，设置页入口）
+
+页面上半部分的 `EncoderDiagnosticsPanel` 提供：
+
+- 扫描出厂 ID 1、工作 ID 21~28 和用户指定 ID；
+- 一键读取身份、错误、通信、位置、分辨率、报警/警告等 EDS 快照，并校验 BRT 身份；
+- 浏览 EDS 全部 60 个 expedited SDO 数值对象，读取 RO/RW、二次确认写 RW、显式保存；
+- 解析并显示常见 CiA301 SDO 中止码，不再只报“设备错误”；
+- NMT 启动/停止/预运行/复位节点/复位通信、SYNC 与 `6004h` 连续采样统计；
+- `3000h` 波特率和 `3001h` Node-ID 通用写保护（后者只走下方专用配号流程）。
+
+EDS 的 `1008h/1009h/100Ah` 为可见字符串并可能需要分段 SDO，当前不在数值控制台开放；
+设备身份由 `1018h` 四个数值子项核验。
+
+推荐现场调试顺序：确认 500 kbit/s 与接线 → 扫描 ID 1/21~28 → 一键诊断并核对
+Vendor `0x0000FFFF`、Product `0x00000010`、波特率代码 6 → NMT 启动 → 连续采样
+`6004h` 并转动编码器检查方向/量程/回绕 → 按需读取或二次确认写入 EDS RW 对象 →
+显式保存。扫描失败优先检查供电、CAN-H/L、终端电阻、串口和当前 Node-ID；位置可用但
+App 离线时检查 TPDO1 COB-ID、映射与 NMT 状态。
+
+下半部分保留新设备的一次性配置流程。⚠ **同一时刻总线上只能接入一台未配置的编码器
+（出厂 ID=1）**。逐台：
+
+1. 读 `6501-00` 验证在线并暂存物理分辨率
+2. 写 `3001-00` = 目标 ID（21+行号）——**应答仍按旧 ID（0x580+旧ID）匹配**（手册明确）
+3. 写 `1800-05` = 50（0x32，U16）
+4. 写 `1010-01` = "save"（`23 10 10 01 73 61 76 65`，序列最后）
+5. 断电重启 → 按新 ID 读 `6004-00` 验证 → 成功才把 nodeId/分辨率持久化到该行
+
+### 8.7 显示与记录
+
+- `SowingDepthScreen` 每行卡片："实测深度"与当前/目标深度并列；离线显示"离线"、
+  未标定显示"未标定"，**不显示 0 值**（0 是合法深度，会误导操作员）。
+- CSV（`DepthRecordFun`，手动 `depthRec_` 与一键测试 `depthTest_` 共用）：表头尾部追加
+  `measured_depth_mm / enc_position / enc_online` 3 列，旧 9 列不改动不重排（向后兼容）；
+  离线/未标定写空串而非 0。
+- 测试模式（`testMode_Switch`）：编码器 8 路置在线 + 200ms 模拟数据（跟随伺服
+  targetDepth ± 正弦波动），无硬件时 UI 可开发调试。
+
+### 8.8 单元测试
+
+`EncoderCanOpenFunTest.kt`：TPDO 4 字节解析、EDS 60 个数值地址/核心属性、结构化
+expedited SDO 与 abort、RO 写保护、SYNC、手册示例帧逐字节核对（读 6004 应答
+`43 04 60 00 E8 03 00 00`→1000、save/1800-05/3001 帧）、滤波、符号展开、最小二乘。
+`CanFrameRoutingTest.kt`：编码器帧不落施肥、伺服/施肥/未配置节点路由与改动前逐字节一致、
+SdoReplyWaiters 消费语义。
+
+变更摘要详见 `docs/ENCODER_FEEDBACK_CHANGES.md`。

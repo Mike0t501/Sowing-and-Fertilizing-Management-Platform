@@ -46,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -66,15 +67,20 @@ import androidx.compose.ui.unit.sp
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.CalibrationMode
+import com.nx.vfremake.data.EncoderCalibration
+import com.nx.vfremake.data.EncoderFeedbackState
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.buildLinearFit
 import com.nx.vfremake.data.deepDirection
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
 import com.nx.vfremake.coroutine.SowingDepthCoroutine
 import com.nx.vfremake.funClass.CanOpenFun
+import com.nx.vfremake.funClass.EncoderCanOpenFun
 import com.nx.vfremake.funClass.JogSession
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.funClass.SdoReplyWaiters
 import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mSerialPortCAN
 import kotlinx.coroutines.CancellationException
@@ -90,7 +96,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
-import kotlin.math.pow
 
 /** 停车校验容差（编码器脉冲）：两次采样位置差超过此值视为电机仍在运动 */
 private const val STOP_VERIFY_TOLERANCE_PULSE = 200
@@ -306,30 +311,10 @@ private suspend fun runJogCommandConsumer(
 }
 
 /**
- * 最小二乘线性拟合 depth_mm = a * encoderPos + b
- *
- * @param points List of (encoderPos, depthMm) pairs
- * @return Pair(a, b) or null if < 2 valid points or degenerate data
- */
-private fun buildLinearFit(points: List<Pair<Int, Float>>): Pair<Float, Float>? {
-    val valid = points.filter { it.second > 0f }
-    if (valid.size < 2) return null
-    val n = valid.size.toDouble()
-    val sumX  = valid.sumOf { it.first.toDouble() }
-    val sumY  = valid.sumOf { it.second.toDouble() }
-    val sumXX = valid.sumOf { it.first.toDouble().pow(2) }
-    val sumXY = valid.sumOf { it.first.toDouble() * it.second.toDouble() }
-    val denom = n * sumXX - sumX * sumX
-    if (kotlin.math.abs(denom) < 1e-10) return null
-    val a = ((n * sumXY - sumX * sumY) / denom).toFloat()
-    val b = ((sumY - a * sumX) / n).toFloat()
-    return Pair(a, b)
-}
-
-/**
  * 播种深度电机校准向导
  *
- * 步骤 1：点动电机到最深/最浅位置，记录编码器限位值，写入电机软件限位寄存器。
+ * 步骤 1：点动电机到最深/最浅位置，记录编码器限位值并保存为 App 软件限位。
+ *         YZ_MOTOR_SN2.eds 未声明 261Fh/2620h，不向未知厂商对象写入伪“硬限位”。
  * 步骤 2：自动计算 5 个等分编码器位置，移动到每个位置后由用户填入实际测量深度，
  *         计算线性拟合系数，保存到 SharedPreferences。
  *
@@ -405,6 +390,23 @@ fun DepthCalibrationScreen(
         if (!cal.limitsSet || cal.limitMin == cal.limitMax) emptyList()
         else (0..4).map { i -> cal.limitMin + (cal.limitMax - cal.limitMin) * i / 4 }
     }
+
+    // ── 步骤 3 状态（摆臂编码器标定，独立于伺服限位/拟合）────────────────────
+    val encState by viewModel.encoderFeedbackState.observeAsState(EncoderFeedbackState())
+    val encCal = encState.encoders.getOrElse(motorIndex) { EncoderCalibration(motorIndex) }
+
+    var zeroBusy by remember { mutableStateOf(false) }
+    val showZeroConfirm = remember { mutableStateOf(false) }
+    var encDepthInput by remember { mutableStateOf("") }
+    // 已记录标定点 [滤波后编码值, 实测深度mm]；保存后随持久化值重建
+    val encPoints = remember(motorIndex, encCal.calibrationPoints) {
+        mutableStateListOf(*encCal.calibrationPoints.toTypedArray())
+    }
+    var encFitResult by remember(encCal.fitA, encCal.fitB, encCal.fitValid) {
+        mutableStateOf(if (encCal.fitValid) Pair(encCal.fitA, encCal.fitB) else null)
+    }
+    var encFitErrorMsg by remember { mutableStateOf("") }
+    val showEncSaveConfirm = remember { mutableStateOf(false) }
 
     // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
@@ -496,6 +498,91 @@ fun DepthCalibrationScreen(
             MySharedPreFun(context).saveSowingDepthCalibration(updated)
         }
         showSaveConfirm.value = false
+    }
+
+    // ── 步骤 3 辅助函数（摆臂编码器）─────────────────────────────────────────
+
+    /**
+     * 零位预设：机具落基准态后写 6003=0 → 等 0x60 应答 → 写 1010 保存 → 等应答 →
+     * 提示断电重启。每步超时报错中止；save 帧在最后（前缀安全：中途取消不会
+     * 把半套参数持久化到设备）。
+     */
+    fun doEncoderZeroPreset() {
+        zeroBusy = true
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (!MySerialPortFun.ensureCanPortOpen(context)) {
+                    showJogToast(context, "CAN 串口打开失败，无法置零")
+                    return@launch
+                }
+                val nodeId = encCal.nodeId
+                val replyCanId = 0x580 + nodeId
+                val r1 = SdoReplyWaiters.sendAndAwait(
+                    EncoderCanOpenFun.buildPresetZeroFrame(nodeId), replyCanId
+                )
+                if (r1 == null || (r1[0].toInt() and 0xFF) != 0x60) {
+                    showJogToast(
+                        context,
+                        if (r1 == null) "置零失败：编码器无应答（检查在线/Node-ID $nodeId）"
+                        else "置零失败：编码器返回 SDO 错误"
+                    )
+                    return@launch
+                }
+                val r2 = SdoReplyWaiters.sendAndAwait(
+                    EncoderCanOpenFun.buildSaveParamsFrame(nodeId), replyCanId
+                )
+                if (r2 == null || (r2[0].toInt() and 0xFF) != 0x60) {
+                    showJogToast(context, "置零已写入但保存失败，请重试（未保存断电会丢失）")
+                    return@launch
+                }
+                viewModel.updateEncoderCalibration(motorIndex) { it.copy(zeroSet = true) }
+                val updated = viewModel.currentEncoderFeedbackState()
+                    .encoders.getOrNull(motorIndex) ?: return@launch
+                MySharedPreFun(context).saveEncoderCalibration(updated)
+                showJogToast(context, "置零成功，请断电重启编码器电源使其生效")
+            } finally {
+                withContext(Dispatchers.Main) { zeroBusy = false }
+            }
+        }
+    }
+
+    /** 记录一个标定点：读取当前【滤波后】编码值与输入的卡尺实测深度配对。 */
+    fun recordEncoderPoint() {
+        val depth = encDepthInput.toFloatOrNull()
+        if (depth == null || depth <= 0f) {
+            Toast.makeText(context, "请先输入有效的实测深度（mm，> 0）", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (encPoints.size >= 5) {
+            Toast.makeText(context, "最多 5 个标定点，请先删除或清空", Toast.LENGTH_SHORT).show()
+            return
+        }
+        encPoints.add(Pair(encCal.filteredPosition.toInt(), depth))
+        encDepthInput = ""
+    }
+
+    fun computeEncoderFit() {
+        val result = buildLinearFit(encPoints.toList())
+        if (result == null) {
+            encFitErrorMsg = "需要至少 2 个标定点（深度 > 0 且编码值不同）"
+            encFitResult   = null
+        } else {
+            encFitResult   = result
+            encFitErrorMsg = ""
+        }
+    }
+
+    fun saveEncoderCalibrationData() {
+        val (a, b) = encFitResult ?: return
+        viewModel.updateEncoderCalibration(motorIndex) {
+            it.copy(calibrationPoints = encPoints.toList(), fitA = a, fitB = b, fitValid = true)
+        }
+        scope.launch(Dispatchers.IO) {
+            val updated = viewModel.currentEncoderFeedbackState()
+                .encoders.getOrNull(motorIndex) ?: return@launch
+            MySharedPreFun(context).saveEncoderCalibration(updated)
+        }
+        showEncSaveConfirm.value = false
     }
 
     // ── 点动启停：只向队列投递命令，执行全部在消费协程内 ─────────────────────
@@ -602,13 +689,14 @@ fun DepthCalibrationScreen(
                 }
             }
 
-            // 步骤切换标签
+            // 步骤切换标签（步骤 3 = 摆臂编码器标定，不依赖伺服限位门控）
             StepIndicator(
                 currentStep   = currentStep,
                 step2Enabled  = cal.limitsSet,
                 onStepSelected = { step ->
                     if (step == 1) currentStep = 1
                     else if (step == 2 && cal.limitsSet) currentStep = 2
+                    else if (step == 3) currentStep = 3
                 }
             )
 
@@ -649,19 +737,9 @@ fun DepthCalibrationScreen(
                         val lMax = pendingLimitMax ?: return@Step1Content
                         limitsWriteBusy = true
                         scope.launch {
-                            withContext(Dispatchers.IO) {
-                                if (!MySerialPortFun.ensureCanPortOpen(context)) {
-                                    Log.e("DepthCalib", "onConfirmLimits: ensureCanPortOpen failed")
-                                    return@withContext
-                                }
-                                // 一次原子序列写入两个软件限位：0x261F 正向（最深）、0x2620 负向（最浅）
-                                CanOpenFun.sendSequence(
-                                    listOf(
-                                        CanOpenFun.buildSdoWriteFrame(cal.nodeId, 0x261F, 0x00, 4, lMax.toLong()),
-                                        CanOpenFun.buildSdoWriteFrame(cal.nodeId, 0x2620, 0x00, 4, lMin.toLong())
-                                    )
-                                )
-                            }
+                            // EDS 中没有 261Fh/2620h；旧代码写入后也未等待 SDO ACK，却仍把
+                            // limitsSet 置 true，会把 abort 误报成保存成功。限位只在 App 控制
+                            // 下发前执行 coerceIn，并持久化到 SharedPreferences。
                             viewModel.updateServoCalibration(motorIndex) {
                                 it.copy(limitMin = lMin, limitMax = lMax, limitsSet = true)
                             }
@@ -727,7 +805,53 @@ fun DepthCalibrationScreen(
                     onSaveClick  = { showSaveConfirm.value = true }
                 )
             }
+
+            // ── 步骤 3：摆臂编码器标定（置零 + 多点拟合）───────────────────
+            AnimatedVisibility(
+                visible = currentStep == 3,
+                enter   = expandVertically(),
+                exit    = shrinkVertically()
+            ) {
+                Step3EncoderContent(
+                    encCal             = encCal,
+                    depthInput         = encDepthInput,
+                    onDepthInputChange = { encDepthInput = it },
+                    points             = encPoints,
+                    fitResult          = encFitResult,
+                    fitErrorMsg        = encFitErrorMsg,
+                    zeroBusy           = zeroBusy,
+                    onZeroClick        = { showZeroConfirm.value = true },
+                    onRecordPoint      = { recordEncoderPoint() },
+                    onRemovePoint      = { idx -> if (idx in encPoints.indices) encPoints.removeAt(idx) },
+                    onClearPoints      = { encPoints.clear(); encFitResult = null; encFitErrorMsg = "" },
+                    onComputeFit       = { computeEncoderFit() },
+                    onSaveClick        = { showEncSaveConfirm.value = true }
+                )
+            }
         }
+    }
+
+    // 编码器置零确认对话框
+    if (showZeroConfirm.value) {
+        ShowConfirmDialog(
+            title      = "编码器零位预设",
+            text       = "请确认机具已落到基准状态（压种轮触平整地面）。\n" +
+                         "置零将写入编码器 6003h=0 并保存，成功后需断电重启编码器。\n" +
+                         "确认执行？",
+            onConfirm  = { showZeroConfirm.value = false; doEncoderZeroPreset() },
+            showDialog = showZeroConfirm
+        )
+    }
+
+    // 编码器标定保存确认对话框
+    if (showEncSaveConfirm.value) {
+        val (ea, eb) = encFitResult ?: Pair(0f, 0f)
+        ShowConfirmDialog(
+            title      = "保存编码器标定",
+            text       = "确认保存拟合结果？\ndepth = ${"%.6f".format(ea)} × pos + ${"%.2f".format(eb)}",
+            onConfirm  = { saveEncoderCalibrationData() },
+            showDialog = showEncSaveConfirm
+        )
     }
 
     // 保存校准确认对话框
@@ -756,9 +880,14 @@ private fun StepIndicator(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        listOf(1 to "步骤 1：限位设置", 2 to "步骤 2：深度校准").forEach { (step, label) ->
+        listOf(
+            1 to "步骤 1：限位设置",
+            2 to "步骤 2：深度校准",
+            3 to "步骤 3：编码器标定"
+        ).forEach { (step, label) ->
             val isSelected = currentStep == step
-            val isEnabled  = step == 1 || step2Enabled
+            // 步骤 3（摆臂编码器）独立于伺服限位标定，随时可进入
+            val isEnabled  = step == 1 || step == 3 || step2Enabled
             TextButton(
                 onClick  = { onStepSelected(step) },
                 enabled  = isEnabled,
@@ -1394,5 +1523,262 @@ private fun CalibPointRow(
             singleLine     = true,
             modifier       = Modifier.fillMaxWidth()
         )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 步骤 3：摆臂编码器标定内容（零位预设 + 多点拟合）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 摆臂编码器标定区。
+ *
+ * 与伺服标定（步骤 1/2）的区别：编码器是只读测量元件，无运动控制——
+ * 标定过程由用户用机具/垫块把压种轮压到某一实际深度，卡尺量取真实播深输入，
+ * App 记录当前【滤波后】编码值配对；≥2 点最小二乘得 fitA/fitB。
+ * 页面实时显示原始值/滤波值/换算深度，便于现场判断信号是否正常。
+ */
+@Composable
+private fun Step3EncoderContent(
+    encCal:             EncoderCalibration,
+    depthInput:         String,
+    onDepthInputChange: (String) -> Unit,
+    points:             List<Pair<Int, Float>>,
+    fitResult:          Pair<Float, Float>?,
+    fitErrorMsg:        String,
+    zeroBusy:           Boolean,
+    onZeroClick:        () -> Unit,
+    onRecordPoint:      () -> Unit,
+    onRemovePoint:      (Int) -> Unit,
+    onClearPoints:      () -> Unit,
+    onComputeFit:       () -> Unit,
+    onSaveClick:        () -> Unit
+) {
+    Card(
+        elevation = 2.dp,
+        modifier  = Modifier.fillMaxWidth(),
+        shape     = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // 编码器离线警告（独立于伺服在线状态）
+            if (!encCal.isOnline) {
+                Card(
+                    backgroundColor = Color(0xFFFFE0E0),
+                    elevation       = 0.dp,
+                    modifier        = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "⚠ 编码器离线（Node-ID: ${encCal.nodeId}）。" +
+                            "请检查接线；新编码器需先在设置页「编码器配置工具」中分配 ID。",
+                        color    = Color(0xFFB00020),
+                        modifier = Modifier.padding(12.dp),
+                        fontSize = 13.sp
+                    )
+                }
+            }
+
+            // ── 实时信号区：现场判断编码器信号是否正常 ──────────────────
+            Text("编码器实时信号", fontSize = 14.sp, color = Color(0xFF1565C0))
+            Row(
+                modifier              = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("原始值", fontSize = 12.sp, color = Color.Gray)
+                    Text(
+                        if (encCal.isOnline) "${encCal.rawPosition}" else "---",
+                        fontSize   = 16.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color      = Color(0xFF37474F)
+                    )
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("滤波值", fontSize = 12.sp, color = Color.Gray)
+                    Text(
+                        if (encCal.isOnline) "%.1f".format(encCal.filteredPosition) else "---",
+                        fontSize   = 16.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color      = Color(0xFF1565C0)
+                    )
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("换算深度", fontSize = 12.sp, color = Color.Gray)
+                    Text(
+                        when {
+                            !encCal.isOnline  -> "---"
+                            !encCal.fitValid  -> "未标定"
+                            else              -> "%.1f mm".format(encCal.measuredDepth)
+                        },
+                        fontSize   = 16.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color      = Color(0xFF388E3C)
+                    )
+                }
+            }
+
+            Divider()
+
+            // ── 零位预设区 ──────────────────────────────────────────────
+            Text("① 零位预设", fontSize = 14.sp, color = Color(0xFF1565C0))
+            Text(
+                "机具落到基准状态（压种轮触平整地面）后点击置零。" +
+                    "写入 6003h=0 并保存，成功后需断电重启编码器电源。",
+                fontSize = 12.sp,
+                color    = Color.Gray
+            )
+            Row(
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick  = onZeroClick,
+                    enabled  = !zeroBusy,
+                    colors   = ButtonDefaults.buttonColors(
+                        backgroundColor         = Color(0xFF1565C0),
+                        disabledBackgroundColor = Color(0xFFBBBBBB)
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    if (zeroBusy) {
+                        CircularProgressIndicator(
+                            modifier    = Modifier.size(16.dp),
+                            color       = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text("置零", color = Color.White)
+                }
+                Text(
+                    if (encCal.zeroSet) "✓ 已置零" else "未置零",
+                    fontSize = 13.sp,
+                    color    = if (encCal.zeroSet) Color(0xFF388E3C) else Color.Gray
+                )
+            }
+
+            Divider()
+
+            // ── 多点拟合区 ──────────────────────────────────────────────
+            Text("② 多点拟合（2~5 点）", fontSize = 14.sp, color = Color(0xFF1565C0))
+            Text(
+                "把机具压到某一实际深度并稳定后，卡尺量取真实播深输入，点击「记录该点」" +
+                    "配对当前滤波编码值。",
+                fontSize = 12.sp,
+                color    = Color.Gray
+            )
+            Row(
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value           = depthInput,
+                    onValueChange   = onDepthInputChange,
+                    label           = { Text("实测深度 (mm)", fontSize = 12.sp) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine      = true,
+                    modifier        = Modifier.weight(1f)
+                )
+                Button(
+                    onClick  = onRecordPoint,
+                    enabled  = encCal.isOnline,
+                    colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF37474F)),
+                    shape    = RoundedCornerShape(6.dp)
+                ) {
+                    Text("记录该点", color = Color.White, fontSize = 13.sp)
+                }
+            }
+
+            // 已记录标定点列表
+            points.forEachIndexed { idx, (pos, depth) ->
+                Row(
+                    modifier              = Modifier.fillMaxWidth(),
+                    verticalAlignment     = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "点 ${idx + 1}",
+                        fontSize = 13.sp,
+                        color    = Color(0xFF1565C0),
+                        modifier = Modifier.width(40.dp)
+                    )
+                    Text(
+                        "编码值 $pos  →  ${"%.1f".format(depth)} mm",
+                        fontSize   = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier   = Modifier.weight(1f)
+                    )
+                    OutlinedButton(
+                        onClick        = { onRemovePoint(idx) },
+                        shape          = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text("删除", fontSize = 12.sp, color = Color(0xFFB00020))
+                    }
+                }
+            }
+
+            if (fitErrorMsg.isNotEmpty()) {
+                Text(fitErrorMsg, color = Color.Red, fontSize = 12.sp)
+            }
+            fitResult?.let { (a, b) ->
+                Text(
+                    "拟合结果: depth = ${"%.6f".format(a)} × pos + ${"%.2f".format(b)}",
+                    fontSize   = 13.sp,
+                    color      = Color(0xFF388E3C),
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+
+            Row(
+                modifier              = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick  = onClearPoints,
+                    enabled  = points.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                    shape    = RoundedCornerShape(8.dp)
+                ) {
+                    Text("清空重标", fontSize = 13.sp)
+                }
+                Button(
+                    onClick  = onComputeFit,
+                    enabled  = points.size >= 2,
+                    modifier = Modifier.weight(1f),
+                    colors   = ButtonDefaults.buttonColors(
+                        backgroundColor         = Color(0xFF1565C0),
+                        disabledBackgroundColor = Color(0xFFBBBBBB)
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("计算拟合", color = Color.White, fontSize = 13.sp)
+                }
+                Button(
+                    onClick  = onSaveClick,
+                    enabled  = fitResult != null,
+                    modifier = Modifier.weight(1f),
+                    colors   = ButtonDefaults.buttonColors(
+                        backgroundColor         = Color(0xFF388E3C),
+                        disabledBackgroundColor = Color(0xFFBBBBBB)
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("保存标定", color = Color.White, fontSize = 13.sp)
+                }
+            }
+
+            // 已保存拟合提示
+            if (encCal.fitValid) {
+                Text(
+                    "已保存标定: depth = ${"%.6f".format(encCal.fitA)} × pos + ${"%.2f".format(encCal.fitB)}" +
+                        "（${encCal.calibrationPoints.size} 点）",
+                    fontSize = 12.sp,
+                    color    = Color(0xFF388E3C)
+                )
+            }
+        }
     }
 }

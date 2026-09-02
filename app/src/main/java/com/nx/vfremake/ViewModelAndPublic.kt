@@ -24,6 +24,8 @@ import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.layers.FeatureLayer
 import com.esri.arcgisruntime.mapping.ArcGISMap
 import com.esri.arcgisruntime.mapping.view.GraphicsOverlay
+import com.nx.vfremake.data.EncoderCalibration
+import com.nx.vfremake.data.EncoderFeedbackState
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.funClass.RmcData
@@ -332,6 +334,74 @@ class VariableFertViewModel : ViewModel() {
                 acceleration = savedState.acceleration,
                 masterEnabled = masterEnabledOverride ?: current.masterEnabled
             )
+        }
+    }
+
+    // ====== 摆臂编码器实测播深反馈状态 ======
+    // 线程模型与 sowingDepthStateRef 完全一致：AtomicReference 唯一真源 + CAS 更新 +
+    // LiveData 仅作 Compose 投影。写入方为 CanReceiveCoroutine 接收线程（8 路 × 50ms TPDO）
+    // 与标定/配置 UI；后台读取一律用 currentEncoderFeedbackState()，禁止读
+    // encoderFeedbackState.value（postValue 主线程刷新滞后，读到旧快照）。
+    private val encoderFeedbackStateRef =
+        java.util.concurrent.atomic.AtomicReference(EncoderFeedbackState())
+    val encoderFeedbackState = MutableLiveData(encoderFeedbackStateRef.get())
+
+    /** 后台协程/回调读取编码器反馈状态的唯一入口：始终返回最新原子快照。 */
+    fun currentEncoderFeedbackState(): EncoderFeedbackState = encoderFeedbackStateRef.get()
+
+    /**
+     * 对 [encoderFeedbackStateRef] 做 CAS 原子更新并投影到 LiveData。
+     * transform 返回原引用视为无变更（同值短路），不触发 LiveData。
+     * CAS 失败会重试，transform 必须是纯函数（调用方全部用 copy()）。
+     */
+    private fun mutateEncoderFeedbackState(transform: (EncoderFeedbackState) -> EncoderFeedbackState) {
+        while (true) {
+            val current = encoderFeedbackStateRef.get()
+            val updated = transform(current)
+            if (updated === current) return
+            if (encoderFeedbackStateRef.compareAndSet(current, updated)) {
+                encoderFeedbackState.postValue(updated)
+                return
+            }
+        }
+    }
+
+    /**
+     * 更新单路编码器的 [EncoderCalibration]（TPDO 到达刷新运行时字段，
+     * 或标定/配置界面写入 zeroSet / 拟合系数 / nodeId 等持久化字段）。
+     * 模式与 [updateServoCalibration] 相同，含同值短路。
+     */
+    fun updateEncoderCalibration(motorIndex: Int, updater: (EncoderCalibration) -> EncoderCalibration) {
+        mutateEncoderFeedbackState { current ->
+            if (motorIndex !in current.encoders.indices) return@mutateEncoderFeedbackState current
+            val updated = updater(current.encoders[motorIndex])
+            if (updated === current.encoders[motorIndex] || updated == current.encoders[motorIndex]) {
+                return@mutateEncoderFeedbackState current
+            }
+            current.copy(encoders = current.encoders.toMutableList().also { it[motorIndex] = updated })
+        }
+    }
+
+    /**
+     * 从存储恢复编码器持久化字段，保留运行时反馈字段
+     * （对齐 [restoreSowingDepthPersistentState] 的合并语义）。
+     */
+    fun restoreEncoderPersistentState(savedState: EncoderFeedbackState) {
+        mutateEncoderFeedbackState { current ->
+            val merged = current.encoders.mapIndexed { index, runtime ->
+                val saved = savedState.encoders.getOrNull(index)
+                    ?: EncoderCalibration(motorIndex = index)
+                runtime.copy(
+                    nodeId = saved.nodeId,
+                    zeroSet = saved.zeroSet,
+                    singleTurnResolution = saved.singleTurnResolution,
+                    calibrationPoints = saved.calibrationPoints,
+                    fitA = saved.fitA,
+                    fitB = saved.fitB,
+                    fitValid = saved.fitValid
+                )
+            }
+            current.copy(encoders = merged)
         }
     }
 

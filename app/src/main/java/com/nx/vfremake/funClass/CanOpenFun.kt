@@ -3,9 +3,12 @@ package com.nx.vfremake.funClass
 import android.os.SystemClock
 import android.util.Log
 import com.nx.vfremake.mSerialPortCAN
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -279,10 +282,17 @@ object CanOpenFun {
         buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000FL)
 
     /**
-     * 急停：写控制字（0x6040）= 0x010F。
-     *   在 0x000F 基础上置 Bit8=1（停止），电机急停但继续自锁。
+     * DS402 Quick Stop：从 Enable Operation(0x000F) 清除 Bit2，得到 0x000B。
+     *
+     * 旧实现使用 0x010F；Bit8 在位置/速度模式中表示 Halt（受控暂停），并不是
+     * DS402 状态机的 Quick Stop。安全按钮和故障/内部限位保护必须使用真正的
+     * Quick Stop 状态转换。
      */
     fun buildQuickStopFrame(nodeId: Int): ByteArray =
+        buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x000BL)
+
+    /** 位置/速度模式的受控暂停（Halt，Bit8=1），不等同于 Quick Stop。 */
+    fun buildHaltFrame(nodeId: Int): ByteArray =
         buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x010FL)
 
     /**
@@ -446,17 +456,26 @@ object CanOpenFun {
     /**
      * 状态字（0x6041）解析结果。
      *
-     * @property targetReached        Bit10：位置模式已到达目标位置 / 速度模式已到达目标转速
-     * @property homingDone           Bit12：找原点完成
-     * @property positiveLimitReached Bit14：到达正限位
-     * @property negativeLimitReached Bit15：到达负限位
-     * @property rawValue             原始 16 位状态字
+     * Bit0~11 按 CiA402 通用定义解析。Bit12~13 与当前工作模式相关，Bit14~15 为
+     * 厂商自定义；YZ_MOTOR_SN2.eds 没有给出 14/15 位的正负限位语义，因此不能据此
+     * 生成正/负限位报警。
      */
     data class StatusFlags(
+        val readyToSwitchOn: Boolean,
+        val switchedOn: Boolean,
+        val operationEnabled: Boolean,
+        val fault: Boolean,
+        val voltageEnabled: Boolean,
+        val quickStopInactive: Boolean,
+        val switchOnDisabled: Boolean,
+        val warning: Boolean,
+        val remote: Boolean,
         val targetReached: Boolean,
-        val homingDone: Boolean,
-        val positiveLimitReached: Boolean,
-        val negativeLimitReached: Boolean,
+        val internalLimitActive: Boolean,
+        val operationModeSpecificBit12: Boolean,
+        val operationModeSpecificBit13: Boolean,
+        val manufacturerSpecificBit14: Boolean,
+        val manufacturerSpecificBit15: Boolean,
         val rawValue: Int
     )
 
@@ -466,12 +485,36 @@ object CanOpenFun {
      * @param statusWord 状态字原始值（16 位无符号，从 SDO 读取或 TPDO 解析而来）
      */
     fun parseStatusWord(statusWord: Int): StatusFlags = StatusFlags(
-        targetReached         = (statusWord and (1 shl 10)) != 0,
-        homingDone            = (statusWord and (1 shl 12)) != 0,
-        positiveLimitReached  = (statusWord and (1 shl 14)) != 0,
-        negativeLimitReached  = (statusWord and (1 shl 15)) != 0,
-        rawValue              = statusWord
+        readyToSwitchOn           = (statusWord and (1 shl 0)) != 0,
+        switchedOn                = (statusWord and (1 shl 1)) != 0,
+        operationEnabled          = (statusWord and (1 shl 2)) != 0,
+        fault                     = (statusWord and (1 shl 3)) != 0,
+        voltageEnabled            = (statusWord and (1 shl 4)) != 0,
+        quickStopInactive         = (statusWord and (1 shl 5)) != 0,
+        switchOnDisabled          = (statusWord and (1 shl 6)) != 0,
+        warning                   = (statusWord and (1 shl 7)) != 0,
+        remote                    = (statusWord and (1 shl 9)) != 0,
+        targetReached             = (statusWord and (1 shl 10)) != 0,
+        internalLimitActive       = (statusWord and (1 shl 11)) != 0,
+        operationModeSpecificBit12 = (statusWord and (1 shl 12)) != 0,
+        operationModeSpecificBit13 = (statusWord and (1 shl 13)) != 0,
+        manufacturerSpecificBit14 = (statusWord and (1 shl 14)) != 0,
+        manufacturerSpecificBit15 = (statusWord and (1 shl 15)) != 0,
+        rawValue                  = statusWord and 0xFFFF
     )
+
+    /** 根据 CiA402 状态字低位掩码给出驱动器状态机名称。 */
+    fun driveStateDescription(statusWord: Int): String = when {
+        statusWord and 0x004F == 0x0000 -> "未准备好切换"
+        statusWord and 0x004F == 0x0040 -> "禁止切换"
+        statusWord and 0x006F == 0x0021 -> "已准备切换"
+        statusWord and 0x006F == 0x0023 -> "已切换"
+        statusWord and 0x006F == 0x0027 -> "运行已使能"
+        statusWord and 0x006F == 0x0007 -> "Quick Stop 激活"
+        statusWord and 0x004F == 0x000F -> "故障反应激活"
+        statusWord and 0x004F == 0x0008 -> "故障"
+        else -> "未知状态"
+    }
 
     // ─────────────────────────────────────────────────────────────────────
     // TPDO1 解析（电机主动上报）
@@ -653,5 +696,77 @@ object JogSession {
     /** 无条件清除（页面销毁兜底用）。 */
     fun clearAll() {
         activeNode.set(NONE)
+    }
+}
+
+/**
+ * SDO 应答等待器：把纯推送式的接收路由（CanReceiveCoroutine → ViewModel 状态）扩展出
+ * "发一帧、等应答"的请求-应答能力，供编码器标定置零与一次性配置工具使用。
+ *
+ * 为什么需要它：
+ *   - 配置工具面对的是【未配置】的编码器（出厂 Node-ID=1，SDO 应答 0x581），
+ *     不在任何白名单内，接收路由无法把应答投递到状态容器；
+ *   - 写 3001h 改节点 ID 后，设备在保存并断电重启前仍用【旧 ID】应答（手册明确），
+ *     等待方必须能按任意 canId 精确匹配；
+ *   - 置零/配置每步都要"收到 0x60 应答再走下一步，超时报错中止"，轮询状态容器
+ *     既不可靠（同值短路）又有竞态。
+ *
+ * 匹配语义：按应答 CAN-ID（0x580+nodeId）匹配，同一 canId 同时只有一个 waiter
+ * （置零/配置流程严格串行，一步一帧一应答）；新注册覆盖旧注册（旧的自然超时）。
+ * dispatchFrame 对无主 SDO 应答先问询本对象，被消费的帧不再跌落施肥解析。
+ */
+object SdoReplyWaiters {
+
+    /** canId(0x580+nodeId) → 等待中的 deferred */
+    private val waiters = ConcurrentHashMap<Int, CompletableDeferred<ByteArray>>()
+
+    /**
+     * 串行化完整“注册 waiter → 发送 → 等应答”事务。
+     * CanOpenFun 的发送 Mutex 只覆盖发帧瞬间；若两个维护功能同时对同一节点发 SDO，
+     * 仅靠发送串行仍可能让后注册 waiter 覆盖前一个。调试页与配号页已有 UI 互斥，
+     * 此锁作为协议层兜底，并保护未来调用者。
+     */
+    private val requestMutex = Mutex()
+
+    /**
+     * 接收路由调用：若有 waiter 等待该 canId 的 SDO 应答，完成它并消费该帧。
+     *
+     * @param canId   应答帧 CAN-ID（0x580 + nodeId）
+     * @param sdoData 8 字节 SDO 数据段
+     * @return true = 已被等待方消费
+     */
+    fun tryComplete(canId: Int, sdoData: ByteArray): Boolean {
+        val d = waiters.remove(canId) ?: return false
+        d.complete(sdoData)
+        return true
+    }
+
+    /**
+     * 发送一帧并等待其 SDO 应答（先注册后发送，杜绝"应答先于注册到达"的竞态）。
+     * 发送走 [CanOpenFun.sendFrameSequenced]（全局 20ms 步调）。
+     *
+     * @param frame       已封装好的发送帧
+     * @param replyCanId  期望的应答 CAN-ID（0x580 + nodeId；改 ID 场景传旧 ID）
+     * @param timeoutMs   等待超时
+     * @return 8 字节 SDO 应答数据段；超时返回 null（调用方应报错并中止流程）
+     */
+    suspend fun sendAndAwait(frame: ByteArray, replyCanId: Int, timeoutMs: Long = 1000L): ByteArray? =
+        requestMutex.withLock {
+            val d = CompletableDeferred<ByteArray>()
+            waiters[replyCanId] = d
+            try {
+                CanOpenFun.sendFrameSequenced(frame)
+                withTimeoutOrNull(timeoutMs) { d.await() }
+            } finally {
+                waiters.remove(replyCanId, d)
+            }
+        }
+
+    /** 是否有 waiter 在等待该 canId（单元测试用）。 */
+    fun hasWaiter(canId: Int): Boolean = waiters.containsKey(canId)
+
+    /** 清空全部 waiter（页面销毁/测试隔离用；被清的等待方自然超时）。 */
+    fun clearAll() {
+        waiters.clear()
     }
 }

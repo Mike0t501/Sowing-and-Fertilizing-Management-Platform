@@ -1,5 +1,8 @@
 package com.nx.vfremake.data
 
+import kotlin.math.abs
+import kotlin.math.pow
+
 /**
  * 单个伺服电机的配置与运行时状态
  *
@@ -41,7 +44,7 @@ data class ServoCalibration(
     val currentDepth: Float = 0f,         // 当前实际深度 mm（由 fitA/fitB 换算）
     val isEnabled: Boolean = false,       // 驱动器是否已使能
     val isOnline: Boolean = false,        // 是否在线（最近收到心跳或 TPDO）
-    val alarmCode: Int = 0,               // 报警代码，0 = 正常
+    val alarmCode: Int = SERVO_ALARM_NONE, // 见 SERVO_ALARM_*；由状态字/SDO 接收路径更新
     val lastHeardMs: Long = 0L            // CanReceiveCoroutine 最后收到该电机任意 CAN 帧的时间戳（ms）
 )
 
@@ -71,6 +74,17 @@ data class SowingDepthState(
 
 enum class CalibrationMode { DIRECT, INDIRECT }
 
+/**
+ * 伺服运行报警分类。
+ *
+ * YZ EDS 未定义 6041h Bit14/15 为正/负限位；CiA402 将这两位保留给厂商。
+ * 因此这里只依据标准 Bit3(fault)、Bit11(internal limit active) 和 SDO abort 分类。
+ */
+const val SERVO_ALARM_NONE = 0
+const val SERVO_ALARM_DRIVE_FAULT = 1
+const val SERVO_ALARM_INTERNAL_LIMIT = 2
+const val SERVO_ALARM_SDO_ABORT = -1
+
 fun isSowingDepthMotorActive(
     motorIndex: Int,
     rowNumber: Int,
@@ -89,6 +103,30 @@ fun activeSowingDepthMotorIndices(
         .filter { isSowingDepthMotorActive(it, rowNumber, activeMotors) }
 }
 
+/**
+ * 最小二乘线性拟合 depth_mm = a * encoderPos + b
+ *
+ * 伺服深度标定（DepthCalibrationScreen 直接/间接模式）与摆臂编码器标定共用。
+ * 深度 ≤0 的点视为未填写，参与拟合前先过滤。
+ *
+ * @param points List of (encoderPos, depthMm) pairs
+ * @return Pair(a, b) or null if < 2 valid points or degenerate data
+ */
+fun buildLinearFit(points: List<Pair<Int, Float>>): Pair<Float, Float>? {
+    val valid = points.filter { it.second > 0f }
+    if (valid.size < 2) return null
+    val n = valid.size.toDouble()
+    val sumX  = valid.sumOf { it.first.toDouble() }
+    val sumY  = valid.sumOf { it.second.toDouble() }
+    val sumXX = valid.sumOf { it.first.toDouble().pow(2) }
+    val sumXY = valid.sumOf { it.first.toDouble() * it.second.toDouble() }
+    val denom = n * sumXX - sumX * sumX
+    if (abs(denom) < 1e-10) return null
+    val a = ((n * sumXY - sumX * sumY) / denom).toFloat()
+    val b = ((sumY - a * sumX) / n).toFloat()
+    return Pair(a, b)
+}
+
 data class IndirectCalibPoint(
     val depthMm: Float,
     val encoderPos: Int? = null
@@ -101,7 +139,8 @@ private val DEFAULT_INDIRECT_POINTS: List<IndirectCalibPoint> =
 
 /**
  * 由 limitMin/limitMax 推出"深方向"的符号：+1 / -1 / 0(限位未分离)。
- * 仅用于点动方向判断与到限检查；写入 0x261F/0x2620 时已按浅/深字面值处理。
+ * 仅用于点动方向判断与应用层到限检查。YZ_MOTOR_SN2.eds 不包含 261Fh/2620h，
+ * 所以本项目不再声称把这两个值写成驱动器硬件限位。
  */
 val ServoCalibration.deepDirection: Int
     get() = limitMax.compareTo(limitMin)

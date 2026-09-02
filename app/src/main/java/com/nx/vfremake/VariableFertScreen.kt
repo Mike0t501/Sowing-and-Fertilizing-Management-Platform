@@ -29,12 +29,14 @@ import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.ui.DantiFertSettings
 import com.nx.vfremake.ui.DepthCalibrationScreen
 import com.nx.vfremake.ui.DepthTestScreen
+import com.nx.vfremake.ui.EncoderProvisioningScreen
 import com.nx.vfremake.ui.ExperimentDataScreen
 import com.nx.vfremake.ui.MainScreen
 import com.nx.vfremake.ui.ParamSettingsScreen
 import com.nx.vfremake.ui.SettingsScreen
 import com.nx.vfremake.ui.SimGnssScreen
 import com.nx.vfremake.ui.SowingDepthScreen
+import com.nx.vfremake.ui.ServoDiagnosticsScreen
 import androidx.navigation.NavType
 import androidx.navigation.navArgument
 
@@ -48,7 +50,9 @@ enum class VariableFertScreen(@StringRes val title: Int) {
     SowingDepth(title = R.string.settings),         // 播种深度主控制界面
     DepthCalibration(title = R.string.settings),    // 单路电机深度校准向导（携带 motorIndex 参数）
     DepthTest(title = R.string.settings),           // 一键播种深度性能测试界面
-    ExperimentData(title = R.string.settings)       // 实验数据记录查看界面
+    ExperimentData(title = R.string.settings),      // 实验数据记录查看界面
+    EncoderProvisioning(title = R.string.settings), // 摆臂编码器一次性配置工具（维护）
+    ServoDiagnostics(title = R.string.settings)     // 播种深度伺服 EDS/DS402 调试工具
 }
 
 /**
@@ -99,6 +103,8 @@ fun VariableFert(
                 onClickDantiSettigns = { navController.navigate(VariableFertScreen.DantiSettings.name) },
                 onClickSimGnss = { navController.navigate(VariableFertScreen.SimGnss.name) },
                 onClickExperimentData = { navController.navigate(VariableFertScreen.ExperimentData.name) },
+                onClickEncoderProvisioning = { navController.navigate(VariableFertScreen.EncoderProvisioning.name) },
+                onClickServoDiagnostics = { navController.navigate(VariableFertScreen.ServoDiagnostics.name) },
                 onReinitSerialPort = {
                     if (isSystemRunning) {
                         Toast.makeText(context, "系统运行中，请先停止后再应用", Toast.LENGTH_SHORT).show()
@@ -141,6 +147,20 @@ fun VariableFert(
                     navController.navigate("${VariableFertScreen.DepthCalibration.name}/$motorIndex")
                 },
                 onClickDepthTest = { navController.navigate(VariableFertScreen.DepthTest.name) }
+            )
+        }
+        // ── 摆臂编码器一次性配置工具（维护）──────────────────────────────────
+        composable(route = VariableFertScreen.EncoderProvisioning.name) {
+            EncoderProvisioningScreen(
+                viewModel = mVariableFertViewModel,
+                onBack    = { navController.popBackStack() }
+            )
+        }
+        // ── 播种深度伺服 EDS/DS402 调试工具（维护）─────────────────────────
+        composable(route = VariableFertScreen.ServoDiagnostics.name) {
+            ServoDiagnosticsScreen(
+                viewModel = mVariableFertViewModel,
+                onBack    = { navController.popBackStack() }
             )
         }
         // ── 一键播种深度性能测试界面 ─────────────────────────────────────────

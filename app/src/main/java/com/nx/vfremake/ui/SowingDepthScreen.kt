@@ -62,14 +62,21 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.data.EncoderCalibration
+import com.nx.vfremake.data.EncoderFeedbackState
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.SERVO_ALARM_DRIVE_FAULT
+import com.nx.vfremake.data.SERVO_ALARM_INTERNAL_LIMIT
+import com.nx.vfremake.data.SERVO_ALARM_SDO_ABORT
 import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.mSPParamData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * 播种深度主控制界面
@@ -144,11 +151,17 @@ fun SowingDepthScreen(
     }
 
     val state by viewModel.sowingDepthState.observeAsState(SowingDepthState())
+    val encState by viewModel.encoderFeedbackState.observeAsState(EncoderFeedbackState())
     val activeMotorsState by viewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
     val activeMotorIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorsState)
 
     // 全局深度输入框的临时值（初始同步自 state，不随 state 每次变化而强制覆盖）
     var globalDepthInput by remember { mutableStateOf("%.1f".format(state.globalTargetDepth)) }
+
+    // 全局深度滑块位置（限制在常用区间 20~80mm；手打的越界值不回写滑块）
+    var globalDepthSlider by remember {
+        mutableStateOf(state.globalTargetDepth.coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX))
+    }
 
     // 位置运动速度本地状态（初始同步自 state，持久化到 SharedPreferences）
     var positionSpeed by remember { mutableStateOf(state.positionSpeed) }
@@ -159,14 +172,38 @@ fun SowingDepthScreen(
     // 单独设置弹窗：哪路电机正在设置（null = 未打开）
     var motorDialogIndex by remember { mutableStateOf<Int?>(null) }
     var motorDialogInput by remember { mutableStateOf("") }
+    var motorDialogSlider by remember { mutableStateOf(DEPTH_QUICK_MIN) }
 
     // 标定设置弹窗（选择电机后跳转）
     var showCalibrateDialog by remember { mutableStateOf(false) }
 
+    // ── 辅助：解析手打的深度值 ────────────────────────────────────────────────
+    // 20~80mm 只是滑块与一键按钮的常用区间，不是安全约束：标定量块 100mm、处方图控深
+    // 等场景仍需手打超出该区间的值，所以越界只提示、不拦截。真正的安全钳位在
+    // SowingDepthCoroutine 下发前的脉冲级 coerceIn(limitMin, limitMax) 里完成。
+    fun parseTypedDepth(text: String): Float? {
+        val depth = text.toFloatOrNull()
+        if (depth == null || depth <= 0f) {
+            Toast.makeText(context, "请输入有效的目标深度", Toast.LENGTH_SHORT).show()
+            return null
+        }
+        if (depth < DEPTH_QUICK_MIN || depth > DEPTH_QUICK_MAX) {
+            Toast.makeText(
+                context,
+                "目标深度 %.1f mm 超出常用范围 %.0f~%.0f mm"
+                    .format(depth, DEPTH_QUICK_MIN, DEPTH_QUICK_MAX),
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+        return depth
+    }
+
     // ── 辅助：全部应用 ────────────────────────────────────────────────────────
-    fun applyGlobalDepth() {
-        val depth = globalDepthInput.toFloatOrNull() ?: return
-        if (depth <= 0f) return
+    // 手打+应用 / 滑块松手 / 一键按钮 三条输入路径共用的唯一出口
+    fun applyGlobalDepth(depth: Float) {
+        // 三种输入方式互相同步显示
+        globalDepthInput  = "%.1f".format(depth)
+        globalDepthSlider = depth.coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX)
         // 更新全局目标深度
         viewModel.updateSowingDepthGlobalSettings(globalTargetDepth = depth)
         // 同步到每路电机的 targetDepth
@@ -178,19 +215,19 @@ fun SowingDepthScreen(
         scope.launch(Dispatchers.IO) {
             MySharedPreFun(context).saveSowingDepthGlobalSettings(
                 jogSpeed          = state.jogSpeed,
-                positionSpeed     = state.positionSpeed,
-                acceleration      = state.acceleration,
+                positionSpeed     = positionSpeed,
+                acceleration      = acceleration,
                 globalTargetDepth = depth
             )
         }
     }
 
-    // ── 辅助：单独设置确认 ────────────────────────────────────────────────────
-    fun applyMotorDepth(motorIndex: Int) {
-        val depth = motorDialogInput.toFloatOrNull() ?: return
-        if (depth <= 0f) return
+    // ── 辅助：单独设置 ────────────────────────────────────────────────────────
+    // 弹窗内三种输入方式共用出口；不关闭弹窗，便于操作员继续微调
+    fun applyMotorDepth(motorIndex: Int, depth: Float) {
+        motorDialogInput  = "%.1f".format(depth)
+        motorDialogSlider = depth.coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX)
         viewModel.updateServoCalibration(motorIndex) { it.copy(targetDepth = depth) }
-        motorDialogIndex = null
     }
 
     // ── 辅助：手动实验数据记录启停 ────────────────────────────────────────────
@@ -216,6 +253,7 @@ fun SowingDepthScreen(
         ) { _ ->
             // 每次采样写出 8 路电机各一行（长表格式，Origin 按电机号筛选）
             val motors = viewModel.currentSowingDepthState().motors
+            val encoders = viewModel.currentEncoderFeedbackState().encoders
             activeSowingDepthMotorIndices(
                 mSPParamData.rowNumber,
                 viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
@@ -228,7 +266,7 @@ fun SowingDepthScreen(
                     m.currentPosition.toString(),
                     if (m.isOnline) "1" else "0",
                     m.alarmCode.toString()
-                )
+                ) + DepthRecordFun.buildEncoderColumns(encoders.getOrNull(m.motorIndex))
             }
         }
         isRecording = true
@@ -347,27 +385,17 @@ fun SowingDepthScreen(
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("全局目标深度", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                     Spacer(Modifier.height(8.dp))
-                    Row(
-                        verticalAlignment     = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedTextField(
-                            value          = globalDepthInput,
-                            onValueChange  = { globalDepthInput = it },
-                            label          = { Text("目标深度 (mm)", fontSize = 12.sp) },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine     = true,
-                            modifier       = Modifier.weight(1f)
-                        )
-                        Button(
-                            onClick  = { applyGlobalDepth() },
-                            colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1565C0)),
-                            shape    = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
-                        ) {
-                            Text("全部应用", color = Color.White, fontSize = 14.sp)
-                        }
-                    }
+                    DepthQuickInput(
+                        textValue      = globalDepthInput,
+                        onTextChange   = { globalDepthInput = it },
+                        sliderValue    = globalDepthSlider,
+                        onSliderChange = { globalDepthSlider = it },
+                        onCommit       = { d -> applyGlobalDepth(d) },
+                        onCommitTyped  = {
+                            parseTypedDepth(globalDepthInput)?.let { d -> applyGlobalDepth(d) }
+                        },
+                        applyLabel     = "全部应用"
+                    )
                 }
             }
 
@@ -489,10 +517,13 @@ fun SowingDepthScreen(
                     val cal = state.motors[i]
                     MotorStatusCard(
                         cal             = cal,
+                        encCal          = encState.encoders.getOrNull(i),
                         motorIndex      = i,
                         onSingleSet     = {
-                            motorDialogInput = "%.1f".format(cal.targetDepth)
-                            motorDialogIndex = i
+                            motorDialogInput  = "%.1f".format(cal.targetDepth)
+                            motorDialogSlider = cal.targetDepth
+                                .coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX)
+                            motorDialogIndex  = i
                         },
                         onCalibrate     = { onClickCalibrate(i) }
                     )
@@ -565,24 +596,27 @@ fun SowingDepthScreen(
     }
 
     // ── 单独设置弹窗 ─────────────────────────────────────────────────────────
+    // 三种输入方式（手打+应用 / 滑块松手 / 一键按钮）都是即时下发，没有待确认的中间
+    // 状态，所以底部只留「关闭」——避免出现「点了取消但值其实已经下发」的误导。
     motorDialogIndex?.let { idx ->
         AlertDialog(
             onDismissRequest = { motorDialogIndex = null },
             title            = { Text("电机 ${idx + 1} 独立目标深度") },
             text             = {
-                OutlinedTextField(
-                    value           = motorDialogInput,
-                    onValueChange   = { motorDialogInput = it },
-                    label           = { Text("目标深度 (mm)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine      = true
+                DepthQuickInput(
+                    textValue      = motorDialogInput,
+                    onTextChange   = { motorDialogInput = it },
+                    sliderValue    = motorDialogSlider,
+                    onSliderChange = { motorDialogSlider = it },
+                    onCommit       = { d -> applyMotorDepth(idx, d) },
+                    onCommitTyped  = {
+                        parseTypedDepth(motorDialogInput)?.let { d -> applyMotorDepth(idx, d) }
+                    },
+                    applyLabel     = "应用"
                 )
             },
             confirmButton = {
-                Button(onClick = { applyMotorDepth(idx) }) { Text("确认") }
-            },
-            dismissButton = {
-                TextButton(onClick = { motorDialogIndex = null }) { Text("取消") }
+                TextButton(onClick = { motorDialogIndex = null }) { Text("关闭") }
             }
         )
     }
@@ -633,6 +667,7 @@ fun SowingDepthScreen(
 @Composable
 private fun MotorStatusCard(
     cal:         ServoCalibration,
+    encCal:      EncoderCalibration?,
     motorIndex:  Int,
     onSingleSet: () -> Unit,
     onCalibrate: () -> Unit
@@ -722,6 +757,26 @@ private fun MotorStatusCard(
                     }
                 }
 
+                // 实测深度（摆臂编码器真实入土深度，与伺服换算深度并列）
+                // 离线/未标定必须显式区分，不显示 0 值——0 是合法深度，显示 0 会误导操作员
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("实测深度", fontSize = 11.sp, color = Color.Gray)
+                    when {
+                        encCal == null || !encCal.isOnline -> Text(
+                            "离线", fontSize = 14.sp, color = Color(0xFF9E9E9E)
+                        )
+                        !encCal.fitValid -> Text(
+                            "未标定", fontSize = 14.sp, color = Color.Gray
+                        )
+                        else -> Text(
+                            "%.1f mm".format(encCal.measuredDepth),
+                            fontSize   = 18.sp,
+                            color      = Color(0xFFE65100),
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
                 // 操作按钮列
                 Column(
                     horizontalAlignment = Alignment.End,
@@ -750,9 +805,9 @@ private fun MotorStatusCard(
             if (cal.alarmCode != 0) {
                 Spacer(Modifier.height(6.dp))
                 val alarmText = when (cal.alarmCode) {
-                    1    -> "⚠ 正向限位触发（已急停）"
-                    2    -> "⚠ 负向限位触发（已急停）"
-                    -1   -> "⚠ SDO 通信错误"
+                    SERVO_ALARM_DRIVE_FAULT -> "⚠ 驱动器故障（已 Quick Stop）"
+                    SERVO_ALARM_INTERNAL_LIMIT -> "⚠ 驱动器内部限位激活（已 Quick Stop）"
+                    SERVO_ALARM_SDO_ABORT -> "⚠ SDO 通信错误"
                     else -> "⚠ 报警码: ${cal.alarmCode}"
                 }
                 Text(
@@ -785,4 +840,120 @@ internal fun motorStatusLabel(cal: ServoCalibration): String = when {
     !cal.isOnline              -> "离线"
     cal.isOnline && !cal.isEnabled -> "未使能"
     else                       -> "运行中"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 目标深度多方式输入（手打 / 滑块 / 一键预设）
+// ─────────────────────────────────────────────────────────────────────────────
+// 田间工控触摸屏调软键盘代价高，而目标深度日常只在 20~80mm 之间调整，故提供三种入口：
+//   ① 手打 + 「应用」——覆盖标定量块 100mm、处方图控深等超出常用区间的场景（不硬限幅）
+//   ② 滑块（5mm 精度）——拖动中只改本地显示，松手（onValueChangeFinished）才下发，
+//      与本页 位置运动速度 / 加减速度 滑块写法一致：拖动过程绝不刷 CAN 总线
+//   ③ 一键预设（10mm 步长）——点一下即下发，最省操作，按钮做成 48dp 大触点便于戴手套操作
+// 三条路径都汇聚到调用方的同一个提交出口（applyGlobalDepth / applyMotorDepth）。
+private const val DEPTH_QUICK_MIN = 20f
+private const val DEPTH_QUICK_MAX = 80f
+// 滑块 5mm 精度：(80-20)/5 = 12 段 → 中间断点数 steps = 11
+private const val DEPTH_QUICK_STEPS = 11
+// 一键预设：20~80mm，步长 10mm
+private val DEPTH_PRESETS = listOf(20f, 30f, 40f, 50f, 60f, 70f, 80f)
+
+@Composable
+private fun DepthQuickInput(
+    textValue: String,
+    onTextChange: (String) -> Unit,
+    sliderValue: Float,
+    onSliderChange: (Float) -> Unit,
+    onCommit: (Float) -> Unit,
+    onCommitTyped: () -> Unit,
+    applyLabel: String
+) {
+    Column {
+        // ① 手动键入 ────────────────────────────────────────────────────────
+        Row(
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value           = textValue,
+                onValueChange   = onTextChange,
+                label           = { Text("目标深度 (mm)", fontSize = 12.sp) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine      = true,
+                modifier        = Modifier.weight(1f)
+            )
+            Button(
+                onClick        = onCommitTyped,
+                colors         = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1565C0)),
+                shape          = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Text(applyLabel, color = Color.White, fontSize = 14.sp)
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // ② 滑块（5mm 精度，松手才下发）──────────────────────────────────────
+        Text("滑动设置: %.0f mm".format(sliderValue), fontSize = 14.sp)
+        Slider(
+            value                 = sliderValue,
+            // Slider 的 steps 本身已吸附到 5mm，取整只为消除浮点毛刺
+            onValueChange         = { onSliderChange((it / 5f).roundToInt() * 5f) },
+            onValueChangeFinished = { onCommit(sliderValue) },
+            valueRange            = DEPTH_QUICK_MIN..DEPTH_QUICK_MAX,
+            steps                 = DEPTH_QUICK_STEPS,
+            colors                = SliderDefaults.colors(
+                thumbColor       = Color(0xFF1565C0),
+                activeTrackColor = Color(0xFF1565C0)
+            )
+        )
+
+        Spacer(Modifier.height(4.dp))
+
+        // ③ 一键预设（10mm 步长）────────────────────────────────────────────
+        Text("一键设置 (mm)", fontSize = 14.sp)
+        Spacer(Modifier.height(6.dp))
+        val current = textValue.toFloatOrNull()
+        DEPTH_PRESETS.chunked(4).forEach { rowPresets ->
+            Row(
+                modifier              = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowPresets.forEach { preset ->
+                    val selected = current != null && abs(current - preset) < 0.05f
+                    if (selected) {
+                        Button(
+                            onClick        = { onCommit(preset) },
+                            modifier       = Modifier.weight(1f).height(48.dp),
+                            colors         = ButtonDefaults.buttonColors(
+                                backgroundColor = Color(0xFF1565C0)
+                            ),
+                            shape          = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text(
+                                "%.0f".format(preset),
+                                color      = Color.White,
+                                fontSize   = 16.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick        = { onCommit(preset) },
+                            modifier       = Modifier.weight(1f).height(48.dp),
+                            shape          = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("%.0f".format(preset), fontSize = 16.sp)
+                        }
+                    }
+                }
+                // 末行不足 4 个时补空位，保证按钮宽度与上一行对齐
+                repeat(4 - rowPresets.size) { Spacer(Modifier.weight(1f)) }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
 }

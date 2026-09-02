@@ -6,6 +6,10 @@ import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.SERVO_ALARM_DRIVE_FAULT
+import com.nx.vfremake.data.SERVO_ALARM_INTERNAL_LIMIT
+import com.nx.vfremake.data.SERVO_ALARM_NONE
+import com.nx.vfremake.data.SERVO_ALARM_SDO_ABORT
 import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.JogSession
@@ -344,9 +348,10 @@ class SowingDepthCoroutine {
                 //
                 // alarmCode 由 CanReceiveCoroutine 从 TPDO1 状态字解析写入：
                 //   0  = 正常
-                //   1  = 正限位触发
-                //   2  = 负限位触发
-                //  -1  = SDO 错误应答
+                //   1  = DS402 Fault(Bit3)
+                //   2  = DS402 Internal limit active(Bit11)
+                //  -1  = SDO Abort
+                // EDS 未定义 Bit14/15 的正负限位语义，禁止据此误报方向限位。
                 //
                 // 限位触发时发送急停，防止电机持续压向限位开关。
                 // ════════════════════════════════════════════════════════════
@@ -357,23 +362,20 @@ class SowingDepthCoroutine {
                     if (!cal.isOnline) continue
 
                     when (cal.alarmCode) {
-                        1 -> {
-                            Log.e(TAG, "motor=$i 正限位触发！发送急停")
-                            // 安全项：对点动中的电机也照发——限位报警必须无条件停车；
-                            // 之后点动可经启动序列的 0x0006 自恢复
-                            CanOpenFun.sendFrameSequenced(CanOpenFun.buildQuickStopFrame(cal.nodeId))
-                            // 用 per-motor 当前目标记录，避免与全局值耦合
-                            lastSentTargetDepth[i] = cal.targetDepth
-                        }
-                        2 -> {
-                            Log.e(TAG, "motor=$i 负限位触发！发送急停")
+                        SERVO_ALARM_DRIVE_FAULT -> {
+                            Log.e(TAG, "motor=$i 驱动器 Fault！发送 DS402 Quick Stop")
                             CanOpenFun.sendFrameSequenced(CanOpenFun.buildQuickStopFrame(cal.nodeId))
                             lastSentTargetDepth[i] = cal.targetDepth
                         }
-                        -1 -> {
-                            Log.w(TAG, "motor=$i SDO错误，不发额外命令（等待恢复）")
+                        SERVO_ALARM_INTERNAL_LIMIT -> {
+                            Log.e(TAG, "motor=$i 内部限位激活！发送 DS402 Quick Stop")
+                            CanOpenFun.sendFrameSequenced(CanOpenFun.buildQuickStopFrame(cal.nodeId))
+                            lastSentTargetDepth[i] = cal.targetDepth
                         }
-                        0 -> { /* 正常，无操作 */ }
+                        SERVO_ALARM_SDO_ABORT -> {
+                            Log.w(TAG, "motor=$i SDO Abort，不发额外命令（等待恢复）")
+                        }
+                        SERVO_ALARM_NONE -> { /* 正常，无操作 */ }
                     }
                 }
 
