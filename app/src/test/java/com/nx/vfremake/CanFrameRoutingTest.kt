@@ -59,6 +59,7 @@ class CanFrameRoutingTest {
         assertEquals(Pair(11, 2), CanReceiveCoroutine.classifyCanOpen(0x70B))  // 伺服心跳
         assertEquals(Pair(11, 3), CanReceiveCoroutine.classifyCanOpen(0x28B))  // TPDO2
         assertEquals(Pair(11, 4), CanReceiveCoroutine.classifyCanOpen(0x38B))  // TPDO3
+        assertEquals(Pair(11, 5), CanReceiveCoroutine.classifyCanOpen(0x48B))  // TPDO4
         assertEquals(Pair(-1, -1), CanReceiveCoroutine.classifyCanOpen(0x027)) // 施肥帧
         assertEquals(Pair(-1, -1), CanReceiveCoroutine.classifyCanOpen(0x000)) // NMT
         // 段边界
@@ -99,6 +100,18 @@ class CanFrameRoutingTest {
         // 未配置的 CANopen 节点（如 ID=5 的 TPDO 0x185）：改动前后都跌落施肥（容错不变）
         assertEquals("FERTILIZER", routeOf(0x185))
         assertEquals("FERTILIZER", routeOf(0x705))
+    }
+
+    @Test
+    fun tpdo4OfConfiguredServoIsAbsorbedNotParsedAsFertilizer() {
+        // EDS 1803h 出厂事件周期为 0，但伺服调试页可以开启 TPDO4（0x480+ID）。
+        // 未纳入 classifyCanOpen 时，0x48B 会跌落施肥字节协议解析。
+        assertEquals(Pair(11, 5), CanReceiveCoroutine.classifyCanOpen(0x48B))
+        assertEquals("SERVO", routeOf(0x48B))
+        assertEquals("SERVO", routeOf(0x492))   // Node 18
+        // 段外与未配置节点仍按原样跌落施肥
+        assertEquals("FERTILIZER", routeOf(0x480))
+        assertEquals("FERTILIZER", routeOf(0x485))
     }
 
     // ── SDO 应答等待器：旧 ID（出厂 1）应答被消费，不落施肥 ──────────────────

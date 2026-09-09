@@ -17,6 +17,7 @@ import com.nx.vfremake.funClass.ConvAndCtrlFun
 import com.nx.vfremake.funClass.EncoderCanOpenFun
 import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.funClass.SdoReplyWaiters
+import com.nx.vfremake.funClass.TpdoArrivalMonitor
 import com.nx.vfremake.mRmcData
 import com.nx.vfremake.canMonitorData
 import com.nx.vfremake.mSPParamData
@@ -60,14 +61,27 @@ class CanReceiveCoroutine {
      */
     private val encoderFilters = Array(8) { EncoderCanOpenFun.EncoderFilter() }
 
+    /**
+     * 每路伺服上一次写诊断日志的时间戳（ms），索引 = motorIndex 0~7。
+     *
+     * 【为什么要节流】appendCanOpenLog 每条都要新建 SimpleDateFormat 并整表复制
+     * 60 行再 postValue。TPDO 上报周期可在伺服调试页改到 20ms（8 台 = 400 帧/s），
+     * 逐帧写日志会把接收线程压在字符串拷贝上——与 drawnCells 治理绘图刷屏同理。
+     * 位置/状态字仍逐帧更新，只有给人看的滚动日志被抽稀。
+     */
+    private val servoDiagLogLastMs = LongArray(8) { 0L }
+
     companion object {
         private const val TAG = "CanReceiveCoroutine"
         /** 超过此时间未收到任何帧即标记离线（ms），伺服与编码器共用 */
         private const val SERVO_OFFLINE_TIMEOUT_MS = 2000L
 
+        /** 伺服 TPDO 诊断日志的最小写入间隔（ms），见 servoDiagLogLastMs 注释 */
+        private const val SERVO_DIAG_LOG_MIN_INTERVAL_MS = 200L
+
         /**
          * 纯函数：CANopen 服务帧段识别（canId → (nodeId, type)）。
-         * type: 0=SDO回复, 1=TPDO1, 2=心跳/Boot-up, 3=TPDO2, 4=TPDO3, -1=非CANopen。
+         * type: 0=SDO回复, 1=TPDO1, 2=心跳/Boot-up, 3=TPDO2, 4=TPDO3, 5=TPDO4, -1=非CANopen。
          *
          * 从 dispatchFrame 原地的 when 表达式提取，映射逐字节不变——提取仅为可单元
          * 测试（验证编码器帧不跌落施肥解析、伺服/施肥路由与改动前一致）。
@@ -78,6 +92,9 @@ class CanReceiveCoroutine {
             canId in 0x701..0x77F -> (canId - 0x700) to 2   // 心跳 / Boot-up
             canId in 0x281..0x2FF -> (canId - 0x280) to 3   // TPDO2（暂不解析，防止跌落施肥逻辑）
             canId in 0x381..0x3FF -> (canId - 0x380) to 4   // TPDO3（暂不解析，防止跌落施肥逻辑）
+            // TPDO4 = 0x480+ID（EDS 1803h 默认事件周期 0，出厂不上报；但伺服调试页
+            // 可以把它打开）。不列进来就会跌落到施肥字节协议解析——与 TPDO2/3 同样吸收。
+            canId in 0x481..0x4FF -> (canId - 0x480) to 5   // TPDO4（暂不解析，防止跌落施肥逻辑）
             else -> -1 to -1
         }
     }
@@ -352,6 +369,15 @@ class CanReceiveCoroutine {
             val motorIndex = viewModel.currentSowingDepthState()
                 .motors.indexOfFirst { it.nodeId == canOpenNodeId }
 
+            // TPDO 周期核验采样：只在调试页武装期间记录到达时刻，未武装时是一次
+            // volatile 读。刻意放在"该行是否启用作业"的门控之前——核验量的是总线上
+            // 的真实报文，与作业行开关无关。
+            if (motorIndex >= 0 && TpdoArrivalMonitor.isArmed()) {
+                TpdoArrivalMonitor.pdoOfCanOpenType(canOpenType)?.let { pdo ->
+                    TpdoArrivalMonitor.record(canOpenNodeId, pdo)
+                }
+            }
+
             if (motorIndex >= 0) {
                 val activeMotorState = viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
                 if (!isSowingDepthMotorActive(motorIndex, mSPParamData.rowNumber, activeMotorState)) {
@@ -383,7 +409,7 @@ class CanReceiveCoroutine {
                     // 心跳/Boot-up（0x700+ID）：吸收防止跌落施肥解析即可，
                     // 不做业务处理——编码器在线判定只看 TPDO/SDO 应答到达
                     2 -> Log.d(TAG, "编码器 Boot-up/心跳: nodeId=$canOpenNodeId enc=$encIndex")
-                    // TPDO2/3 同样吸收
+                    // TPDO2/3/4 同样吸收
                 }
                 return  // 已处理/吸收，不再走施肥逻辑
             }
@@ -558,7 +584,15 @@ class CanReceiveCoroutine {
             )
         }
 
-        viewModel.appendCanOpenLog("TPDO1 M${motorIndex+1}(N$nodeId) pos=${tpdo.actualPos} sw=0x${tpdo.statusWord.toString(16)} alarm=$alarm")
+        // 逐帧更新状态，但滚动日志按 SERVO_DIAG_LOG_MIN_INTERVAL_MS 抽稀（20ms 上报时防刷屏）
+        val nowMs = servoLastSeen[motorIndex]
+        if (nowMs - servoDiagLogLastMs[motorIndex] >= SERVO_DIAG_LOG_MIN_INTERVAL_MS) {
+            servoDiagLogLastMs[motorIndex] = nowMs
+            viewModel.appendCanOpenLog(
+                "TPDO1 M${motorIndex + 1}(N$nodeId) pos=${tpdo.actualPos}" +
+                    " sw=0x${tpdo.statusWord.toString(16)} alarm=$alarm"
+            )
+        }
         Log.d(
             TAG, "TPDO1: motor=$motorIndex nodeId=$nodeId" +
                  " pos=${tpdo.actualPos} sw=0x${tpdo.statusWord.toString(16)}" +
