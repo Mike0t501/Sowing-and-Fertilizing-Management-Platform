@@ -8,7 +8,7 @@
  *                                         Change History
  * ---------------------------------------------------------------------------------------------------------
  * 单电机梯度往返测试：起始深度→按梯度逐级至终点→逐级返回，每级到位停留后进入下一级
- * 全程 100ms 采样记录 CSV（DepthRecordFun），测试状态经 depthTestStatus 通知 UI
+ * 全程按 config.recordIntervalMs 采样记录 CSV（DepthRecordFun），测试状态经 depthTestStatus 通知 UI
  ***********************************************************************************************************
  */
 
@@ -152,13 +152,15 @@ class DepthTestCoroutine {
                 val stages = buildStageSequence(config)
                 Log.d(TAG, "梯度序列: ${stages.joinToString()}")
 
-                // ── 启动记录器：100ms 采样被测电机一行 ───────────────────────
+                // ── 启动记录器：按配置周期采样被测电机一行 ───────────────────
+                // 周期取自播深控制页的全局设置（与手动记录共用），与下方 POLL_MS 的
+                // 到位判定轮询无关——改采样密度不应改变测试的到位/超时判定行为
                 recorder.start(
                     context = context,
                     mVariableFertViewModel = viewModel,
                     filePrefix = "depthTest",
                     header = DepthRecordFun.buildDepthRecordHeader(),
-                    intervalMs = 100L
+                    intervalMs = config.recordIntervalMs
                 ) { _ ->
                     val m = viewModel.currentSowingDepthState().motors
                         .getOrNull(config.motorIndex) ?: return@start emptyList()

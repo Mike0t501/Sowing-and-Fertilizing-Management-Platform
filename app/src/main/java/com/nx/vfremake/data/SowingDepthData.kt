@@ -56,6 +56,7 @@ data class ServoCalibration(
  * @param jogSpeed          点动速度 RPM（速度模式，范围 1500~2500）
  * @param positionSpeed     位置运动速度 RPM（梯形速度，范围 100~3000）
  * @param acceleration      加速度 RPM/s（范围 1000~60000）
+ * @param recordIntervalMs  实验数据CSV采样周期 ms（范围 20~1000）
  */
 data class SowingDepthState(
     val motors: List<ServoCalibration> = List(8) { ServoCalibration(motorIndex = it) },
@@ -63,6 +64,14 @@ data class SowingDepthState(
     val jogSpeed: Int = 2000,
     val positionSpeed: Int = 500,
     val acceleration: Int = 10000,
+
+    /**
+     * 实验数据CSV采样周期 ms（持久化的全局设置，非运行时状态）。
+     * 手动记录（depthRec_）与一键性能测试（depthTest_）共用同一个值，避免两份数据不同频。
+     * 注意：采到的数据密度上限由伺服/编码器 TPDO1 上报周期决定，设得比上报周期更快只会得到重复行。
+     * 与 DepthTestCoroutine.POLL_MS（到位判定轮询）无关，后者固定 100ms。
+     */
+    val recordIntervalMs: Int = 100,
 
     /**
      * 深度控制总开关（不持久化，启动默认 false）。
@@ -84,6 +93,16 @@ const val SERVO_ALARM_NONE = 0
 const val SERVO_ALARM_DRIVE_FAULT = 1
 const val SERVO_ALARM_INTERNAL_LIMIT = 2
 const val SERVO_ALARM_SDO_ABORT = -1
+
+/**
+ * 实验数据CSV采样周期允许范围 ms（[SowingDepthState.recordIntervalMs]）。
+ *
+ * 下限 20ms：与伺服/编码器 TPDO1 能配置到的最快上报周期对齐；设得比上报周期更快
+ * 只会写出成片的重复行（伪精度），且 8 路电机下写盘行数成倍增长。
+ * 上限 1000ms：再慢就失去伺服动态响应（超调/上升时间）的分辨能力。
+ */
+const val RECORD_INTERVAL_MIN_MS = 20
+const val RECORD_INTERVAL_MAX_MS = 1000
 
 fun isSowingDepthMotorActive(
     motorIndex: Int,

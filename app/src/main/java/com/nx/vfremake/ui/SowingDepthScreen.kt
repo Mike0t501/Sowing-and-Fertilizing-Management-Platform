@@ -64,6 +64,8 @@ import androidx.compose.ui.unit.sp
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.EncoderCalibration
 import com.nx.vfremake.data.EncoderFeedbackState
+import com.nx.vfremake.data.RECORD_INTERVAL_MAX_MS
+import com.nx.vfremake.data.RECORD_INTERVAL_MIN_MS
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.data.SERVO_ALARM_DRIVE_FAULT
@@ -102,7 +104,7 @@ fun SowingDepthScreen(
     val context = LocalContext.current
     val scope   = rememberCoroutineScope()
 
-    // 手动实验数据记录器（100ms 采样 8 路电机；离开页面自动落盘保存）
+    // 手动实验数据记录器（采样周期见 state.recordIntervalMs，8 路电机；离开页面自动落盘保存）
     val depthRecorder = remember { DepthRecordFun() }
     var isRecording by remember { mutableStateOf(false) }
 
@@ -169,6 +171,11 @@ fun SowingDepthScreen(
     // 加减速度本地状态（初始同步自 state，持久化到 SharedPreferences）
     var acceleration by remember { mutableStateOf(state.acceleration) }
 
+    // 实验数据CSV采样周期输入框（本页是该参数的唯一编辑入口，深度性能测试页只读取用）
+    var intervalInput by remember(state.recordIntervalMs) {
+        mutableStateOf(state.recordIntervalMs.toString())
+    }
+
     // 单独设置弹窗：哪路电机正在设置（null = 未打开）
     var motorDialogIndex by remember { mutableStateOf<Int?>(null) }
     var motorDialogInput by remember { mutableStateOf("") }
@@ -230,6 +237,34 @@ fun SowingDepthScreen(
         viewModel.updateServoCalibration(motorIndex) { it.copy(targetDepth = depth) }
     }
 
+    // ── 辅助：提交实验数据采样周期 ────────────────────────────────────────────
+    // 手动记录与一键性能测试共用这一个周期值，改完立即持久化。
+    // 非法/越界输入不写入，只把输入框回滚到当前生效值并提示——实验中途误输入不该
+    // 悄悄改变采样密度，否则同一批 CSV 的时间轴对不上。
+    fun applyRecordInterval(text: String) {
+        val v = text.trim().toIntOrNull()
+        if (v == null || v !in RECORD_INTERVAL_MIN_MS..RECORD_INTERVAL_MAX_MS) {
+            intervalInput = state.recordIntervalMs.toString()
+            Toast.makeText(
+                context,
+                "采样周期须为 $RECORD_INTERVAL_MIN_MS~$RECORD_INTERVAL_MAX_MS ms 的整数",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+        if (v == state.recordIntervalMs) return
+        viewModel.updateSowingDepthGlobalSettings(recordIntervalMs = v)
+        scope.launch(Dispatchers.IO) {
+            MySharedPreFun(context).saveSowingDepthGlobalSettings(
+                jogSpeed          = state.jogSpeed,
+                positionSpeed     = positionSpeed,
+                acceleration      = acceleration,
+                globalTargetDepth = state.globalTargetDepth,
+                recordIntervalMs  = v
+            )
+        }
+    }
+
     // ── 辅助：手动实验数据记录启停 ────────────────────────────────────────────
     fun startManualRecord() {
         if (isSystemRunning) {
@@ -249,7 +284,8 @@ fun SowingDepthScreen(
             mVariableFertViewModel = viewModel,
             filePrefix = "depthRec",
             header = DepthRecordFun.buildDepthRecordHeader(),
-            intervalMs = 100L
+            // 原子真源：后台读状态用 currentSowingDepthState()，不读 LiveData 的 .value
+            intervalMs = viewModel.currentSowingDepthState().recordIntervalMs.toLong()
         ) { _ ->
             // 每次采样写出 8 路电机各一行（长表格式，Origin 按电机号筛选）
             val motors = viewModel.currentSowingDepthState().motors
@@ -465,35 +501,76 @@ fun SowingDepthScreen(
                 modifier        = Modifier.fillMaxWidth(),
                 backgroundColor = if (isRecording) Color(0xFFFFF8E1) else Color.White
             ) {
-                Row(
-                    modifier              = Modifier
+                Column(
+                    modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment     = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
                 ) {
-                    Column {
-                        Text("实验数据记录", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            if (isRecording) "● 记录中（100ms 采样，8 路电机）"
-                            else             "记录编码器位置/深度到 CSV，用于 Origin/Excel 分析",
-                            fontSize = 12.sp,
-                            color    = if (isRecording) Color(0xFFE65100) else Color.Gray
-                        )
-                    }
-                    Button(
-                        onClick = { if (isRecording) stopManualRecord() else startManualRecord() },
-                        colors  = ButtonDefaults.buttonColors(
-                            backgroundColor = if (isRecording) Color(0xFFD32F2F) else Color(0xFF388E3C)
-                        ),
-                        shape          = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
+                    Row(
+                        modifier              = Modifier.fillMaxWidth(),
+                        verticalAlignment     = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(
-                            if (isRecording) "停止记录" else "开始记录",
-                            color = Color.White, fontSize = 14.sp
+                        Column {
+                            Text("实验数据记录", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                if (isRecording) "● 记录中（${state.recordIntervalMs}ms 采样，8 路电机）"
+                                else             "记录编码器位置/深度到 CSV，用于 Origin/Excel 分析",
+                                fontSize = 12.sp,
+                                color    = if (isRecording) Color(0xFFE65100) else Color.Gray
+                            )
+                        }
+                        Button(
+                            onClick = { if (isRecording) stopManualRecord() else startManualRecord() },
+                            colors  = ButtonDefaults.buttonColors(
+                                backgroundColor = if (isRecording) Color(0xFFD32F2F) else Color(0xFF388E3C)
+                            ),
+                            shape          = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
+                        ) {
+                            Text(
+                                if (isRecording) "停止记录" else "开始记录",
+                                color = Color.White, fontSize = 14.sp
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    // 采样周期：本页与深度性能测试页共用同一个值，记录进行中禁止改动
+                    Row(
+                        modifier          = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value           = intervalInput,
+                            onValueChange   = { intervalInput = it },
+                            label           = { Text("采样周期ms") },
+                            enabled         = !isRecording,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine      = true,
+                            modifier        = Modifier.width(140.dp)
                         )
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "$RECORD_INTERVAL_MIN_MS~$RECORD_INTERVAL_MAX_MS ms，" +
+                                        "与一键性能测试共用",
+                                fontSize = 12.sp, color = Color.Gray
+                            )
+                            Text(
+                                "须与伺服/编码器 TPDO 上报周期匹配，设得更快只会记到重复行",
+                                fontSize = 11.sp, color = Color.Gray
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick        = { applyRecordInterval(intervalInput) },
+                            enabled        = !isRecording,
+                            shape          = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Text("应用", fontSize = 13.sp)
+                        }
                     }
                 }
             }
