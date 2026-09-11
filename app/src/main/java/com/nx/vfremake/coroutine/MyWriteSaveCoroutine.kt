@@ -16,12 +16,8 @@
 package com.nx.vfremake.coroutine
 
 import android.content.Context
-import android.net.Uri
-import android.provider.DocumentsContract
-import android.widget.Toast
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.funClass.DocuAndManageFun
-import com.nx.vfremake.funClass.MySharedPreFun
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +25,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStreamWriter
 import java.text.SimpleDateFormat
@@ -234,40 +229,4 @@ class MyWriteSaveFun {
         }
         return dataList.toList() // 返回包含所有数据列表的列表
     }
-
-    //...写出文件测试代码
-    /**
-     * 写出文件hello world！
-     * @param  fileName:文件名称
-     * @param  fileContent:文件内容
-     * @param  sharedPreString:键值
-     * @param  context:上下文
-     * @return
-     * @note
-     */
-    fun writeFileToSelectedDirectory(
-        fileName: String, fileContent: String, sharedPreString: String, context: Context
-    ) {
-        val contentResolver = context.contentResolver
-        val documentUri =
-            MySharedPreFun(context).getMySharedPre().getString(sharedPreString, null)
-        // 创建新文件的URI
-        val newFileUri =
-            DocumentsContract.createDocument(
-                contentResolver,
-                Uri.parse(documentUri),
-                "text/plain",
-                fileName
-            )
-        // 写入内容到新文件
-        newFileUri?.let {
-            contentResolver.openFileDescriptor(it, "w")?.use { parcelFileDescriptor ->
-                FileOutputStream(parcelFileDescriptor.fileDescriptor).use { fileOutputStream ->
-                    fileOutputStream.write(fileContent.toByteArray())
-                }
-            }
-        }
-        Toast.makeText(context, "写出文件成功", Toast.LENGTH_SHORT).show()
-    }
-    //...写出文件测试代码结束
 }

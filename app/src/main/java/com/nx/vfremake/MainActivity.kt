@@ -157,8 +157,7 @@ class MainActivity : AppCompatActivity() {
         ArcGISRuntimeEnvironment.setApiKey(BuildConfig.API_KEY)
 
         // 初始化selectDirectoryLauncher
-        selectWriteDirectoryLauncher =
-            selectDirectoryLauncher(R.string.myWriteDir_DocumentUri_name, this)
+        selectWriteDirectoryLauncher = selectDirectoryLauncher(this)
         selectLoadShpFileLauncher =
             selectShpFileLauncher(R.string.myLoadShpFile_Path_name, this)
 
@@ -177,29 +176,19 @@ class MainActivity : AppCompatActivity() {
     }
     //...oncreat结束
 
-    private fun selectDirectoryLauncher(
-        resId: Int,
-        context: Context,
-    ): ActivityResultLauncher<Uri?> {
+    /**
+     * 实验数据保存目录选择器（作业开始时目录未设置/失效的兜底弹窗）
+     * @note   持久化逻辑与设置界面共用 DocuAndManageFun.persistWriteDirectory；
+     *         不再往目录里写 writetest.txt 试探文件，改为 Toast 反馈
+     */
+    private fun selectDirectoryLauncher(context: Context): ActivityResultLauncher<Uri?> {
         return registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
-            uri?.also {
-                val takeFlags: Int =
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                context.contentResolver.takePersistableUriPermission(uri, takeFlags)
-
-                val sharedPreHelper = MySharedPreFun(context)
-                sharedPreHelper.persistDirectoryUriPermission(
-                    uri,
-                    takeFlags,
-                    context.getString(resId)
-                )
-                MyWriteSaveFun().writeFileToSelectedDirectory(
-                    "writetest.txt",
-                    "Hello, World!",
-                    context.getString(resId),
-                    context
-                )
+            if (uri == null) {
+                Toast.makeText(context, "未选择保存目录，本次作业不会保存实验数据", Toast.LENGTH_LONG).show()
+                return@registerForActivityResult
             }
+            val info = DocuAndManageFun().persistWriteDirectory(context, uri)
+            Toast.makeText(context, "保存目录已设置：${info.displayPath}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -265,8 +254,9 @@ class MainActivity : AppCompatActivity() {
 
                                 // 1. 【修复】：测试模式 / 模拟GNSS 模式下跳过申请文件夹，不要弹出文件选择器！
                                 if (!isTestMode && !simGnss) {
+                                    // 目录未设置或授权失效时弹选择器；正常情况下操作员已在设置界面选好目录
                                     DocuAndManageFun().cheekDirectoryUriPermission(
-                                        R.string.myWriteDir_DocumentUri_name, selectWriteDirectoryLauncher, context
+                                        selectWriteDirectoryLauncher, context
                                     )
                                     if (MySharedPreFun(context).getSpecificValue(R.string.writeSaveData_Switch_name) == "1") {
                                         val spf = MySharedPreFun(context)

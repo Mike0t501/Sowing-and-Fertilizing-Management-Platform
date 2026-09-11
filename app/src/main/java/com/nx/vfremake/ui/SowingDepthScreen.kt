@@ -274,7 +274,7 @@ fun SowingDepthScreen(
         if (DocuAndManageFun().getWriteDirDocumentUri(context) == null) {
             Toast.makeText(
                 context,
-                "未设置保存目录，请先在主界面开启保存实验数据并授权目录",
+                "保存目录未设置或已失效，请在系统设置中选择实验数据保存目录",
                 Toast.LENGTH_LONG
             ).show()
             return

@@ -1,6 +1,9 @@
 package com.nx.vfremake.ui
 
 import android.serialport.SerialPort
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -33,6 +36,9 @@ import com.nx.vfremake.canMonitorData
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
 import com.nx.vfremake.funClass.ConvAndCtrlFun
+import com.nx.vfremake.funClass.DocuAndManageFun
+import com.nx.vfremake.funClass.WriteDirInfo
+import com.nx.vfremake.funClass.WriteDirStatus
 import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mSerialPortCAN
 import com.nx.vfremake.mSerialPortDB9
@@ -548,6 +554,20 @@ fun SettingsScreen(
     val testModeDurationTime = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.testMode_testModeDurationTime_name) ?: context.getString(R.string.testMode_testModeDurationTime_defeatValue)) }
     val forwardSpeedAverageNum = remember { mutableStateOf(MySharedPreFun(context).getSpecificValue(R.string.forwardSpeedAverageNum_name) ?: context.getString(R.string.forwardSpeedAverageNum_defeatValue)) }
 
+    // 实验数据保存目录状态：授权/存在性校验走 ContentResolver，放 IO 线程；每次进入页面重新校验
+    var writeDirInfo by remember { mutableStateOf<WriteDirInfo?>(null) }
+    var writeDirTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(writeDirTick) {
+        writeDirInfo = withContext(Dispatchers.IO) { DocuAndManageFun().getWriteDirInfo(context) }
+    }
+    val selectWriteDirLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            val info = DocuAndManageFun().persistWriteDirectory(context, uri)
+            Toast.makeText(context, "保存目录已设置：${info.displayPath}", Toast.LENGTH_SHORT).show()
+            writeDirTick++
+        }
+    }
+
     val colorStep = remember { mutableIntStateOf(MySharedPreFun(context).getSpecificValue(R.string.colorStep_name)?.toIntOrNull() ?: context.resources.getInteger(R.integer.colorStep_value)) }
     val deltaX = remember { mutableIntStateOf(MySharedPreFun(context).getSpecificValue(R.string.deltaX_name)?.toIntOrNull() ?: context.resources.getInteger(R.integer.deltaX_value)) }
     val deltaY = remember { mutableIntStateOf(MySharedPreFun(context).getSpecificValue(R.string.deltaY_name)?.toIntOrNull() ?: context.resources.getInteger(R.integer.deltaY_value)) }
@@ -805,6 +825,40 @@ fun SettingsScreen(
                                 Text(text = "查看已保存记录", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color(0xFF1B7F4D))
                                 Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "查看已保存记录", tint = Color(0xFF1B7F4D))
                             }
+                        }
+                    }
+
+                    Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
+
+                    // 实验数据保存目录：常驻入口，不折叠进"保存实验数据"开关——播深手动记录
+                    // 与一键测试即使开关关闭也要写这个目录。授权失效时在此直接重选，
+                    // 不再依赖作业开始时的一次性弹窗。
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = "实验数据保存目录", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF333333))
+                            Spacer(modifier = Modifier.height(4.dp))
+                            val info = writeDirInfo
+                            val (statusText, statusColor) = when (info?.status) {
+                                null -> "正在检查..." to Color.Gray
+                                WriteDirStatus.OK -> (info.displayPath ?: "") to Color(0xFF1B7F4D)
+                                WriteDirStatus.INVALID -> "已失效：${info.displayPath}\n授权丢失或目录已被删除，请重新选择" to Color(0xFFE65100)
+                                WriteDirStatus.NOT_SET -> "未设置，开始作业时会弹出目录选择框" to Color.Gray
+                            }
+                            Text(text = statusText, fontSize = 12.sp, color = statusColor)
+                        }
+                        TextButton(
+                            onClick = { DocuAndManageFun().selectDirectory(selectWriteDirLauncher) },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = if (writeDirInfo?.status == WriteDirStatus.OK) "更改" else "选择目录",
+                                fontSize = 13.sp,
+                                color = Color(0xFF1565C0)
+                            )
                         }
                     }
 
