@@ -577,6 +577,8 @@ object CanOpenFun {
             try {
                 outputStream.write(frame)
                 outputStream.flush()
+                // 链路质量统计：写入成功才算"发出"，写失败的帧本就没进链路，不计
+                CanLinkStats.onFrameSent(frame)
             } catch (e: Exception) {
                 Log.e(TAG, "CANopen 帧发送失败: ${e.message}")
             }

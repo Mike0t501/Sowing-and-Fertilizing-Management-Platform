@@ -12,6 +12,7 @@ import com.nx.vfremake.data.SERVO_ALARM_NONE
 import com.nx.vfremake.data.SERVO_ALARM_SDO_ABORT
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
+import com.nx.vfremake.funClass.CanLinkStats
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.ConvAndCtrlFun
 import com.nx.vfremake.funClass.EncoderCanOpenFun
@@ -176,8 +177,11 @@ class CanReceiveCoroutine {
                     // ── 变长帧解析循环 ──────────────────────────────
                     while (buffer.size >= 3) {
                         // 1. 同步：跳过非起始字节
+                        //    （链路质量：健康链路这里永远不该走到——每丢一个字节就说明
+                        //      UART 字节流错位了，是接触不良最底层的征兆）
                         if (buffer[0] != 0x27.toByte()) {
                             buffer.removeAt(0)
+                            CanLinkStats.onResyncByte()
                             continue
                         }
                         // 2. 读取载荷长度（len = frameInfo_1B + canId_2B + data_NB）
@@ -188,11 +192,13 @@ class CanReceiveCoroutine {
                         // 4. 验证结束字节
                         if (buffer[frameSize - 1] != 0x39.toByte()) {
                             buffer.removeAt(0)
+                            CanLinkStats.onBadTail()
                             continue
                         }
                         // 5. 提取完整帧，丢弃已消费字节
                         val frame = buffer.take(frameSize).toByteArray()
                         buffer = buffer.drop(frameSize).toMutableList()
+                        CanLinkStats.onFrameParsed()
 
                         // 6. 最少需要 frameInfo(1) + canId(2) = 3 字节载荷
                         // 接收帧格式（与发送帧相同）：
@@ -209,6 +215,7 @@ class CanReceiveCoroutine {
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Throwable) {
+                                CanLinkStats.onParseError()
                                 Log.e(TAG, "dispatchFrame 解析异常（已跳过该帧）: ${e.message}", e)
                             }
                             // 任意 CAN 帧均更新接收时间戳，供施肥看门狗判断总线在线
@@ -235,6 +242,7 @@ class CanReceiveCoroutine {
                     throw e
                 } catch (e: IOException) {
                     // 端口被关/重开导致读写失败：清空缓冲、短暂等待，下一轮用新流恢复（不退出循环）
+                    CanLinkStats.onIoError()
                     Log.w(TAG, "接收 IOException（将重试，端口可能已重开）: ${e.message}")
                     buffer.clear()
                     lastStream = null
@@ -363,6 +371,14 @@ class CanReceiveCoroutine {
         // 识别是否为 CANopen 服务帧，并提取 Node-ID（纯函数提取至 companion，映射不变）
         // canOpenType: 0=SDO回复, 1=TPDO1, 2=心跳/Boot-up, -1=非CANopen
         val (canOpenNodeId, canOpenType) = classifyCanOpen(canId)
+
+        // 链路质量统计：放在任何业务门控之前——计的是总线上真实到达的报文，
+        // 与该节点是否被配置/该行是否启用无关（同 TpdoArrivalMonitor 的取舍）
+        when (canOpenType) {
+            0 -> CanLinkStats.onSdoReply(canOpenNodeId, isAbort = (data.firstOrNull()?.toInt() ?: 0) and 0xFF == 0x80)
+            1 -> CanLinkStats.onTpdo1(canOpenNodeId)
+            2 -> CanLinkStats.onHeartbeat(canOpenNodeId, isBootup = (data.firstOrNull()?.toInt() ?: -1) and 0xFF == 0x00)
+        }
 
         if (canOpenType >= 0) {
             // 在已配置的深度舵机列表中查找对应 motorIndex

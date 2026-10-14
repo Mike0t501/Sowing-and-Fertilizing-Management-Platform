@@ -26,6 +26,7 @@ import androidx.compose.material.Scaffold
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -45,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
+import com.nx.vfremake.funClass.CanLinkStats
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.funClass.SdoReplyWaiters
@@ -60,6 +62,14 @@ import kotlinx.coroutines.withContext
 
 private const val SERVO_DEBUG_TIMEOUT_MS = 1000L
 private const val SERVO_SAMPLE_INTERVAL_MS = 300L
+
+// ── CAN 链路质量 ────────────────────────────────────────────────────────────
+/** "最近 N 秒"窗口的采样拍数（每秒一拍） */
+private const val LINK_WINDOW_SAMPLES = 5
+/** 主动丢帧探测的帧数：50 帧在健康链路上约 1.5s，足以暴露 2% 量级的丢帧 */
+private const val LINK_PROBE_COUNT = 50
+/** 探测单帧超时：健康往返约 20~30ms，200ms 已是 6 倍余量，不用等到 1s */
+private const val LINK_PROBE_TIMEOUT_MS = 200L
 
 /** 2614h 保存标志轮询：驱动器写 EEPROM 一般 1s 内完成，留 10 次 × 300ms 余量。 */
 private const val SERVO_SAVE_POLL_TIMES = 10
@@ -101,6 +111,20 @@ fun ServoDiagnosticsScreen(
     val values = remember { mutableStateMapOf<String, Long>() }
     val valueErrors = remember { mutableStateMapOf<String, String>() }
     val logLines = remember { mutableStateListOf<String>() }
+
+    // ── CAN 链路质量（每秒轮询一次计数器快照；保留最近几拍用于算"最近 5 秒"增量）──
+    // 2026-09 现场为一个接触不良的 CAN 接口排查了数天，因为软件层面看不出在丢帧。
+    var linkSnap by remember { mutableStateOf(CanLinkStats.snapshot()) }
+    val linkHistory = remember { mutableStateListOf<CanLinkStats.Snapshot>() }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val s = CanLinkStats.snapshot()
+            linkSnap = s
+            linkHistory.add(s)
+            if (linkHistory.size > LINK_WINDOW_SAMPLES + 1) linkHistory.removeAt(0)
+            delay(1000)
+        }
+    }
 
     val state = depthState ?: viewModel.currentSowingDepthState()
     val selectedMotor = state.motors.getOrNull(selectedMotorIndex) ?: state.motors.first()
@@ -244,6 +268,61 @@ fun ServoDiagnosticsScreen(
                     )
                     else -> appendLog("✗ 6084h 应答格式无效")
                 }
+            } finally {
+                withContext(Dispatchers.Main) { busy = false }
+            }
+        }
+    }
+
+    /**
+     * 主动丢帧探测：对选定节点连发 [LINK_PROBE_COUNT] 次 6064h 读，逐帧等应答，
+     * 统计收到几个、平均往返多久。
+     *
+     * 这是比被动计数更有说服力的链路测试：被动计数掺着各路业务流量，而这里是
+     * 一问一答、逐帧配对，丢了就是丢了。只用读操作，作业运行中也安全；
+     * 走 SdoReplyWaiters（全局 20ms 步调 + 请求互斥），不会挤掉控制回路的帧。
+     * 50 帧在健康链路上约 1.5s 跑完；每帧超时 [LINK_PROBE_TIMEOUT_MS]，最坏 10s。
+     */
+    fun probeLinkLoss() {
+        busy = true
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (!MySerialPortFun.ensureCanPortOpen(context)) {
+                    appendLog("✗ CAN 串口打开失败")
+                    return@launch
+                }
+                appendLog("… 链路探测 Node $nodeId：连发 $LINK_PROBE_COUNT 帧 6064h 读")
+                var replied = 0
+                var rttSumMs = 0L
+                var rttMaxMs = 0L
+                val t0 = System.nanoTime()
+                repeat(LINK_PROBE_COUNT) {
+                    val sent = System.nanoTime()
+                    val raw = SdoReplyWaiters.sendAndAwait(
+                        CanOpenFun.buildReadPositionFrame(nodeId),
+                        0x580 + nodeId,
+                        LINK_PROBE_TIMEOUT_MS
+                    )
+                    if (raw != null) {
+                        replied++
+                        val rtt = (System.nanoTime() - sent) / 1_000_000L
+                        rttSumMs += rtt
+                        if (rtt > rttMaxMs) rttMaxMs = rtt
+                    }
+                }
+                val totalMs = (System.nanoTime() - t0) / 1_000_000L
+                val lost = LINK_PROBE_COUNT - replied
+                val lossPct = lost * 100.0 / LINK_PROBE_COUNT
+                val verdict = when {
+                    lost == 0 -> "✓ 链路正常"
+                    lossPct < 5 -> "⚠ 轻微丢帧"
+                    else -> "✗ 链路异常，优先检查 CAN 接口/线缆/接触"
+                }
+                appendLog(
+                    "$verdict  Node $nodeId：发 $LINK_PROBE_COUNT / 收 $replied，丢失 %.1f%%，".format(lossPct) +
+                        if (replied > 0) "往返均值 ${rttSumMs / replied}ms 最大 ${rttMaxMs}ms，共 ${totalMs}ms"
+                        else "全部超时，共 ${totalMs}ms"
+                )
             } finally {
                 withContext(Dispatchers.Main) { busy = false }
             }
@@ -972,6 +1051,17 @@ fun ServoDiagnosticsScreen(
                 }
             }
 
+            // ── CAN 链路质量 ─────────────────────────────────────────────────
+            // 排查"播深调不了"这类问题时先看这里：SDO 丢失率 >0 或帧头错位字节 >0，
+            // 就先查 CAN 接口/线缆/接触，别急着怀疑逻辑。
+            LinkQualityCard(
+                snap = linkSnap,
+                history = linkHistory,
+                probeEnabled = !busy && !sampling,
+                onProbe = { probeLinkLoss() },
+                onReset = { CanLinkStats.reset(); linkHistory.clear() }
+            )
+
             Card(modifier = Modifier.fillMaxWidth(), elevation = 2.dp, shape = RoundedCornerShape(10.dp)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("一键 EDS 快速诊断", fontWeight = FontWeight.Bold, color = Color(0xFF1565C0))
@@ -1612,6 +1702,124 @@ fun ServoDiagnosticsScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CAN 链路质量卡片
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 链路质量卡片：全局 UART 健康度 + 每节点 SDO 请求/应答配对 + 最近 5 秒增量 + 主动探测。
+ *
+ * 判读口诀（也印在卡片上）：
+ *   - SDO 丢失率应为 0%。>0 且持续增长 → 链路在丢帧；
+ *   - 帧头错位字节 / 帧尾错 应恒为 0。>0 → UART 字节流本身在丢，比 SDO 丢失更底层；
+ *   - Boot-up 次数 >0 → 驱动器在自复位（总线错误累积到 bus-off 后恢复也会发 Boot-up）。
+ * 三者任一异常，先查 CAN 接口/线缆/接触，再怀疑逻辑。
+ */
+@Composable
+private fun LinkQualityCard(
+    snap: CanLinkStats.Snapshot,
+    history: List<CanLinkStats.Snapshot>,
+    probeEnabled: Boolean,
+    onProbe: () -> Unit,
+    onReset: () -> Unit
+) {
+    // "最近 N 秒"增量：拿窗口首拍与当前拍做差
+    val base = history.firstOrNull()
+    val winSec = if (base != null) ((snap.atMs - base.atMs) / 1000L).coerceAtLeast(1L) else 0L
+    fun recent(sel: (CanLinkStats.Snapshot) -> Long): Long = if (base == null) 0L else sel(snap) - sel(base)
+    fun recentNode(id: Int, sel: (CanLinkStats.NodeSnapshot) -> Long): Long {
+        val now = snap.nodes[id] ?: return 0L
+        val then = base?.nodes?.get(id)
+        return sel(now) - (then?.let(sel) ?: 0L)
+    }
+
+    val uartOk = snap.uartClean
+    val worstLoss = snap.nodes.values.maxOfOrNull { it.sdoLossRatio } ?: 0.0
+    val headerColor = when {
+        !uartOk || worstLoss >= 0.05 -> Color(0xFFC62828)
+        worstLoss > 0.0 -> Color(0xFFEF6C00)
+        else -> Color(0xFF2E7D32)
+    }
+    val headerVerdict = when {
+        !uartOk -> "UART 帧错位——先查接口/线缆"
+        worstLoss >= 0.05 -> "SDO 丢帧严重——先查接口/线缆"
+        worstLoss > 0.0 -> "有少量 SDO 丢帧"
+        snap.rxFrames == 0L -> "尚无数据"
+        else -> "链路正常"
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = 2.dp,
+        shape = RoundedCornerShape(10.dp),
+        backgroundColor = if (uartOk && worstLoss == 0.0) Color.White else Color(0xFFFFF8E1)
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("CAN 链路质量", fontWeight = FontWeight.Bold, color = Color(0xFF1565C0))
+                Text(headerVerdict, fontWeight = FontWeight.SemiBold, color = headerColor, fontSize = 13.sp)
+            }
+
+            // 全局行（等宽字体，肉眼对齐）
+            Text(
+                "运行 %ds   发帧 %d   收帧 %d   最近%ds收帧 %d".format(
+                    snap.uptimeMs / 1000, snap.txFrames, snap.rxFrames, winSec, recent { it.rxFrames }
+                ),
+                fontFamily = FontFamily.Monospace, fontSize = 12.sp
+            )
+            Text(
+                "帧头错位字节 %d   帧尾错 %d   解析异常 %d   串口IO异常 %d".format(
+                    snap.resyncBytes, snap.badTailFrames, snap.parseErrors, snap.ioErrors
+                ),
+                fontFamily = FontFamily.Monospace, fontSize = 12.sp,
+                color = if (uartOk) Color.Unspecified else Color(0xFFC62828)
+            )
+
+            Divider(color = Color(0xFFEEEEEE), thickness = 0.5.dp)
+
+            // 每节点表
+            if (snap.nodes.isEmpty()) {
+                Text("尚未收到任何 CANopen 报文", fontSize = 12.sp, color = Color.Gray)
+            } else {
+                Text(
+                    "节点  SDO请求  应答  丢失   丢失率  最近%ds丢失  TPDO1  心跳  Boot".format(winSec),
+                    fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color.Gray
+                )
+                snap.nodes.values.forEach { n ->
+                    val recentLost = recentNode(n.nodeId) { it.sdoRequests } - recentNode(n.nodeId) { it.sdoReplies }
+                    val rowColor = when {
+                        n.bootups > 0 || n.sdoLossRatio >= 0.05 -> Color(0xFFC62828)
+                        n.sdoLossRatio > 0.0 -> Color(0xFFEF6C00)
+                        else -> Color.Unspecified
+                    }
+                    Text(
+                        "%-5d %7d %5d %5d %6.1f%% %10d %6d %5d %5d".format(
+                            n.nodeId, n.sdoRequests, n.sdoReplies, n.sdoLost,
+                            n.sdoLossRatio * 100, recentLost, n.tpdo1, n.heartbeats, n.bootups
+                        ),
+                        fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = rowColor
+                    )
+                }
+            }
+
+            Text(
+                "判读：SDO 丢失率与帧头错位应恒为 0；Boot-up>0 说明驱动器在自复位。" +
+                    "任一异常先查 CAN 接口/线缆/接触，再怀疑逻辑。6084h 已知不应答，不计入。",
+                fontSize = 11.sp, color = Color.Gray
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = onProbe,
+                    enabled = probeEnabled,
+                    colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1565C0))
+                ) { Text("丢帧探测 ×$LINK_PROBE_COUNT", color = Color.White) }
+                OutlinedButton(onClick = onReset) { Text("重置计数") }
             }
         }
     }
