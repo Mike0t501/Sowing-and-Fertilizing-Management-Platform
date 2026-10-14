@@ -1014,6 +1014,7 @@ fun ServoDiagnosticsScreen(
                     Text("• EDS 未声明 261Fh/2620h；App 限位仅为软件限幅，不再向未知对象写入。", fontSize = 12.sp)
                     Text("• 6041h Bit14/15 为厂商位，不能解释为正/负限位；Bit11 才是内部限位。", fontSize = 12.sp)
                     Text("• 6084h 未列入本 EDS；运行代码保留兼容写入，现场可通过 SDO abort 日志判断设备是否实现。", fontSize = 12.sp)
+                    Text("• 「YZ-MOTOR 验证」③ 运动核对会让电机小行程往返，务必悬空；①只读核对随时可跑。", fontSize = 12.sp)
                 }
             }
 
@@ -1106,6 +1107,20 @@ fun ServoDiagnosticsScreen(
                     }
                 }
             }
+
+            // ── YZ-MOTOR 验证：EDS vs 固件逐项实测 ─────────────────────────────
+            YzMotorVerifyCard(
+                viewModel = viewModel,
+                nodeId = nodeId,
+                motorLabel = "M${selectedMotorIndex + 1}",
+                calibration = selectedMotor,
+                depthState = state,
+                busy = busy,
+                onBusy = { busy = it },
+                sampling = sampling,
+                writesEnabled = writesEnabled,
+                appendLog = { appendLog(it) }
+            )
 
             Card(modifier = Modifier.fillMaxWidth(), elevation = 2.dp, shape = RoundedCornerShape(10.dp)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

@@ -390,7 +390,11 @@ class CanReceiveCoroutine {
             // 的真实报文，与作业行开关无关。
             if (motorIndex >= 0 && TpdoArrivalMonitor.isArmed()) {
                 TpdoArrivalMonitor.pdoOfCanOpenType(canOpenType)?.let { pdo ->
-                    TpdoArrivalMonitor.record(canOpenNodeId, pdo)
+                    // 连载荷一起留：YZ-MOTOR 验证要核对 TPDO1/TPDO3 的实际字节数与内容
+                    TpdoArrivalMonitor.record(canOpenNodeId, pdo, data = data)
+                }
+                if (canOpenType == 2) {
+                    TpdoArrivalMonitor.recordHeartbeat(canOpenNodeId, data.firstOrNull())
                 }
             }
 

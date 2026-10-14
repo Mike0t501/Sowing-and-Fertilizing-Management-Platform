@@ -793,8 +793,21 @@ object TpdoArrivalMonitor {
     @Volatile
     private var armed = false
 
-    /** key = nodeId * 10 + pdo(1~4) → 到达时刻（elapsedRealtime，ms） */
+    /** key = nodeId * 10 + pdo(1~4；0 = 心跳) → 到达时刻（elapsedRealtime，ms） */
     private val samples = ConcurrentHashMap<Int, MutableList<Long>>()
+
+    /**
+     * 每键最近一帧的原始载荷与本轮见过的载荷长度集合（YZ-MOTOR 验证用）。
+     * EDS 说 TPDO3 是 8 字节（6064h+606Ch），现场日志却见过 4 字节——只记时间戳看不出来，
+     * 必须把载荷留一份。心跳键（pdo=0）存的是 1 字节 NMT 状态。
+     */
+    private val lastPayload = ConcurrentHashMap<Int, ByteArray>()
+    private val seenLengths = ConcurrentHashMap<Int, MutableSet<Int>>()
+    /** 本轮采到的 Boot-up（心跳状态字节 0x00）次数，按节点 */
+    private val bootups = ConcurrentHashMap<Int, Int>()
+
+    /** 心跳在键空间里占 pdo=0 的位置 */
+    private const val HEARTBEAT_SLOT = 0
 
     private fun keyOf(nodeId: Int, pdo: Int) = nodeId * 10 + pdo
 
@@ -813,6 +826,9 @@ object TpdoArrivalMonitor {
     /** 开始采集（清空上一轮样本）。 */
     fun start() {
         samples.clear()
+        lastPayload.clear()
+        seenLengths.clear()
+        bootups.clear()
         armed = true
     }
 
@@ -829,13 +845,47 @@ object TpdoArrivalMonitor {
      * 时间基准用 [SystemClock.elapsedRealtime]：核验的是"间隔"，必须免疫
      * 系统时钟跳变（与 DepthRecordFun 的相对毫秒列同理）。
      */
-    fun record(nodeId: Int, pdo: Int, atMs: Long = SystemClock.elapsedRealtime()) {
+    fun record(nodeId: Int, pdo: Int, atMs: Long = SystemClock.elapsedRealtime(), data: ByteArray? = null) {
         if (!armed) return
-        val list = samples.getOrPut(keyOf(nodeId, pdo)) { ArrayList(256) }
+        val key = keyOf(nodeId, pdo)
+        val list = samples.getOrPut(key) { ArrayList(256) }
         synchronized(list) {
             if (list.size < MAX_SAMPLES_PER_KEY) list.add(atMs)
         }
+        if (data != null) {
+            lastPayload[key] = data.copyOf()
+            seenLengths.getOrPut(key) { ConcurrentHashMap.newKeySet() }.add(data.size)
+        }
     }
+
+    /**
+     * 记录一帧心跳/Boot-up 到达（0x700+ID）。状态字节 0x00 = Boot-up，单独计数：
+     * 采样窗口内出现 Boot-up 说明驱动器在自复位（掉电/bus-off 恢复）。
+     */
+    fun recordHeartbeat(nodeId: Int, stateByte: Byte?, atMs: Long = SystemClock.elapsedRealtime()) {
+        if (!armed) return
+        val payload = if (stateByte != null) byteArrayOf(stateByte) else null
+        record(nodeId, HEARTBEAT_SLOT, atMs, payload)
+        if (stateByte != null && (stateByte.toInt() and 0xFF) == 0x00) {
+            bootups.merge(nodeId, 1) { a, b -> a + b }
+        }
+    }
+
+    /** 某（节点, TPDO）最近一帧载荷；没收到过返回 null。 */
+    fun lastPayload(nodeId: Int, pdo: Int): ByteArray? = lastPayload[keyOf(nodeId, pdo)]?.copyOf()
+
+    /** 某（节点, TPDO）本轮出现过的全部载荷长度。 */
+    fun seenLengths(nodeId: Int, pdo: Int): Set<Int> = seenLengths[keyOf(nodeId, pdo)]?.toSet() ?: emptySet()
+
+    /** 心跳到达时刻（升序）。 */
+    fun heartbeatSnapshot(nodeId: Int): LongArray = snapshot(nodeId, HEARTBEAT_SLOT)
+
+    /** 最近一次心跳的 NMT 状态字节（0x05 Operational / 0x7F PreOp / 0x04 Stopped / 0x00 Boot-up）；无则 null。 */
+    fun lastHeartbeatState(nodeId: Int): Int? =
+        lastPayload[keyOf(nodeId, HEARTBEAT_SLOT)]?.firstOrNull()?.let { it.toInt() and 0xFF }
+
+    /** 本轮采到的 Boot-up 次数。 */
+    fun bootupCount(nodeId: Int): Int = bootups[nodeId] ?: 0
 
     /** 取某（节点, TPDO）的到达时刻快照（升序，接收顺序即时间顺序）。 */
     fun snapshot(nodeId: Int, pdo: Int): LongArray {
@@ -847,11 +897,15 @@ object TpdoArrivalMonitor {
     fun sampledKeys(): List<Pair<Int, Int>> =
         samples.entries.filter { synchronized(it.value) { it.value.isNotEmpty() } }
             .map { (it.key / 10) to (it.key % 10) }
+            .filter { it.second != HEARTBEAT_SLOT }
             .sortedWith(compareBy({ it.first }, { it.second }))
 
     /** 清空全部样本并解除武装（页面销毁/测试隔离用）。 */
     fun clearAll() {
         armed = false
         samples.clear()
+        lastPayload.clear()
+        seenLengths.clear()
+        bootups.clear()
     }
 }

@@ -66,6 +66,8 @@ ui/
   DepthCalibrationScreen.kt — Limit setting + calibration: direct (tape measure) and indirect (gauge-block) modes
   DepthTestScreen.kt     — One-key depth performance test config/progress UI
   ExperimentDataScreen.kt — Lists saved experiment CSVs (name/time/size/row count), delete with run-guard
+  ServoDiagnosticsScreen.kt — YZ servo debug tool: EDS object console, TPDO period config/verify, CAN link quality
+  YzMotorVerifyCard.kt   — "YZ-MOTOR 验证" card: A read-only / B state-machine / C motion checks, report copy/save
   ComposeTemplates.kt    — Reusable Compose components
 
 data/
@@ -85,6 +87,9 @@ funClass/
   SPParamData.kt         — Data class: machine model, spacing, GNSS offsets, lag time, speed, active motors
   RmcData.kt             — Data class: GNSS lat/lon/speed/heading/timestamp + rolling speed buffer
   ArrayStatsData.kt      — Data class: max/min/mean stats with 2-decimal formatting
+  ServoCanOpenFun.kt     — YZ servo EDS semantic layer: object catalog, SDO reply parsing, TPDO config/verify
+  YzMotorVerifyFun.kt    — YZ-MOTOR 验证 pure layer: EDS defaults table, SdoOutcome classify, DS402 step judge, report
+  CanLinkStatsFun.kt     — CAN link quality counters (SDO request/reply pairing, UART resync bytes)
 
 coroutine/
   DB9reCANseCoroutine.kt — Core control loop: RMC → shapefile query → CAN motor command dispatch;
@@ -96,6 +101,7 @@ coroutine/
                            period is user-set (20~1000ms, manual + auto test share one value)
   MyWriteSaveCoroutine.kt — Async persistence: fertilized zone logs and run data (fertMsg_*.csv)
   TestModeCoroutine.kt   — Diagnostic test mode for serial ports and motor control
+  YzMotorVerifyRunner.kt — YZ-MOTOR 验证 flow (YzVerifyIo abstraction; LiveYzVerifyIo = SdoReplyWaiters + TpdoArrivalMonitor)
 ```
 
 ### Core Control Loop (`DB9reCANseCoroutine.kt`)

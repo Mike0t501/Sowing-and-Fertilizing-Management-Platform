@@ -283,7 +283,18 @@ class DocuAndManageFun {
      * @return OutputStreamWriter输出流写入器
      * @note   目录未设置/创建失败时抛IOException；须在IO线程调用
      */
-    fun createExperimentCsvWriter(context: Context, fileName: String): OutputStreamWriter {
+    fun createExperimentCsvWriter(context: Context, fileName: String): OutputStreamWriter =
+        createExperimentFileWriter(context, fileName, "text/csv")
+
+    /**
+     * 在实验数据保存目录创建任意文本文件（CSV 记录与 YZ-MOTOR 验证报告 .txt 共用）
+     * @param  context:上下文
+     * @param  fileName:文件名（含扩展名）
+     * @param  mimeType:SAF 创建文档用的 MIME 类型（"text/csv" / "text/plain"）
+     * @return 输出流写入器
+     * @note   保存目录未设置/授权失效/创建失败时抛 IOException
+     */
+    fun createExperimentFileWriter(context: Context, fileName: String, mimeType: String): OutputStreamWriter {
         // 校验授权与目录存在性，失效时给操作员明确指引（否则 createDocument 抛
         // SecurityException，提示里只有一串 content:// 看不懂）
         val documentUri = getWriteDirDocumentUri(context)
@@ -293,7 +304,7 @@ class DocuAndManageFun {
 
         // 使用SAF操作，因为使用的时间戳创建文件，不存在重复创建新文件的问题
         val fileUri = DocumentsContract.createDocument(
-            context.contentResolver, documentUri, "text/csv", fileName
+            context.contentResolver, documentUri, mimeType, fileName
         ) ?: throw IOException("文件创建失败")
         // 获取documentUri对应的输出流
         val outputStream = context.contentResolver.openOutputStream(fileUri, "w")
