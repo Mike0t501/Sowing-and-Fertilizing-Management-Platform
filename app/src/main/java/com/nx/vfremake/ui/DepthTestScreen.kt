@@ -178,7 +178,7 @@ fun DepthTestScreen(
         if (DocuAndManageFun().getWriteDirDocumentUri(context) == null) {
             Toast.makeText(
                 context,
-                "未设置保存目录，请先在主界面开启保存实验数据并授权目录",
+                "保存目录未设置或已失效，请在系统设置中选择实验数据保存目录",
                 Toast.LENGTH_LONG
             ).show()
             return
@@ -219,7 +219,9 @@ fun DepthTestScreen(
                 dwellMs       = (dwell * 1000).toLong().coerceAtLeast(0L),
                 toleranceMm   = if (tol > 0f) tol else 0.5f,
                 positionSpeed = speed,
-                acceleration  = accel
+                acceleration  = accel,
+                // 采样周期在播深控制页统一设置，此处只做快照，保证一次测试全程同频
+                recordIntervalMs = state.recordIntervalMs.toLong()
             )
         )
     }
@@ -401,6 +403,12 @@ fun DepthTestScreen(
                         else "序列：${stages.joinToString("→") { fmtDepth(it) }} mm（共 ${stages.size} 级）",
                         fontSize = 12.sp,
                         color    = if (stages.isEmpty()) Color(0xFFD32F2F) else Color.Gray
+                    )
+                    // 采样周期只读展示：唯一编辑入口在播深控制页，两处记录共用同一个值
+                    Text(
+                        "CSV 采样周期 ${state.recordIntervalMs}ms（在播深控制页修改，与手动记录共用）",
+                        fontSize = 12.sp,
+                        color    = Color.Gray
                     )
                 }
             }

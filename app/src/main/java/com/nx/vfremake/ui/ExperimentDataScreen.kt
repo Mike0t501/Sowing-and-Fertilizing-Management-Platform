@@ -341,7 +341,7 @@ fun ExperimentDataScreen(onClickBack: () -> Unit = {}) {
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "尚未设置保存目录\n开启\"保存实验数据\"后，首次开始作业时选择保存文件夹",
+                        text = "保存目录未设置或已失效\n请返回系统设置，在\"实验数据保存目录\"中选择文件夹",
                         fontSize = 14.sp,
                         color = Color.Gray
                     )

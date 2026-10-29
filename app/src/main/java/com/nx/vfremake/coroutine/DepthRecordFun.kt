@@ -97,6 +97,10 @@ class DepthRecordFun {
                 // 先写出表头行
                 fileWriter.append(header.joinToString(",") + "\n")
                 // 开始写出
+                // 定速调度：睡到「t0 + 第n拍×周期」的绝对时刻，而不是写完再 delay(周期)。
+                // 后者的实际周期 = 设定值 + 本次采样耗时，误差单向累积——100ms 下可忽略，
+                // 20ms 下就是 10%+ 的系统性拉长（30s 实验少采一两百拍）。
+                var tick = 0L
                 while (isActive) {
                     val relativeMs = SystemClock.elapsedRealtime() - t0
                     val absTs = tsFormat.format(Date())
@@ -104,7 +108,11 @@ class DepthRecordFun {
                         fileWriter.append("$absTs,$relativeMs," + row.joinToString(",") + "\n")
                         dataRowCount++
                     }
-                    delay(intervalMs)
+                    tick++
+                    // 落后于计划时刻（sleep <= 0）就立即进入下一拍，不做补偿式追赶——
+                    // 追赶会连续爆发写出多拍相同数据，反而污染动态响应曲线。
+                    val sleep = t0 + tick * intervalMs - SystemClock.elapsedRealtime()
+                    if (sleep > 0) delay(sleep)
                 }
             } catch (e: CancellationException) {
                 throw e // shutdown 的正常取消路径，收尾统一走 finally

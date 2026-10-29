@@ -66,6 +66,10 @@ ui/
   DepthCalibrationScreen.kt — Limit setting + calibration: direct (tape measure) and indirect (gauge-block) modes
   DepthTestScreen.kt     — One-key depth performance test config/progress UI
   ExperimentDataScreen.kt — Lists saved experiment CSVs (name/time/size/row count), delete with run-guard
+  ServoDiagnosticsScreen.kt — YZ servo debug tool: EDS object console, TPDO period config/verify, CAN link quality
+  YzMotorVerifyCard.kt   — "YZ-MOTOR 验证" card: A read-only / B state-machine / C motion checks, report copy/save
+  ServoCalibIoDialogs.kt — Servo calibration JSON import/export flow (file pickers + confirm dialogs), shared by
+                           DepthCalibrationScreen (single unit) and SowingDepthScreen (whole machine)
   ComposeTemplates.kt    — Reusable Compose components
 
 data/
@@ -85,6 +89,10 @@ funClass/
   SPParamData.kt         — Data class: machine model, spacing, GNSS offsets, lag time, speed, active motors
   RmcData.kt             — Data class: GNSS lat/lon/speed/heading/timestamp + rolling speed buffer
   ArrayStatsData.kt      — Data class: max/min/mean stats with 2-decimal formatting
+  ServoCanOpenFun.kt     — YZ servo EDS semantic layer: object catalog, SDO reply parsing, TPDO config/verify
+  YzMotorVerifyFun.kt    — YZ-MOTOR 验证 pure layer: EDS defaults table, SdoOutcome classify, DS402 step judge, report
+  CanLinkStatsFun.kt     — CAN link quality counters (SDO request/reply pairing, UART resync bytes)
+  ServoCalibIoFun.kt     — Servo calibration JSON (schema v1): DTOs, encode, validated decode, applyTo (keeps nodeId)
 
 coroutine/
   DB9reCANseCoroutine.kt — Core control loop: RMC → shapefile query → CAN motor command dispatch;
@@ -92,9 +100,11 @@ coroutine/
   CanReceiveCoroutine.kt — CAN bus monitoring: fertilizer motor replies + CANopen TPDO/heartbeat/SDO replies
   SowingDepthCoroutine.kt — 500ms depth control loop, Phase 1–5, offline detection, init cooldown retry
   DepthTestCoroutine.kt  — One-key depth performance test: gradient round-trip through depth stages
-  DepthRecordFun.kt      — 100ms CSV recorder for servo depth dynamics (manual + auto test share it)
+  DepthRecordFun.kt      — CSV recorder for servo depth dynamics, fixed-rate scheduling; sampling
+                           period is user-set (20~1000ms, manual + auto test share one value)
   MyWriteSaveCoroutine.kt — Async persistence: fertilized zone logs and run data (fertMsg_*.csv)
   TestModeCoroutine.kt   — Diagnostic test mode for serial ports and motor control
+  YzMotorVerifyRunner.kt — YZ-MOTOR 验证 flow (YzVerifyIo abstraction; LiveYzVerifyIo = SdoReplyWaiters + TpdoArrivalMonitor)
 ```
 
 ### Core Control Loop (`DB9reCANseCoroutine.kt`)
@@ -182,8 +192,15 @@ Completed since the initial implementation:
 - **One-key depth performance test** (`DepthTestScreen` + `DepthTestCoroutine`): single motor runs a
   gradient round-trip (e.g. 20→40→60→80→60→40→20 mm), dwell at each stage after tolerance-based
   arrival detection, per-stage timeout recorded as anomaly
-- **100ms CSV recording** (`DepthRecordFun`): millisecond timestamps + elapsedRealtime relative-ms
-  column (immune to system clock jumps); file prefixes `depthRec_` (manual) / `depthTest_` (auto test)
+- **CSV recording** (`DepthRecordFun`): millisecond timestamps + elapsedRealtime relative-ms
+  column (immune to system clock jumps); file prefixes `depthRec_` (manual) / `depthTest_` (auto test).
+  Sampling period is operator-set (20~1000ms, default 100ms), persisted as
+  `sowing_depth_prefs/depth_record_interval` and surfaced as `SowingDepthState.recordIntervalMs`;
+  the manual recorder and the one-key test deliberately share **one** value. Edited only on
+  `SowingDepthScreen`; `DepthTestScreen` shows it read-only and snapshots it into `DepthTestConfig`.
+  Independent of `DepthTestCoroutine.POLL_MS` (100ms arrival-detection polling) — do not merge the two.
+  The recorder sleeps to an absolute deadline (`t0 + n×interval`) rather than `delay(interval)` after
+  each write, otherwise the period drifts long by the per-sample cost (material at 20ms).
 - **In-app experiment data viewer** (`ExperimentDataScreen`) with save-result toast notifications
 
 ### Critical Implementation Notes

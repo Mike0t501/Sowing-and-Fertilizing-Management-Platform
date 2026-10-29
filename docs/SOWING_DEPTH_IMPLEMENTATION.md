@@ -45,6 +45,7 @@
 6. **`SowingDepthScreen` 与 `DepthCalibrationScreen` 均各自启动 `CanReceiveCoroutine` + `SowingDepthCoroutine`**（各自的 `DisposableEffect`），离开界面时 `onDispose` 停止。两界面之间切换会重新创建协程实例，已通过时间戳离线检测的 5s 窗口避免冷启动误判。
 
 7. **YZ EDS 审查（2026-07-10）**：`YZ_MOTOR_SN2.eds` 共 104 个可 expedited SDO 访问的数字 VAR/子对象，已逐项录入 `ServoCanOpenFun.EDS_OBJECTS`。TPDO1 的 6 字节 `[6064h实际位置 I32][6041h状态字 U16]` 解析正确。已修正四类不一致：① 已配置伺服的 SDO 回复同时投递 `SdoReplyWaiters`，调试请求不再超时；② `6041h` Bit14/15 仅作厂商位，报警改用 Bit3 Fault / Bit11 Internal limit；③ `6040h=010Fh` 明确为 Halt，真正 Quick Stop 使用 `000Bh`；④ 删除 EDS 不存在的 `261Fh/2620h` 写入，只保留 App 软件限位。`6084h` 也未列入 EDS，因既有现场减速行为暂保留兼容写入，并在伺服调试工具提供只读探测。EDS 身份默认值为 Vendor=817、Product=1、Revision=256，电子齿轮默认分子/分母为 32768/8192。
+   **YZ-MOTOR 验证（2026-09-13）**：实机采样发现固件为部分实现（`1001h` 无应答、`606Ch` 回 2 字节、`6084h` 写入静默丢弃、`6041h` bit0/bit1 恒 0、无 Bit4 沿也能触发、TPDO3 载荷曾见 4 字节），EDS 与固件谁是准的无法离机判断。伺服调试页「YZ-MOTOR 验证」卡片（`ui/YzMotorVerifyCard.kt` + `coroutine/YzMotorVerifyRunner.kt` + `funClass/YzMotorVerifyFun.kt`）把这些不符点与电机核心功能做成 A 只读核对 / B 状态机核对 / C 运动核对三组逐项实测，报告可复制/保存（`yzVerify_N<node>_*.txt`），报告中 ≠ 项即"电机与 EDS/标准不符"的实机证据。
 
 ### 当前已知待开发项
 

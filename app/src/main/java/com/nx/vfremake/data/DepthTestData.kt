@@ -15,10 +15,13 @@ package com.nx.vfremake.data
  * @param stepMm         深度梯度 mm（默认 20，即 20→40→60→80→60→40→20）
  * @param dwellMs        每级到位后停留时长 ms（默认 2000）
  * @param toleranceMm    到位深度容差 mm（|当前深度-目标深度| ≤ 容差视为到位）
- * @param stableSamples  连续 N 个采样在容差内才判定稳定到位（N×100ms）
+ * @param stableSamples  连续 N 个采样在容差内才判定稳定到位（N × DepthTestCoroutine.POLL_MS，
+ *                       POLL_MS 固定 100ms，不随 recordIntervalMs 变化）
  * @param timeoutMs      单级到位超时 ms；超时记异常并继续下一级
  * @param positionSpeed  位置运动速度 RPM（写入全局运动参数，由 Phase 4 下发 0x6081）
  * @param acceleration   加减速度 RPM/s（写入全局运动参数，由 Phase 4 下发 0x6083/0x6084）
+ * @param recordIntervalMs CSV 采样周期 ms（取自 SowingDepthState.recordIntervalMs，与手动记录共用）。
+ *                       只影响数据记录密度，与 toleranceMm/stableSamples 的到位判定完全无关。
  */
 data class DepthTestConfig(
     val motorIndex: Int,
@@ -30,7 +33,8 @@ data class DepthTestConfig(
     val stableSamples: Int = 3,
     val timeoutMs: Long = 15000L,
     val positionSpeed: Int,
-    val acceleration: Int
+    val acceleration: Int,
+    val recordIntervalMs: Long = 100L
 )
 
 /**

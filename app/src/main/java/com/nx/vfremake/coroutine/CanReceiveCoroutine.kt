@@ -12,11 +12,13 @@ import com.nx.vfremake.data.SERVO_ALARM_NONE
 import com.nx.vfremake.data.SERVO_ALARM_SDO_ABORT
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
+import com.nx.vfremake.funClass.CanLinkStats
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.ConvAndCtrlFun
 import com.nx.vfremake.funClass.EncoderCanOpenFun
 import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.funClass.SdoReplyWaiters
+import com.nx.vfremake.funClass.TpdoArrivalMonitor
 import com.nx.vfremake.mRmcData
 import com.nx.vfremake.canMonitorData
 import com.nx.vfremake.mSPParamData
@@ -60,14 +62,27 @@ class CanReceiveCoroutine {
      */
     private val encoderFilters = Array(8) { EncoderCanOpenFun.EncoderFilter() }
 
+    /**
+     * 每路伺服上一次写诊断日志的时间戳（ms），索引 = motorIndex 0~7。
+     *
+     * 【为什么要节流】appendCanOpenLog 每条都要新建 SimpleDateFormat 并整表复制
+     * 60 行再 postValue。TPDO 上报周期可在伺服调试页改到 20ms（8 台 = 400 帧/s），
+     * 逐帧写日志会把接收线程压在字符串拷贝上——与 drawnCells 治理绘图刷屏同理。
+     * 位置/状态字仍逐帧更新，只有给人看的滚动日志被抽稀。
+     */
+    private val servoDiagLogLastMs = LongArray(8) { 0L }
+
     companion object {
         private const val TAG = "CanReceiveCoroutine"
         /** 超过此时间未收到任何帧即标记离线（ms），伺服与编码器共用 */
         private const val SERVO_OFFLINE_TIMEOUT_MS = 2000L
 
+        /** 伺服 TPDO 诊断日志的最小写入间隔（ms），见 servoDiagLogLastMs 注释 */
+        private const val SERVO_DIAG_LOG_MIN_INTERVAL_MS = 200L
+
         /**
          * 纯函数：CANopen 服务帧段识别（canId → (nodeId, type)）。
-         * type: 0=SDO回复, 1=TPDO1, 2=心跳/Boot-up, 3=TPDO2, 4=TPDO3, -1=非CANopen。
+         * type: 0=SDO回复, 1=TPDO1, 2=心跳/Boot-up, 3=TPDO2, 4=TPDO3, 5=TPDO4, -1=非CANopen。
          *
          * 从 dispatchFrame 原地的 when 表达式提取，映射逐字节不变——提取仅为可单元
          * 测试（验证编码器帧不跌落施肥解析、伺服/施肥路由与改动前一致）。
@@ -78,6 +93,9 @@ class CanReceiveCoroutine {
             canId in 0x701..0x77F -> (canId - 0x700) to 2   // 心跳 / Boot-up
             canId in 0x281..0x2FF -> (canId - 0x280) to 3   // TPDO2（暂不解析，防止跌落施肥逻辑）
             canId in 0x381..0x3FF -> (canId - 0x380) to 4   // TPDO3（暂不解析，防止跌落施肥逻辑）
+            // TPDO4 = 0x480+ID（EDS 1803h 默认事件周期 0，出厂不上报；但伺服调试页
+            // 可以把它打开）。不列进来就会跌落到施肥字节协议解析——与 TPDO2/3 同样吸收。
+            canId in 0x481..0x4FF -> (canId - 0x480) to 5   // TPDO4（暂不解析，防止跌落施肥逻辑）
             else -> -1 to -1
         }
     }
@@ -159,8 +177,11 @@ class CanReceiveCoroutine {
                     // ── 变长帧解析循环 ──────────────────────────────
                     while (buffer.size >= 3) {
                         // 1. 同步：跳过非起始字节
+                        //    （链路质量：健康链路这里永远不该走到——每丢一个字节就说明
+                        //      UART 字节流错位了，是接触不良最底层的征兆）
                         if (buffer[0] != 0x27.toByte()) {
                             buffer.removeAt(0)
+                            CanLinkStats.onResyncByte()
                             continue
                         }
                         // 2. 读取载荷长度（len = frameInfo_1B + canId_2B + data_NB）
@@ -171,11 +192,13 @@ class CanReceiveCoroutine {
                         // 4. 验证结束字节
                         if (buffer[frameSize - 1] != 0x39.toByte()) {
                             buffer.removeAt(0)
+                            CanLinkStats.onBadTail()
                             continue
                         }
                         // 5. 提取完整帧，丢弃已消费字节
                         val frame = buffer.take(frameSize).toByteArray()
                         buffer = buffer.drop(frameSize).toMutableList()
+                        CanLinkStats.onFrameParsed()
 
                         // 6. 最少需要 frameInfo(1) + canId(2) = 3 字节载荷
                         // 接收帧格式（与发送帧相同）：
@@ -192,6 +215,7 @@ class CanReceiveCoroutine {
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Throwable) {
+                                CanLinkStats.onParseError()
                                 Log.e(TAG, "dispatchFrame 解析异常（已跳过该帧）: ${e.message}", e)
                             }
                             // 任意 CAN 帧均更新接收时间戳，供施肥看门狗判断总线在线
@@ -218,6 +242,7 @@ class CanReceiveCoroutine {
                     throw e
                 } catch (e: IOException) {
                     // 端口被关/重开导致读写失败：清空缓冲、短暂等待，下一轮用新流恢复（不退出循环）
+                    CanLinkStats.onIoError()
                     Log.w(TAG, "接收 IOException（将重试，端口可能已重开）: ${e.message}")
                     buffer.clear()
                     lastStream = null
@@ -347,10 +372,31 @@ class CanReceiveCoroutine {
         // canOpenType: 0=SDO回复, 1=TPDO1, 2=心跳/Boot-up, -1=非CANopen
         val (canOpenNodeId, canOpenType) = classifyCanOpen(canId)
 
+        // 链路质量统计：放在任何业务门控之前——计的是总线上真实到达的报文，
+        // 与该节点是否被配置/该行是否启用无关（同 TpdoArrivalMonitor 的取舍）
+        when (canOpenType) {
+            0 -> CanLinkStats.onSdoReply(canOpenNodeId, isAbort = (data.firstOrNull()?.toInt() ?: 0) and 0xFF == 0x80)
+            1 -> CanLinkStats.onTpdo1(canOpenNodeId)
+            2 -> CanLinkStats.onHeartbeat(canOpenNodeId, isBootup = (data.firstOrNull()?.toInt() ?: -1) and 0xFF == 0x00)
+        }
+
         if (canOpenType >= 0) {
             // 在已配置的深度舵机列表中查找对应 motorIndex
             val motorIndex = viewModel.currentSowingDepthState()
                 .motors.indexOfFirst { it.nodeId == canOpenNodeId }
+
+            // TPDO 周期核验采样：只在调试页武装期间记录到达时刻，未武装时是一次
+            // volatile 读。刻意放在"该行是否启用作业"的门控之前——核验量的是总线上
+            // 的真实报文，与作业行开关无关。
+            if (motorIndex >= 0 && TpdoArrivalMonitor.isArmed()) {
+                TpdoArrivalMonitor.pdoOfCanOpenType(canOpenType)?.let { pdo ->
+                    // 连载荷一起留：YZ-MOTOR 验证要核对 TPDO1/TPDO3 的实际字节数与内容
+                    TpdoArrivalMonitor.record(canOpenNodeId, pdo, data = data)
+                }
+                if (canOpenType == 2) {
+                    TpdoArrivalMonitor.recordHeartbeat(canOpenNodeId, data.firstOrNull())
+                }
+            }
 
             if (motorIndex >= 0) {
                 val activeMotorState = viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
@@ -383,7 +429,7 @@ class CanReceiveCoroutine {
                     // 心跳/Boot-up（0x700+ID）：吸收防止跌落施肥解析即可，
                     // 不做业务处理——编码器在线判定只看 TPDO/SDO 应答到达
                     2 -> Log.d(TAG, "编码器 Boot-up/心跳: nodeId=$canOpenNodeId enc=$encIndex")
-                    // TPDO2/3 同样吸收
+                    // TPDO2/3/4 同样吸收
                 }
                 return  // 已处理/吸收，不再走施肥逻辑
             }
@@ -558,7 +604,15 @@ class CanReceiveCoroutine {
             )
         }
 
-        viewModel.appendCanOpenLog("TPDO1 M${motorIndex+1}(N$nodeId) pos=${tpdo.actualPos} sw=0x${tpdo.statusWord.toString(16)} alarm=$alarm")
+        // 逐帧更新状态，但滚动日志按 SERVO_DIAG_LOG_MIN_INTERVAL_MS 抽稀（20ms 上报时防刷屏）
+        val nowMs = servoLastSeen[motorIndex]
+        if (nowMs - servoDiagLogLastMs[motorIndex] >= SERVO_DIAG_LOG_MIN_INTERVAL_MS) {
+            servoDiagLogLastMs[motorIndex] = nowMs
+            viewModel.appendCanOpenLog(
+                "TPDO1 M${motorIndex + 1}(N$nodeId) pos=${tpdo.actualPos}" +
+                    " sw=0x${tpdo.statusWord.toString(16)} alarm=$alarm"
+            )
+        }
         Log.d(
             TAG, "TPDO1: motor=$motorIndex nodeId=$nodeId" +
                  " pos=${tpdo.actualPos} sw=0x${tpdo.statusWord.toString(16)}" +

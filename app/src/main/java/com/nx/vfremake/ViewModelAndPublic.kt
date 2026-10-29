@@ -265,20 +265,22 @@ class VariableFertViewModel : ViewModel() {
     }
 
     /**
-     * 更新全局播种深度控制参数（点动速度 / 位置速度 / 加速度 / 全局目标深度）。
+     * 更新全局播种深度控制参数（点动速度 / 位置速度 / 加速度 / 全局目标深度 / CSV采样周期）。
      */
     fun updateSowingDepthGlobalSettings(
         jogSpeed: Int? = null,
         positionSpeed: Int? = null,
         acceleration: Int? = null,
-        globalTargetDepth: Float? = null
+        globalTargetDepth: Float? = null,
+        recordIntervalMs: Int? = null
     ) {
         mutateSowingDepthState { current ->
             current.copy(
                 jogSpeed          = jogSpeed ?: current.jogSpeed,
                 positionSpeed     = positionSpeed ?: current.positionSpeed,
                 acceleration      = acceleration ?: current.acceleration,
-                globalTargetDepth = globalTargetDepth ?: current.globalTargetDepth
+                globalTargetDepth = globalTargetDepth ?: current.globalTargetDepth,
+                recordIntervalMs  = recordIntervalMs ?: current.recordIntervalMs
             )
         }
     }
@@ -332,6 +334,7 @@ class VariableFertViewModel : ViewModel() {
                 jogSpeed = savedState.jogSpeed,
                 positionSpeed = savedState.positionSpeed,
                 acceleration = savedState.acceleration,
+                recordIntervalMs = savedState.recordIntervalMs,
                 masterEnabled = masterEnabledOverride ?: current.masterEnabled
             )
         }

@@ -20,6 +20,8 @@ import android.provider.DocumentsContract
 import com.nx.vfremake.R
 import com.nx.vfremake.data.CalibrationMode
 import com.nx.vfremake.data.IndirectCalibPoint
+import com.nx.vfremake.data.RECORD_INTERVAL_MAX_MS
+import com.nx.vfremake.data.RECORD_INTERVAL_MIN_MS
 import com.nx.vfremake.data.STANDARD_BLOCK_DEPTHS_MM
 import com.nx.vfremake.mSPParamData
 
@@ -337,6 +339,7 @@ class MySharedPreFun(private val context: Context) {
     //   depth_pos_speed         Int    全局位置运动速度 RPM
     //   depth_acceleration      Int    全局加速度 RPM/s
     //   depth_global_target     Float  全局目标深度 mm
+    //   depth_record_interval   Int    实验数据CSV采样周期 ms（手动记录与一键测试共用）
     //   depth_N_calibMode       String 标定模式 "DIRECT" 或 "INDIRECT"
     //   depth_N_ind_M_enc       Int    第 M 个挡块的编码器值（-1 = null）
     // =========================================================================
@@ -432,20 +435,28 @@ class MySharedPreFun(private val context: Context) {
         (0 until 8).map { loadSowingDepthCalibration(it) }
 
     /**
-     * 保存全局播种深度控制参数（点动速度 / 位置速度 / 加速度 / 全局目标深度）。
+     * 保存全局播种深度控制参数（点动速度 / 位置速度 / 加速度 / 全局目标深度 / CSV采样周期）。
+     *
+     * @param recordIntervalMs 实验数据CSV采样周期 ms；传 null 表示不改动已存值。
+     *        采样周期只在播深控制页修改，其余调用点（标定页/测试页保存速度参数）不传，
+     *        避免它们用各自快照里的旧值把用户刚设的周期覆盖回去。
      */
     fun saveSowingDepthGlobalSettings(
         jogSpeed: Int,
         positionSpeed: Int,
         acceleration: Int,
-        globalTargetDepth: Float
+        globalTargetDepth: Float,
+        recordIntervalMs: Int? = null
     ) {
-        getSowingDepthSharedPre().edit()
+        val editor = getSowingDepthSharedPre().edit()
             .putInt("depth_jog_speed",        jogSpeed)
             .putInt("depth_pos_speed",        positionSpeed)
             .putInt("depth_acceleration",     acceleration)
             .putFloat("depth_global_target",  globalTargetDepth)
-            .apply()
+        if (recordIntervalMs != null) {
+            editor.putInt("depth_record_interval", recordIntervalMs)
+        }
+        editor.apply()
     }
 
     /**
@@ -459,7 +470,10 @@ class MySharedPreFun(private val context: Context) {
             jogSpeed          = prefs.getInt("depth_jog_speed",    2000),
             positionSpeed     = prefs.getInt("depth_pos_speed",    500),
             acceleration      = prefs.getInt("depth_acceleration", 10000),
-            globalTargetDepth = prefs.getFloat("depth_global_target", 50f)
+            globalTargetDepth = prefs.getFloat("depth_global_target", 50f),
+            // 钳制：旧版本/异常写入的越界值不应传播到记录协程（20ms 以下无意义，1s 以上失去动态分辨率）
+            recordIntervalMs  = prefs.getInt("depth_record_interval", 100)
+                .coerceIn(RECORD_INTERVAL_MIN_MS, RECORD_INTERVAL_MAX_MS)
         )
     }
 
@@ -474,7 +488,8 @@ class MySharedPreFun(private val context: Context) {
             globalTargetDepth = settings.globalTargetDepth,
             jogSpeed          = settings.jogSpeed,
             positionSpeed     = settings.positionSpeed,
-            acceleration      = settings.acceleration
+            acceleration      = settings.acceleration,
+            recordIntervalMs  = settings.recordIntervalMs
         )
     }
 
@@ -487,7 +502,8 @@ class MySharedPreFun(private val context: Context) {
             jogSpeed          = state.jogSpeed,
             positionSpeed     = state.positionSpeed,
             acceleration      = state.acceleration,
-            globalTargetDepth = state.globalTargetDepth
+            globalTargetDepth = state.globalTargetDepth,
+            recordIntervalMs  = state.recordIntervalMs
         )
     }
 
@@ -578,5 +594,6 @@ data class SowingDepthGlobalSettings(
     val jogSpeed: Int,
     val positionSpeed: Int,
     val acceleration: Int,
-    val globalTargetDepth: Float
+    val globalTargetDepth: Float,
+    val recordIntervalMs: Int = 100
 )
