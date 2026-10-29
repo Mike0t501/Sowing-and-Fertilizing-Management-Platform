@@ -184,6 +184,13 @@ fun SowingDepthScreen(
     // 标定设置弹窗（选择电机后跳转）
     var showCalibrateDialog by remember { mutableStateOf(false) }
 
+    // 整机标定导入/导出：导出启用行中已标定的各路，导入按文件来源路号回填
+    val calibIo = rememberServoCalibIo(
+        viewModel     = viewModel,
+        singleMotor   = null,
+        targetIndices = activeMotorIndices
+    )
+
     // ── 辅助：解析手打的深度值 ────────────────────────────────────────────────
     // 20~80mm 只是滑块与一键按钮的常用区间，不是安全约束：标定量块 100mm、处方图控深
     // 等场景仍需手打超出该区间的值，所以越界只提示、不拦截。真正的安全钳位在
@@ -726,6 +733,19 @@ fun SowingDepthScreen(
                                 fontSize = 13.sp
                             )
                         }
+                    }
+                    Divider(Modifier.padding(vertical = 4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick  = { showCalibrateDialog = false; calibIo.export() },
+                            modifier = Modifier.weight(1f),
+                            shape    = RoundedCornerShape(6.dp)
+                        ) { Text("导出全部标定", fontSize = 13.sp) }
+                        OutlinedButton(
+                            onClick  = { showCalibrateDialog = false; calibIo.import() },
+                            modifier = Modifier.weight(1f),
+                            shape    = RoundedCornerShape(6.dp)
+                        ) { Text("导入全部标定", fontSize = 13.sp) }
                     }
                 }
             },

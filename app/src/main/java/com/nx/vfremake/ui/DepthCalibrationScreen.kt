@@ -645,6 +645,18 @@ fun DepthCalibrationScreen(
         }
     }
 
+    // ── 标定数据导入/导出（单体）：导入后若限位有效直接跳到步骤 2 供核对 ─────────
+    val calibIo = rememberServoCalibIo(
+        viewModel     = viewModel,
+        singleMotor   = motorIndex,
+        targetIndices = listOf(motorIndex),
+        onImported    = {
+            if (viewModel.currentSowingDepthState().motors.getOrNull(motorIndex)?.limitsSet == true) {
+                currentStep = 2
+            }
+        }
+    )
+
     // ── UI ───────────────────────────────────────────────────────────────────
     Scaffold(
         topBar = { MyTopBar("电机 ${motorIndex + 1} 深度校准", onBack) }
@@ -687,6 +699,25 @@ fun DepthCalibrationScreen(
                         fontSize = 13.sp
                     )
                 }
+            }
+
+            // 标定数据导入/导出（便于归档；同一单体换平板/换行位时免重复标定）
+            Row(
+                modifier              = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick        = { calibIo.export() },
+                    modifier       = Modifier.weight(1f),
+                    shape          = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(vertical = 12.dp)
+                ) { Text("导出本机标定", fontSize = 14.sp) }
+                OutlinedButton(
+                    onClick        = { calibIo.import() },
+                    modifier       = Modifier.weight(1f),
+                    shape          = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(vertical = 12.dp)
+                ) { Text("导入标定", fontSize = 14.sp) }
             }
 
             // 步骤切换标签（步骤 3 = 摆臂编码器标定，不依赖伺服限位门控）

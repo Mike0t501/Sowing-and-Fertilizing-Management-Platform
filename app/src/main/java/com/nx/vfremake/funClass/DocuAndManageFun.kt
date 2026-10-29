@@ -391,6 +391,44 @@ class DocuAndManageFun {
     }
 
     /**
+     * 读取用户通过系统文件选择器选中的文本文件（标定 JSON 导入）
+     * @param  context:上下文
+     * @param  uri:OpenDocument 返回的Uri
+     * @return 文件文本；读取失败或超过 1MB 返回null
+     * @note   须在IO线程调用；限长是为了防止误选大文件把内存撑爆
+     */
+    fun readTextFromUri(context: Context, uri: Uri): String? {
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val bytes = input.readBytes()
+                if (bytes.size > 1024 * 1024) null else String(bytes, Charsets.UTF_8)
+            }
+        } catch (e: Exception) {
+            Log.e("CalibIo", "读取文件失败: $uri", e)
+            null
+        }
+    }
+
+    /**
+     * 向 CreateDocument 返回的Uri写入文本（标定 JSON 导出）
+     * @param  context:上下文
+     * @param  uri:CreateDocument 返回的Uri
+     * @param  text:写入内容（UTF-8）
+     * @return 是否写入成功
+     * @note   须在IO线程调用；"wt" 截断模式，覆盖同名文件时不残留旧尾巴
+     */
+    fun writeTextToUri(context: Context, uri: Uri, text: String): Boolean {
+        return try {
+            val out = context.contentResolver.openOutputStream(uri, "wt") ?: return false
+            out.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+            true
+        } catch (e: Exception) {
+            Log.e("CalibIo", "写入文件失败: $uri", e)
+            false
+        }
+    }
+
+    /**
      * android 10获取绝对路径的一种方法
      * @param  context:上下文
      * @param  contentDocumentUri:contentDocumentUri

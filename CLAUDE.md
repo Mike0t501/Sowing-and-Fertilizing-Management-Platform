@@ -68,6 +68,8 @@ ui/
   ExperimentDataScreen.kt — Lists saved experiment CSVs (name/time/size/row count), delete with run-guard
   ServoDiagnosticsScreen.kt — YZ servo debug tool: EDS object console, TPDO period config/verify, CAN link quality
   YzMotorVerifyCard.kt   — "YZ-MOTOR 验证" card: A read-only / B state-machine / C motion checks, report copy/save
+  ServoCalibIoDialogs.kt — Servo calibration JSON import/export flow (file pickers + confirm dialogs), shared by
+                           DepthCalibrationScreen (single unit) and SowingDepthScreen (whole machine)
   ComposeTemplates.kt    — Reusable Compose components
 
 data/
@@ -90,6 +92,7 @@ funClass/
   ServoCanOpenFun.kt     — YZ servo EDS semantic layer: object catalog, SDO reply parsing, TPDO config/verify
   YzMotorVerifyFun.kt    — YZ-MOTOR 验证 pure layer: EDS defaults table, SdoOutcome classify, DS402 step judge, report
   CanLinkStatsFun.kt     — CAN link quality counters (SDO request/reply pairing, UART resync bytes)
+  ServoCalibIoFun.kt     — Servo calibration JSON (schema v1): DTOs, encode, validated decode, applyTo (keeps nodeId)
 
 coroutine/
   DB9reCANseCoroutine.kt — Core control loop: RMC → shapefile query → CAN motor command dispatch;
