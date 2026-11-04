@@ -537,6 +537,7 @@ fun SettingsScreen(
     onClickSimGnss: () -> Unit = {},
     onClickExperimentData: () -> Unit = {},
     onClickServoDiagnostics: () -> Unit = {},
+    onClickDepthNode: () -> Unit = {},
     onReinitSerialPort: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -934,6 +935,16 @@ fun SettingsScreen(
                                 onDecrement = { if (deltaY.intValue >= 10) { deltaY.intValue -= 5; sharedPre.edit().putString(context.getString(R.string.deltaY_name), deltaY.intValue.toString()).apply() } }
                             )
                         }
+                    }
+                    Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
+
+                    Row(Modifier.fillMaxWidth().clickable { onClickDepthNode() }.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                        Column {
+                            Text("播深检测节点管理", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            Text("模拟量节点诊断、滤波预设、研究流与配号", fontSize = 14.sp, color = Color.Gray)
+                        }
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "播深检测节点管理")
                     }
                     Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
 

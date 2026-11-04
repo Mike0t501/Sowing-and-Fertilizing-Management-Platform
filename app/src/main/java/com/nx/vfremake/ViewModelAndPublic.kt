@@ -29,6 +29,8 @@ import com.nx.vfremake.funClass.DepthNodeCfgClient
 import com.nx.vfremake.funClass.DepthNodeSimulator
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.MeasuredDepthFacade
+import com.nx.vfremake.funClass.DepthBusTrafficMeter
+import com.nx.vfremake.funClass.DepthNodeManagement
 import com.esri.arcgisruntime.data.ShapefileFeatureTable
 import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.layers.FeatureLayer
@@ -356,6 +358,7 @@ class VariableFertViewModel : ViewModel() {
     val depthNodeState = MutableLiveData(depthNodeStore.current())
     val depthNodeRuntime = DepthNodeRuntime(depthNodeStore, nowMs = { android.os.SystemClock.elapsedRealtime() })
     val measuredDepthFacade = MeasuredDepthFacade({ currentDepthNodeState() }, depthNodeRuntime.nowMs)
+    val depthBusTrafficMeter = DepthBusTrafficMeter()
     @Volatile var depthNodeSimulator: DepthNodeSimulator? = null
         private set
     private var realDepthNodeSnapshot: DepthNodeState? = null
@@ -380,6 +383,7 @@ class VariableFertViewModel : ViewModel() {
         if (simulator != null) CanOpenFun.sendFrameSequenced(bridge) { simulator.command(frame) }
         else CanOpenFun.sendFrameSequenced(bridge)
     })
+    val depthNodeManagement = DepthNodeManagement(depthNodeRuntime, depthNodeClient)
 
     /** 模拟会话跨页面保留；真实标定隔离，关闭测试模式后恢复。 */
     @Synchronized

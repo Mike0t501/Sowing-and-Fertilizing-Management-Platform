@@ -114,6 +114,13 @@ class DepthNodeCfgClient(
         check(reply.value == 1L) { "节点 Flash 保存失败" }
     }
 
+    /** 查询dingo核心版本，和INFO中的板级fw_rev分开展示。 */
+    suspend fun version(base: Int): P.CoreVersion {
+        val reply = runtime.waiters.sendAndAwait(P.cfgRequest(base, P.VERSION), base, send, timeoutMs)
+            ?: error("核心版本查询超时")
+        return requireNotNull(P.parseCoreVersion(P.cfgData(P.VERSION, value = reply.value)))
+    }
+
     /** 配号写应答已在新基址，后续 Read、Burn 和 INFO 验证全部使用新地址。 */
     suspend fun provision(row: Int) = operations.withLock {
         val newBase = P.baseForRow(row)

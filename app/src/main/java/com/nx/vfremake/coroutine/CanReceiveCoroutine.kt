@@ -377,6 +377,7 @@ class CanReceiveCoroutine {
         // 接收帧格式（与发送帧相同）：[0x27][len][0x00(frameInfo)][canId_hi][canId_lo][data...][0x39]
         // frame[2]=frameInfo(0x00), frame[3]=canId_hi, frame[4]=canId_lo, frame[5+]=data
         val canId = ((frame[3].toInt() and 0xFF) shl 8) or (frame[4].toInt() and 0xFF)
+        viewModel.depthBusTrafficMeter.record(canId, android.os.SystemClock.elapsedRealtime())
         // data 段：跳过 frameInfo(1) + canId(2) = 3字节，共 len-3 个数据字节
         val data = if (len > 3) frame.copyOfRange(5, 2 + len) else byteArrayOf()
 

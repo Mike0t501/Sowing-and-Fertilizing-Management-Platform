@@ -36,6 +36,7 @@ import com.nx.vfremake.ui.SettingsScreen
 import com.nx.vfremake.ui.SimGnssScreen
 import com.nx.vfremake.ui.SowingDepthScreen
 import com.nx.vfremake.ui.ServoDiagnosticsScreen
+import com.nx.vfremake.ui.DepthNodeScreen
 import androidx.navigation.NavType
 import androidx.navigation.navArgument
 
@@ -50,7 +51,8 @@ enum class VariableFertScreen(@StringRes val title: Int) {
     DepthCalibration(title = R.string.settings),    // 单路电机深度校准向导（携带 motorIndex 参数）
     DepthTest(title = R.string.settings),           // 一键播种深度性能测试界面
     ExperimentData(title = R.string.settings),      // 实验数据记录查看界面
-    ServoDiagnostics(title = R.string.settings)     // 播种深度伺服 EDS/DS402 调试工具
+    ServoDiagnostics(title = R.string.settings),    // 播种深度伺服 EDS/DS402 调试工具
+    DepthNode(title = R.string.settings)            // 播深检测节点管理
 }
 
 /**
@@ -102,6 +104,7 @@ fun VariableFert(
                 onClickSimGnss = { navController.navigate(VariableFertScreen.SimGnss.name) },
                 onClickExperimentData = { navController.navigate(VariableFertScreen.ExperimentData.name) },
                 onClickServoDiagnostics = { navController.navigate(VariableFertScreen.ServoDiagnostics.name) },
+                onClickDepthNode = { navController.navigate(VariableFertScreen.DepthNode.name) },
                 onReinitSerialPort = {
                     if (isSystemRunning) {
                         Toast.makeText(context, "系统运行中，请先停止后再应用", Toast.LENGTH_SHORT).show()
@@ -145,6 +148,11 @@ fun VariableFert(
                 },
                 onClickDepthTest = { navController.navigate(VariableFertScreen.DepthTest.name) }
             )
+        }
+        composable(route = VariableFertScreen.DepthNode.name) {
+            DepthNodeScreen(mVariableFertViewModel, onBack = { navController.popBackStack() }, onCalibrate = { row ->
+                navController.navigate("${VariableFertScreen.DepthCalibration.name}/$row")
+            })
         }
         // ── 播种深度伺服 EDS/DS402 调试工具（维护）─────────────────────────
         composable(route = VariableFertScreen.ServoDiagnostics.name) {
