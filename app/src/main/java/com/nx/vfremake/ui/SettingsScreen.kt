@@ -536,7 +536,6 @@ fun SettingsScreen(
     onClickDantiSettigns: () -> Unit = {},
     onClickSimGnss: () -> Unit = {},
     onClickExperimentData: () -> Unit = {},
-    onClickEncoderProvisioning: () -> Unit = {},
     onClickServoDiagnostics: () -> Unit = {},
     onReinitSerialPort: () -> Unit = {}
 ) {
@@ -938,21 +937,7 @@ fun SettingsScreen(
                     }
                     Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
 
-                    // 摆臂编码器一次性配置工具（维护用，深藏于高级参数卡片底部）
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clickable { onClickEncoderProvisioning() }.padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column {
-                            Text(text = "BRT 编码器调试工具", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color(0xFF333333))
-                            Text(text = "节点扫描、EDS 参数诊断、位置采样、NMT 控制与首次配号", fontSize = 11.sp, color = Color.Gray)
-                        }
-                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "编码器配置工具", tint = Color(0xFF666666))
-                    }
-                    Divider(color = Color.LightGray.copy(alpha = 0.3f), thickness = 1.dp, modifier = Modifier.padding(horizontal = 16.dp))
-
-                    // 按需求紧邻 BRT 编码器调试工具下方
+                    // 播深伺服调试入口
                     Row(
                         modifier = Modifier.fillMaxWidth().clickable { onClickServoDiagnostics() }.padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,

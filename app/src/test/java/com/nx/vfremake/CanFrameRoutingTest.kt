@@ -12,32 +12,27 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * CAN 帧路由回归测试：验证编码器（Node-ID 21~28）接入后，
+ * CAN 帧路由回归测试：验证独立编码器（Node-ID 21~28）停用后，
  * 施肥电机与伺服（11~18）的路由归属与改动前逐字节一致，
  * 编码器帧绝不跌落施肥解析。
  *
  * 路由模型（dispatchFrame 的判定顺序）：
  *   classifyCanOpen(canId) → 伺服白名单匹配（原样保留、优先） →
- *   编码器白名单匹配 → SDO 应答等待器 → 跌落施肥。
+ *   停用设备忽略 → SDO 应答等待器 → 跌落施肥。
  * 本测试以 classifyCanOpen（从 dispatchFrame 原地 when 提取的纯函数）+
- * 白名单查找复现该顺序；帧字节用 CanOpenFun.wrapCanFrame 构造
+ * 生产共用纯函数执行该顺序；帧字节用 CanOpenFun.wrapCanFrame 构造
  * （与 docs/CANframes2.txt 记录的真实总线帧同构）。
  */
 class CanFrameRoutingTest {
 
-    /** 默认配置：伺服 11~18，编码器 21~28（与出厂数据类默认一致） */
+    /** 默认伺服配置保持 11~18。 */
     private val servoNodeIds = (11..18).toList()
-    private val encoderNodeIds = (21..28).toList()
 
-    /** 复现 dispatchFrame 的归属判定顺序，返回路由目标名 */
+    /** 调用生产路由纯函数，避免测试复制业务判定而掩盖回归。 */
     private fun routeOf(canId: Int, hasWaiter: Boolean = false): String {
-        val (nodeId, type) = CanReceiveCoroutine.classifyCanOpen(canId)
-        if (type >= 0) {
-            if (servoNodeIds.contains(nodeId)) return "SERVO"
-            if (encoderNodeIds.contains(nodeId)) return "ENCODER"
-            if (type == 0 && hasWaiter) return "WAITER"
+        return CanReceiveCoroutine.classifyRoute(canId, servoNodeIds, hasWaiter).let {
+            if (it == CanReceiveCoroutine.FrameRoute.SDO_WAITER) "WAITER" else it.name
         }
-        return "FERTILIZER"
     }
 
     @Before
@@ -74,11 +69,11 @@ class CanFrameRoutingTest {
     fun encoderFramesNeverFallToFertilizer() {
         for (nodeId in 21..28) {
             assertEquals("编码器 TPDO1 0x${(0x180 + nodeId).toString(16)}",
-                "ENCODER", routeOf(0x180 + nodeId))
+                "IGNORED", routeOf(0x180 + nodeId))
             assertEquals("编码器 SDO 应答 0x${(0x580 + nodeId).toString(16)}",
-                "ENCODER", routeOf(0x580 + nodeId))
+                "IGNORED", routeOf(0x580 + nodeId))
             assertEquals("编码器 Boot-up 0x${(0x700 + nodeId).toString(16)}",
-                "ENCODER", routeOf(0x700 + nodeId))
+                "IGNORED", routeOf(0x700 + nodeId))
         }
     }
 
@@ -145,7 +140,7 @@ class CanFrameRoutingTest {
         val (canId, data) = unwrapped!!
         assertEquals(0x195, canId)
         assertEquals(4, data.size)
-        assertEquals("ENCODER", routeOf(canId))
+        assertEquals("IGNORED", routeOf(canId))
     }
 
     @Test
