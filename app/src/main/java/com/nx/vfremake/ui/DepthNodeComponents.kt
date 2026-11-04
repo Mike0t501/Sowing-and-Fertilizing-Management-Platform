@@ -22,7 +22,6 @@ internal fun measuredDepthColor(sample: MeasuredDepthSample, target: Float): Col
     DepthNodeQuality.OK -> when {
         DepthEventType.LIFT_OFF in sample.monitoring.events -> Color(0xFFC62828)
         sample.monitoring.events.isNotEmpty() -> Color(0xFF9C6500)
-        (sample.depthMm ?: 0f) < 10f -> Color(0xFFC62828)
         target > 0f && abs((sample.depthMm ?: target) - target) > DepthQualityConfig.toleranceMm(target) -> Color(0xFF9C6500)
         else -> Color(0xFF237A35)
     }

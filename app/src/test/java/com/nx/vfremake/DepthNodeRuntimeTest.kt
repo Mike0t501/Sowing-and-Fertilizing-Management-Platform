@@ -53,7 +53,21 @@ class DepthNodeRuntimeTest {
         clock += 1000
         runtime.onDepthNodeFrame(0x683, P.infoData(0x10, 1, 1, 3300, 30, 0))
         assertNull(runtime.channel(0).seq)
-        status(0); assertEquals(1L, runtime.channel(0).lostFrames)
+        status(0); assertEquals(0L, runtime.channel(0).lostFrames)
+        assertEquals(1, runtime.channel(0).bootCount)
+    }
+
+    @Test fun runNotificationResetsSequenceBeforeFirstInfoAndKeepsCalibration() {
+        store.updateChannel(0) { it.copy(fitValid = true, c1 = 0.02) }
+        status(100); status(102)
+        assertEquals(1L, runtime.channel(0).lostFrames)
+        runtime.onDepthNodeFrame(0x680, byteArrayOf(0x46, 1, 0, 0, 0, 0, 0, 0))
+        assertFalse(runtime.channel(0).hasStatus)
+        assertTrue(runtime.channel(0).fitValid)
+        status(0)
+        assertEquals(0L, runtime.channel(0).lostFrames)
+        assertEquals(1L, runtime.channel(0).receivedFrames)
+        assertEquals(1, runtime.channel(0).bootCount)
     }
 
     @Test fun unknownVersionAcceptedUntilInfoThenIncompatibleStatusIsStopped() {

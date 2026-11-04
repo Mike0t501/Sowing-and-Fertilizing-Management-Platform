@@ -67,6 +67,7 @@ data class DepthNodeChannel(
     val icdVer: Int? = null, val fwRev: Int? = null, val uptimeS: Int? = null,
     val vddaMv: Int? = null, val mcuTempC: Int? = null, val txDrop: Int? = null,
     val lastInfoMs: Long = 0, val researchFps: Float = 0f,
+    val bootCount: Int = 0,
     val reportMs: Int = 50, val parameterWords: Map<Int, Long> = emptyMap(),
     val filterParams: DepthNodeFilterParams? = null, val configReadAtMs: Long? = null,
     val configError: String? = null

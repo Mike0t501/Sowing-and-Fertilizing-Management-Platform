@@ -36,6 +36,9 @@ class DepthNodeManagementTest {
         assertNotNull(DepthResearchBudget.calculate(listOf(DepthNodeChannel(0, isOnline = true)), 4, 0.0, 0.0, true).blockedReason)
         val single = DepthResearchBudget.calculate(nodes(1), 1, 0.0, 0.0, true)
         assertNull(single.blockedReason); assertEquals(354.333, single.totalFps, 0.001)
+        val replacing = DepthResearchBudget.calculate(nodes(1), 1, 21 + 500.0 / 3, 0.0, true, 500.0 / 3)
+        assertNull(replacing.blockedReason)
+        assertEquals(single.totalFps, replacing.totalFps, 0.001)
     }
 
     @Test fun observedServoPeriodMustActuallyBeNearOneHundredMilliseconds() {

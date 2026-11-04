@@ -121,7 +121,7 @@ class DepthRecordFun {
             var metadataWatcher: Job? = null
             val history = mutableListOf<DepthRecordSchema.ConfigSnapshot>()
             var metadataState: DepthNodeState? = null
-            val startedAt = Instant.now().toString()
+            var startedAt = Instant.now().toString()
             suspend fun writeMetadata() {
                 val uri = metadataUri ?: return
                 val state = metadataState ?: return
@@ -157,7 +157,9 @@ class DepthRecordFun {
                 eventWriter.append(DepthRecordSchema.csvLine(DepthEventSchema.HEADER))
                 eventWriter.flush()
                 val t0 = SystemClock.elapsedRealtime()
+                startedAt = Instant.now().toString()
                 eventSession = mVariableFertViewModel.depthQualityService.beginRecording(recordRows, t0)
+                writeMetadata()
                 ready.complete(true)
                 metadataWatcher = launch {
                     val knownCrc = recordRows.associateWith { mVariableFertViewModel.currentDepthNodeState().channels[it].cfgCrc }.toMutableMap()

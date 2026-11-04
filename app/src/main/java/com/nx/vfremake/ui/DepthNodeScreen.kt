@@ -91,7 +91,8 @@ fun DepthNodeScreen(viewModel: VariableFertViewModel, onBack: () -> Unit, onCali
         val channels = current.channels + listOf(current.factory).filter { it.isOnline }
         return DepthResearchBudget.calculate(channels, researchRate,
             if (current.simulated) 0.0 else observedRxFps,
-            if (current.simulated) 0.0 else observedTxFps, current.simulated || servo100MsObserved)
+            if (current.simulated) 0.0 else observedTxFps, current.simulated || servo100MsObserved,
+            if (current.simulated) 0.0 else current.channels[selectedRow].researchFps.toDouble())
     }
 
     fun enableResearch() {
@@ -218,7 +219,7 @@ fun DepthNodeScreen(viewModel: VariableFertViewModel, onBack: () -> Unit, onCali
                     Text("第${node.row + 1}行  0x${node.baseId.toString(16).uppercase()}  ${if (node.isOnline) "在线" else "离线"}  ${DepthDisplayFormat.qualityLabel(node.quality)}",
                         fontSize = 20.sp, fontWeight = FontWeight.Bold, color = if (node.versionCompatible) Color(0xFF1565C0) else Color.Red)
                     Text("ICD ${node.icdVer?.let { "0x%02X".format(it) } ?: "--"} / fw ${node.fwRev ?: "--"} · uptime ${node.uptimeS ?: "--"}s · VDDA ${node.vddaMv ?: "--"}mV · 温度 ${node.mcuTempC ?: "--"}℃ · tx_drop ${node.txDrop ?: "--"}", fontSize = 16.sp)
-                    Text("近10s丢帧率 %.3f%% · 累计丢帧 ${node.lostFrames} · 研究流 %.1f帧/s".format(Locale.ROOT, node.lossRate10s * 100, node.researchFps), fontSize = 16.sp)
+                    Text("近10s丢帧率 %.3f%% · 本次启动丢帧 ${node.lostFrames} · 研究流 %.1f帧/s".format(Locale.ROOT, node.lossRate10s * 100, node.researchFps), fontSize = 16.sp)
                     Text("CRC ${node.cfgCrc?.let { "0x%02X".format(it) } ?: "--"} · ${DepthNodePresets.currentName(node)} · flags 0x%02X".format(node.flags), fontSize = 16.sp)
                     if (!node.versionCompatible) Text("主版本不兼容，STATUS已停解析", color = Color.Red, fontSize = 18.sp)
                 }

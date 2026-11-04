@@ -30,7 +30,19 @@ class DepthNodeRuntime(
         val slot = if (row == -1) 8 else row
         val now = nowMs()
         when (canId - base) {
-            P.CFG_RSP -> waiters.tryComplete(canId, data)
+            P.CFG_RSP -> {
+                if (data[0] == 0x46.toByte() && data[1] == 1.toByte() && data.drop(2).all { it == 0.toByte() }) {
+                    // 上线通告早于首个STATUS/INFO；立即换序号基线，否则255→0之外的复位会被误计丢帧。
+                    arrivals[slot].clear(); research[slot].clear()
+                    store.updateChannel(row) { current -> refresh(current.copy(
+                        bootCount = current.bootCount + 1, hasStatus = false, seq = null,
+                        lostFrames = 0, receivedFrames = 0, lossRate10s = 0f,
+                        uFiltMv = null, uMeanMv = null, spanMv = null, cfgCrc = null,
+                        icdVer = null, fwRev = null, uptimeS = null, lastInfoMs = 0,
+                        parameterWords = emptyMap(), filterParams = null, configReadAtMs = null
+                    ), now) }
+                } else waiters.tryComplete(canId, data)
+            }
             P.STATUS -> {
                 val status = P.parseStatus(data) ?: return
                 val old = channel(row)
@@ -63,9 +75,14 @@ class DepthNodeRuntime(
                     icdVer = info.icdVer, fwRev = info.fwRev, uptimeS = info.uptimeS,
                     vddaMv = info.vddaMv, mcuTempC = info.mcuTempC, txDrop = info.txDrop, lastInfoMs = now,
                     seq = if (reset) null else current.seq,
+                    bootCount = if (reset) current.bootCount + 1 else current.bootCount,
+                    lostFrames = if (reset) 0 else current.lostFrames,
+                    receivedFrames = if (reset) 0 else current.receivedFrames,
+                    lossRate10s = if (reset) 0f else current.lossRate10s,
                     hasStatus = if (reset) false else current.hasStatus,
                     parameterWords = if (reset) emptyMap() else current.parameterWords,
-                    filterParams = if (reset) null else current.filterParams
+                    filterParams = if (reset) null else current.filterParams,
+                    configReadAtMs = if (reset) null else current.configReadAtMs
                 ), now) }
             }
             P.RESEARCH -> {

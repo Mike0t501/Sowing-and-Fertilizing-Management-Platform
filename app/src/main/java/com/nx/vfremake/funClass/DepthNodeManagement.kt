@@ -75,11 +75,12 @@ object DepthResearchBudget {
 
     /** 按ICD§8保守假定桥转发全部研究帧；弹窗确认不能绕过500帧/s和8行限制。 */
     fun calculate(channels: List<DepthNodeChannel>, rate: Int, observedRxFps: Double,
-        observedTxFps: Double, servo100MsObserved: Boolean): Budget {
+        observedTxFps: Double, servo100MsObserved: Boolean, replacingResearchFps: Double = 0.0): Budget {
         require(rate in 1..4)
         val online = channels.filter { it.isOnline }
         val researchFps = when (rate) { 1 -> 1000.0; 2 -> 500.0; 3 -> 250.0; else -> 100.0 } / 3
-        val baseline = max(online.sumOf { 1000.0 / it.reportMs.coerceAtLeast(10) + 1 }, observedRxFps) + observedTxFps.coerceAtLeast(0.0)
+        val baseline = max(online.sumOf { 1000.0 / it.reportMs.coerceAtLeast(10) + 1 },
+            (observedRxFps - replacingResearchFps.coerceAtLeast(0.0)).coerceAtLeast(0.0)) + observedTxFps.coerceAtLeast(0.0)
         val total = baseline + researchFps
         val blocked = when {
             online.isEmpty() -> "没有在线检测节点"

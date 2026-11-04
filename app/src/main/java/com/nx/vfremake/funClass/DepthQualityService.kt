@@ -17,6 +17,7 @@ class DepthQualityService(
     private var monitors = Array(8) { DepthQualityMonitor(it) }
     private val lastSeq = arrayOfNulls<Int>(8)
     private val lastAt = arrayOfNulls<Long>(8)
+    private val lastBoot = arrayOfNulls<Int>(8)
     private var recording: RecordingSession? = null
 
     /** 入参是到达时的完整通道快照，不能用后来另一帧电压配上旧时间戳。 */
@@ -26,9 +27,11 @@ class DepthQualityService(
         val sample = measured.forRow(row, channel)
         val previousSeq = lastSeq[row]
         val previousTime = lastAt[row]
-        val continuous = previousSeq == null || ((channel.seq ?: 0) - previousSeq) and 255 == 1 &&
-            previousTime != null && channel.lastHeardMs - previousTime <= DepthNodeRuntime.offlineTimeout(channel)
+        val continuous = previousSeq == null || (lastBoot[row] == channel.bootCount &&
+            (((channel.seq ?: 0) - previousSeq) and 255) == 1 && previousTime != null &&
+            channel.lastHeardMs - previousTime <= DepthNodeRuntime.offlineTimeout(channel))
         lastSeq[row] = channel.seq; lastAt[row] = channel.lastHeardMs
+        lastBoot[row] = channel.bootCount
         val atEpoch = epochMs() - (nowMs() - channel.lastHeardMs).coerceAtLeast(0)
         val input = DepthQualityMonitor.Input(channel.lastHeardMs, atEpoch, sample, targetMm(row), speedKmh(),
             trustedShallowStop(channel, sample), continuous)
@@ -50,7 +53,7 @@ class DepthQualityService(
     @Synchronized fun reset() {
         monitors.forEachIndexed { row, monitor -> publish(row, monitor.invalidate("SESSION_CHANGE")) }
         monitors = Array(8) { DepthQualityMonitor(it) }
-        lastSeq.fill(null); lastAt.fill(null)
+        lastSeq.fill(null); lastAt.fill(null); lastBoot.fill(null)
     }
 
     private fun publish(row: Int, update: DepthQualityMonitor.Update) {
