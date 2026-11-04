@@ -28,6 +28,7 @@ import com.nx.vfremake.funClass.DepthNodeRuntime
 import com.nx.vfremake.funClass.DepthNodeCfgClient
 import com.nx.vfremake.funClass.DepthNodeSimulator
 import com.nx.vfremake.funClass.CanOpenFun
+import com.nx.vfremake.funClass.MeasuredDepthFacade
 import com.esri.arcgisruntime.data.ShapefileFeatureTable
 import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.layers.FeatureLayer
@@ -354,6 +355,7 @@ class VariableFertViewModel : ViewModel() {
     val depthNodeStore = DepthNodeStateStore()
     val depthNodeState = MutableLiveData(depthNodeStore.current())
     val depthNodeRuntime = DepthNodeRuntime(depthNodeStore, nowMs = { android.os.SystemClock.elapsedRealtime() })
+    val measuredDepthFacade = MeasuredDepthFacade({ currentDepthNodeState() }, depthNodeRuntime.nowMs)
     @Volatile var depthNodeSimulator: DepthNodeSimulator? = null
         private set
     private var realDepthNodeSnapshot: DepthNodeState? = null

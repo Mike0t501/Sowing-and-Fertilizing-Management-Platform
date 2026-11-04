@@ -66,6 +66,9 @@ import com.nx.vfremake.data.RECORD_INTERVAL_MAX_MS
 import com.nx.vfremake.data.RECORD_INTERVAL_MIN_MS
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.DepthNodeState
+import com.nx.vfremake.data.DepthDisplayMode
+import com.nx.vfremake.funClass.MeasuredDepthSample
 import com.nx.vfremake.data.SERVO_ALARM_DRIVE_FAULT
 import com.nx.vfremake.data.SERVO_ALARM_INTERNAL_LIMIT
 import com.nx.vfremake.data.SERVO_ALARM_SDO_ABORT
@@ -151,6 +154,7 @@ fun SowingDepthScreen(
     }
 
     val state by viewModel.sowingDepthState.observeAsState(SowingDepthState())
+    val nodeState by viewModel.depthNodeState.observeAsState(DepthNodeState())
     val activeMotorsState by viewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
     val activeMotorIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorsState)
 
@@ -578,6 +582,20 @@ fun SowingDepthScreen(
                 }
             }
 
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("实测显示档位（仅影响显示）", fontSize = 16.sp)
+                DepthDisplayMode.values().forEach { mode ->
+                    OutlinedButton(onClick = {
+                        viewModel.depthNodeStore.update { it.copy(displayMode = mode) }
+                        MySharedPreFun(context).saveDepthDisplayMode(mode)
+                    }) {
+                        Text((if (nodeState.displayMode == mode) "✓ " else "") +
+                            (if (mode == DepthDisplayMode.HALF_CM) "0.5 cm" else "1 mm"), fontSize = 16.sp)
+                    }
+                }
+            }
+
             // ── 8 路电机状态卡片 ─────────────────────────────────────────────
             Text(
                 "电机状态",
@@ -598,6 +616,8 @@ fun SowingDepthScreen(
                     MotorStatusCard(
                         cal             = cal,
                         motorIndex      = i,
+                        measurement     = viewModel.measuredDepthFacade.forRow(i),
+                        displayMode     = nodeState.displayMode,
                         onSingleSet     = {
                             motorDialogInput  = "%.1f".format(cal.targetDepth)
                             motorDialogSlider = cal.targetDepth
@@ -760,6 +780,8 @@ fun SowingDepthScreen(
 private fun MotorStatusCard(
     cal:         ServoCalibration,
     motorIndex:  Int,
+    measurement: MeasuredDepthSample,
+    displayMode: DepthDisplayMode,
     onSingleSet: () -> Unit,
     onCalibrate: () -> Unit
 ) {
@@ -808,6 +830,9 @@ private fun MotorStatusCard(
                 modifier  = Modifier.padding(vertical = 8.dp)
             )
 
+            MeasuredDepthReadout(measurement, cal.targetDepth, displayMode)
+            Spacer(Modifier.height(12.dp))
+
             // 深度信息行
             Row(
                 modifier              = Modifier.fillMaxWidth(),
@@ -816,7 +841,7 @@ private fun MotorStatusCard(
             ) {
                 // 当前深度
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("当前深度", fontSize = 11.sp, color = Color.Gray)
+                    Text("伺服换算深度", fontSize = 14.sp, color = Color.Gray)
                     if (cal.fitValid && cal.isOnline) {
                         Text(
                             "%.1f mm".format(cal.currentDepth),

@@ -100,6 +100,11 @@ import com.esri.arcgisruntime.symbology.TextSymbol
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.SowingDepthState
+import com.nx.vfremake.data.DepthNodeState
+import com.nx.vfremake.data.DepthDisplayMode
+import com.nx.vfremake.data.DepthNodeQuality
+import com.nx.vfremake.funClass.MeasuredDepthSample
+import com.nx.vfremake.funClass.DepthDisplayFormat
 import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
@@ -1368,6 +1373,8 @@ fun MsgScreenBottom(mVariableFertViewModel: VariableFertViewModel = VariableFert
     val confertflow by mVariableFertViewModel.displayFertArray.observeAsState(DoubleArray(safeSize) { 0.0 })
     val fertApplied by mVariableFertViewModel.fertApplied.observeAsState(DoubleArray(safeSize) { 0.0 })
     val sowingDepthState by mVariableFertViewModel.sowingDepthState.observeAsState(SowingDepthState())
+    val nodeState by mVariableFertViewModel.depthNodeState.observeAsState(DepthNodeState())
+    val measurements = remember(nodeState) { (0..7).associateWith { mVariableFertViewModel.measuredDepthFacade.forRow(it) } }
     val activeMotorsState by mVariableFertViewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
 
     Box(
@@ -1408,6 +1415,8 @@ fun MsgScreenBottom(mVariableFertViewModel: VariableFertViewModel = VariableFert
                     )
                     SowingDepthRealtimePanel(
                         state = sowingDepthState,
+                        measurements = measurements,
+                        displayMode = nodeState.displayMode,
                         rowNumber = mSPParamData.rowNumber,
                         activeMotors = activeMotorsState,
                         modifier = Modifier
@@ -1423,6 +1432,8 @@ fun MsgScreenBottom(mVariableFertViewModel: VariableFertViewModel = VariableFert
 @Composable
 private fun SowingDepthRealtimePanel(
     state: SowingDepthState,
+    measurements: Map<Int, MeasuredDepthSample>,
+    displayMode: DepthDisplayMode,
     rowNumber: Int,
     activeMotors: BooleanArray?,
     modifier: Modifier = Modifier
@@ -1430,9 +1441,8 @@ private fun SowingDepthRealtimePanel(
     val activeIndices = activeSowingDepthMotorIndices(rowNumber, activeMotors)
     val activeMotorList = activeIndices.mapNotNull { state.motors.getOrNull(it) }
     val validMotors = activeMotorList.filter { it.isOnline && it.fitValid }
-    val avgCurrentDepth = validMotors.takeIf { it.isNotEmpty() }
-        ?.map { it.currentDepth.toDouble() }
-        ?.average()
+    val avgCurrentDepth = activeIndices.mapNotNull { measurements[it]?.depthMm }
+        .takeIf { it.isNotEmpty() }?.map { it.toDouble() }?.average()
     val avgTargetDepth = validMotors
         .map { it.targetDepth }
         .filter { it > 0f }
@@ -1440,7 +1450,7 @@ private fun SowingDepthRealtimePanel(
         ?.map { it.toDouble() }
         ?.average()
         ?: state.globalTargetDepth.toDouble()
-    val onlineCount = activeMotorList.count { it.isOnline }
+    val onlineCount = activeIndices.count { measurements[it]?.quality != DepthNodeQuality.OFFLINE }
     val alarmCount = activeMotorList.count { it.alarmCode != 0 }
 
     Column(
@@ -1456,7 +1466,7 @@ private fun SowingDepthRealtimePanel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "播种深度(mm)",
+                text = "实测播深",
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp,
@@ -1478,15 +1488,15 @@ private fun SowingDepthRealtimePanel(
             verticalAlignment = Alignment.Bottom
         ) {
             DepthSummaryText(
-                label = "均深",
-                value = avgCurrentDepth?.let { "%.1f".format(Locale.CHINA, it) } ?: "--"
+                label = "实测均深",
+                value = remember { DepthDisplayFormat() }.format(avgCurrentDepth?.toFloat(), displayMode)
             )
             DepthSummaryText(
-                label = "目标",
+                label = "目标mm",
                 value = "%.1f".format(Locale.CHINA, avgTargetDepth)
             )
             DepthSummaryText(
-                label = "在线",
+                label = "检测在线",
                 value = "$onlineCount/${activeIndices.size}"
             )
             if (alarmCount > 0) {
@@ -1520,7 +1530,9 @@ private fun SowingDepthRealtimePanel(
                         rowIndices.forEach { index ->
                         DepthMotorCell(
                             motorIndex = index,
-                            state = state,
+                            sample = measurements.getValue(index),
+                            target = state.motors[index].targetDepth,
+                            displayMode = displayMode,
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -1560,22 +1572,15 @@ private fun DepthSummaryText(
 @Composable
 private fun DepthMotorCell(
     motorIndex: Int,
-    state: SowingDepthState,
+    sample: MeasuredDepthSample,
+    target: Float,
+    displayMode: DepthDisplayMode,
     modifier: Modifier = Modifier
 ) {
-    val motor = state.motors.getOrNull(motorIndex)
-    val statusColor = when {
-        motor == null || !motor.isOnline -> Color(0xFF616161)
-        motor.alarmCode != 0 -> Color(0xFFD32F2F)
-        !motor.limitsSet || !motor.fitValid -> Color(0xFFFBC02D)
-        else -> Color(0xFF43A047)
-    }
-    val textColor = if (statusColor == Color(0xFFFBC02D)) Color.Black else Color.White
-    val depthText = if (motor?.isOnline == true) {
-        "%.1f".format(Locale.CHINA, motor.currentDepth)
-    } else {
-        "--"
-    }
+    val statusColor = measuredDepthColor(sample, target)
+    val textColor = Color.White
+    val formatter = remember(motorIndex) { DepthDisplayFormat() }
+    val depthText = formatter.format(sample.depthMm, displayMode).replace(" ", "")
 
     Row(
         modifier = modifier
