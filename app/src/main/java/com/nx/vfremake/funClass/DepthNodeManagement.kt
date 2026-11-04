@@ -127,4 +127,18 @@ class DepthNodeManagement(private val runtime: DepthNodeRuntime, private val cli
         check(client.read(base, sub = 10) == 0L) { "研究流关闭未确认" }
         client.readAll(base)
     }
+
+    /** 第8个节点上线时也要执行ICD限制，不能只在“开启”按钮处检查一次。 */
+    suspend fun enforceEightRowLimit(): Boolean = researchMutex.withLock {
+        val state = runtime.store.current()
+        val nodes = state.channels + listOf(state.factory).filter { it.isOnline }
+        if (nodes.count { it.isOnline } < 8) return@withLock false
+        val active = nodes.filter { it.isOnline && it.flags and P.Flag.RESEARCH.mask != 0 }
+        for (node in active) {
+            client.write(node.baseId, 10, 0)
+            check(client.read(node.baseId, sub = 10) == 0L) { "8行在线研究流关闭未确认" }
+            runtime.store.updateChannel(node.row) { it.copy(parameterWords = it.parameterWords + (10 to 0L)) }
+        }
+        active.isNotEmpty()
+    }
 }

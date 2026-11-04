@@ -142,6 +142,16 @@ class CanReceiveCoroutine {
         mVariableFertViewModel.configureDepthNodeSimulation(isTestMode)
         jobs.add(scope.launch {
             while (isActive) {
+                try {
+                    if (mVariableFertViewModel.depthNodeManagement.enforceEightRowLimit())
+                        Log.w(TAG, "8行检测节点在线，已关闭研究流以遵守ICD带宽约定")
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { Log.w(TAG, "研究流限制执行失败，将重试: ${e.message}") }
+                delay(500)
+            }
+        })
+        jobs.add(scope.launch {
+            while (isActive) {
                 mVariableFertViewModel.depthNodeSimulator?.tick(
                     mVariableFertViewModel.currentSowingDepthState().motors.map { it.targetDepth.takeIf { v -> v > 0f } ?: 40f }
                 )

@@ -343,7 +343,7 @@ class DocuAndManageFun {
                 while (cursor.moveToNext()) {
                     val docId = cursor.getString(0) ?: continue
                     val name = cursor.getString(1) ?: continue
-                    val prefixes = listOf("fertMsg_", "depthTest_", "depthRec_")
+                    val prefixes = listOf("fertMsg_", "depthTest_", "depthRec_", "depthEvt_")
                     if (!(name.endsWith(".csv") && prefixes.any { name.startsWith(it) })) continue
                     result.add(
                         ExperimentCsvFile(

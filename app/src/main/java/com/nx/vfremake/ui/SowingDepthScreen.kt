@@ -160,6 +160,9 @@ fun SowingDepthScreen(
 
     val state by viewModel.sowingDepthState.observeAsState(SowingDepthState())
     val nodeState by viewModel.depthNodeState.observeAsState(DepthNodeState())
+    var cvInput by remember(nodeState.qualityConfig.cvThreshold) {
+        mutableStateOf("%.1f".format(Locale.ROOT, nodeState.qualityConfig.cvThreshold * 100))
+    }
     val activeMotorsState by viewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
     val activeMotorIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorsState)
 
@@ -599,6 +602,21 @@ fun SowingDepthScreen(
                             (if (mode == DepthDisplayMode.HALF_CM) "0.5 cm" else "1 mm"), fontSize = 16.sp)
                     }
                 }
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(cvInput, { cvInput = it }, enabled = !isRecording && !recordActive,
+                    label = { Text("不稳定CV阈值%") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true, modifier = Modifier.width(200.dp))
+                OutlinedButton(enabled = !isRecording && !recordActive, onClick = {
+                    val percent = cvInput.toFloatOrNull()
+                    if (percent != null && percent.isFinite() && percent in 1f..200f) {
+                        val config = com.nx.vfremake.data.DepthQualityConfig(percent / 100)
+                        viewModel.depthNodeStore.update { it.copy(qualityConfig = config) }
+                        MySharedPreFun(context).saveDepthQualityConfig(config)
+                    } else Toast.makeText(context, "CV阈值须为1–200%", Toast.LENGTH_SHORT).show()
+                }) { Text("应用监测阈值", fontSize = 16.sp) }
+                Text("默认20%为工程初值，需按试验修订；记录使用实际阈值。", fontSize = 16.sp)
             }
 
             // ── 8 路电机状态卡片 ─────────────────────────────────────────────

@@ -11,6 +11,9 @@ import java.util.concurrent.atomic.AtomicReference
 /** 质量按优先级排列；0 深度合法，只有 OK 才提供可用深度。 */
 enum class DepthNodeQuality { OFFLINE, FAULT, OUT_OF_RANGE, SETTLING, UNCALIBRATED, OK }
 enum class DepthDisplayMode { HALF_CM, ONE_MM }
+enum class DepthEventType { SHALLOW, DEEP, LIFT_OFF, UNSTABLE }
+data class DepthQualityStatus(val events: Set<DepthEventType> = emptySet(), val windowReady: Boolean = false,
+    val passRate: Float? = null, val coefficientOfVariation: Float? = null, val distanceWindow: Boolean = false)
 
 /** ICD §7.2 sub0–8；默认值是协议默认，真实配置必须以 Read 回读为准。 */
 data class DepthNodeFilterParams(
@@ -60,6 +63,7 @@ data class DepthNodeChannel(
     val flags: Int = 0, val cfgCrc: Int? = null,
     val depthMm: Float? = null, val depthRawMm: Float? = null, val spanMm: Float? = null,
     val quality: DepthNodeQuality = DepthNodeQuality.OFFLINE,
+    val monitoring: DepthQualityStatus = DepthQualityStatus(),
     val icdVer: Int? = null, val fwRev: Int? = null, val uptimeS: Int? = null,
     val vddaMv: Int? = null, val mcuTempC: Int? = null, val txDrop: Int? = null,
     val lastInfoMs: Long = 0, val researchFps: Float = 0f,

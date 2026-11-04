@@ -20,8 +20,10 @@ internal fun measuredDepthColor(sample: MeasuredDepthSample, target: Float): Col
     DepthNodeQuality.OFFLINE, DepthNodeQuality.UNCALIBRATED, DepthNodeQuality.SETTLING -> Color(0xFF757575)
     DepthNodeQuality.FAULT, DepthNodeQuality.OUT_OF_RANGE -> Color(0xFFC62828)
     DepthNodeQuality.OK -> when {
+        DepthEventType.LIFT_OFF in sample.monitoring.events -> Color(0xFFC62828)
+        sample.monitoring.events.isNotEmpty() -> Color(0xFF9C6500)
         (sample.depthMm ?: 0f) < 10f -> Color(0xFFC62828)
-        abs((sample.depthMm ?: target) - target) > (if (target >= 30f) 10f else 5f) -> Color(0xFF9C6500)
+        target > 0f && abs((sample.depthMm ?: target) - target) > DepthQualityConfig.toleranceMm(target) -> Color(0xFF9C6500)
         else -> Color(0xFF237A35)
     }
 }
@@ -40,9 +42,18 @@ internal fun MeasuredDepthReadout(sample: MeasuredDepthSample, target: Float, mo
                 fontSize = 30.sp, fontWeight = FontWeight.Bold, color = color)
         }
         Column(horizontalAlignment = Alignment.End) {
-            Text("状态：${DepthDisplayFormat.qualityLabel(sample.quality)}", color = color, fontSize = 16.sp)
+            val eventLabels = sample.monitoring.events.sortedBy { it.ordinal }.joinToString(" / ") { when (it) {
+                DepthEventType.SHALLOW -> "偏浅"; DepthEventType.DEEP -> "偏深"
+                DepthEventType.LIFT_OFF -> "腾空"; DepthEventType.UNSTABLE -> "不稳定"
+            } }
+            Text("状态：${eventLabels.ifEmpty { DepthDisplayFormat.qualityLabel(sample.quality) }}", color = color, fontSize = 16.sp)
             Text("目标差值：" + (sample.depthMm?.let { String.format(Locale.ROOT, "%+.1f mm", it - target) } ?: "--"), fontSize = 16.sp)
             Text("周期波动：" + (sample.spanMm?.let { String.format(Locale.ROOT, "%.1f mm", it) } ?: "--"), fontSize = 16.sp)
+            val monitoring = sample.monitoring
+            if (monitoring.windowReady) {
+                val cv = monitoring.coefficientOfVariation?.let { if (it.isFinite()) "%.1f%%".format(Locale.ROOT, it * 100) else "∞" } ?: "--"
+                Text("合格率 %.1f%% · CV %s".format(Locale.ROOT, (monitoring.passRate ?: 0f) * 100, cv), fontSize = 16.sp)
+            } else Text("质量窗口：统计不足", fontSize = 16.sp, color = Color.Gray)
         }
     }
 }

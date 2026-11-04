@@ -31,6 +31,9 @@ import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.MeasuredDepthFacade
 import com.nx.vfremake.funClass.DepthBusTrafficMeter
 import com.nx.vfremake.funClass.DepthNodeManagement
+import com.nx.vfremake.funClass.DepthQualityService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import com.esri.arcgisruntime.data.ShapefileFeatureTable
 import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.layers.FeatureLayer
@@ -384,6 +387,11 @@ class VariableFertViewModel : ViewModel() {
         else CanOpenFun.sendFrameSequenced(bridge)
     })
     val depthNodeManagement = DepthNodeManagement(depthNodeRuntime, depthNodeClient)
+    val depthQualityService = DepthQualityService(depthNodeStore, measuredDepthFacade, depthNodeRuntime.nowMs,
+        { System.currentTimeMillis() }, { row -> currentSowingDepthState().motors[row].targetDepth }, {
+            mSPParamData.forwardSpeed.takeIf { it.isFinite() && it >= 0 } ?: if (mRmcData.status in listOf("A", "D"))
+                mRmcData.forwardSpeedCalculate.takeIf { it.isFinite() && it >= 0 } else null
+        })
 
     /** 模拟会话跨页面保留；真实标定隔离，关闭测试模式后恢复。 */
     @Synchronized
@@ -392,6 +400,7 @@ class VariableFertViewModel : ViewModel() {
             realDepthNodeSnapshot = currentDepthNodeState()
             depthNodeStore.update { DepthNodeState(displayMode = it.displayMode, qualityConfig = it.qualityConfig, simulated = true) }
             depthNodeRuntime.resetTracking()
+            depthQualityService.reset()
             depthNodeSimulator = DepthNodeSimulator(
                 emit = { depthNodeRuntime.onDepthNodeFrame(it.canId, it.data) },
                 nowMs = depthNodeRuntime.nowMs, initialRows = 0 until mSPParamData.rowNumber.coerceIn(1, 8)
@@ -404,14 +413,19 @@ class VariableFertViewModel : ViewModel() {
             }, displayMode = it.displayMode, qualityConfig = it.qualityConfig) }
             realDepthNodeSnapshot = null
             depthNodeRuntime.resetTracking()
+            depthQualityService.reset()
         }
     }
 
     init {
+        viewModelScope.launch(Dispatchers.Default) {
+            depthNodeRuntime.samples.collect { depthQualityService.accept(it) }
+        }
         viewModelScope.launch {
             var previous = depthNodeStore.current()
             while (isActive) {
                 delay(100)
+                depthQualityService.tick()
                 val snapshot = depthNodeStore.current()
                 if (snapshot !== previous) {
                     depthNodeState.value = snapshot

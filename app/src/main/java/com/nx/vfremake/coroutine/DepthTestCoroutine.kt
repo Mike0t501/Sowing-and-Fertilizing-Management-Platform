@@ -57,7 +57,7 @@ class DepthTestCoroutine {
     private val jobs = HashSet<Job>()
 
     // 测试进行中标志位
-    var isRunning = false
+    @Volatile var isRunning = false
 
     // 用户中止请求：主循环各挂起点检查后体面收尾
     @Volatile

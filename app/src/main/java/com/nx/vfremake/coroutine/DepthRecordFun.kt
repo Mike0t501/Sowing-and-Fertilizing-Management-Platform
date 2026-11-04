@@ -19,6 +19,8 @@ import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.funClass.DocuAndManageFun
 import com.nx.vfremake.funClass.DepthRecordSchema
 import com.nx.vfremake.funClass.DepthNodeCfgClient
+import com.nx.vfremake.funClass.DepthQualityService
+import com.nx.vfremake.funClass.DepthEventSchema
 import com.nx.vfremake.data.DepthNodeState
 import com.nx.vfremake.data.activeSowingDepthMotorIndices
 import com.nx.vfremake.mSPParamData
@@ -106,10 +108,13 @@ class DepthRecordFun {
         val timeStampfilename =
             SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.ROOT).format(Date())
         val fileName = "${filePrefix}_$timeStampfilename.csv"
+        val eventFileName = "depthEvt_$timeStampfilename.csv"
 
         jobs.add(scope.launch {
             // 文件创建放在IO协程内：目录未设置/创建失败时通知用户而非主线程崩溃
             var fileWriter: OutputStreamWriter? = null
+            var eventWriter: OutputStreamWriter? = null
+            var eventSession: DepthQualityService.RecordingSession? = null
             var dataRowCount = 0
             var failed = false
             var metadataUri: Uri? = null
@@ -120,7 +125,7 @@ class DepthRecordFun {
             suspend fun writeMetadata() {
                 val uri = metadataUri ?: return
                 val state = metadataState ?: return
-                val json = DepthRecordSchema.metadata(state, BuildConfig.VERSION_NAME, startedAt, intervalMs, history.toList(), recordRows)
+                val json = DepthRecordSchema.metadata(state, BuildConfig.VERSION_NAME, startedAt, intervalMs, history.toList(), recordRows, eventFileName)
                 checkNotNull(context.contentResolver.openOutputStream(uri, "wt")) { "无法更新记录元数据" }
                     .bufferedWriter(Charsets.UTF_8).use { it.write(json) }
             }
@@ -147,7 +152,12 @@ class DepthRecordFun {
                 // 先写出表头行
                 fileWriter.append(DepthRecordSchema.csvLine(header))
                 fileWriter.flush()
+                eventWriter = manager.createExperimentCsvWriter(context, eventFileName)
+                eventWriter.write(0xFEFF)
+                eventWriter.append(DepthRecordSchema.csvLine(DepthEventSchema.HEADER))
+                eventWriter.flush()
                 val t0 = SystemClock.elapsedRealtime()
+                eventSession = mVariableFertViewModel.depthQualityService.beginRecording(recordRows, t0)
                 ready.complete(true)
                 metadataWatcher = launch {
                     val knownCrc = recordRows.associateWith { mVariableFertViewModel.currentDepthNodeState().channels[it].cfgCrc }.toMutableMap()
@@ -181,10 +191,13 @@ class DepthRecordFun {
                     for (row in getRows(relativeMs)) {
                         val motorIndex = (row.firstOrNull()?.toIntOrNull() ?: error("记录缺少行号")) - 1
                         val channel = mVariableFertViewModel.currentDepthNodeState().channels[motorIndex]
-                        val sample = mVariableFertViewModel.measuredDepthFacade.forRow(motorIndex)
+                        val sample = mVariableFertViewModel.measuredDepthFacade.forRow(motorIndex, channel)
                         val complete = DepthRecordSchema.completeRow(row, channel, sample)
                         fileWriter.append(DepthRecordSchema.csvLine(listOf(absTs, relativeMs.toString()) + complete))
                         dataRowCount++
+                    }
+                    eventSession.drain().forEach { event ->
+                        eventWriter.append(DepthRecordSchema.csvLine(DepthEventSchema.row(event, eventSession.startedMs)))
                     }
                     tick = maxOf(tick + 1, (SystemClock.elapsedRealtime() - t0) / intervalMs + 1)
                     // 落后于计划时刻（sleep <= 0）就立即进入下一拍，不做补偿式追赶——
@@ -204,6 +217,16 @@ class DepthRecordFun {
             } finally {
                 withContext(NonCancellable) {
                     metadataWatcher?.cancelAndJoin()
+                    try {
+                        eventSession?.let { session ->
+                            mVariableFertViewModel.depthQualityService.endRecording(session)
+                            session.drain().forEach { event -> eventWriter?.append(
+                                DepthRecordSchema.csvLine(DepthEventSchema.row(event, session.startedMs))) }
+                        }
+                    } catch (e: Exception) {
+                        failed = true
+                        mVariableFertViewModel.writeSaveNotice.postValue(true to "事件保存失败：${e.message}")
+                    }
                     try { writeMetadata() } catch (e: Exception) {
                         failed = true
                         mVariableFertViewModel.writeSaveNotice.postValue(true to "元数据保存失败：${e.message}")
@@ -212,6 +235,8 @@ class DepthRecordFun {
                 try {
                     fileWriter?.flush()
                     fileWriter?.close()
+                    eventWriter?.flush()
+                    eventWriter?.close()
                 } catch (e: IOException) {
                     e.printStackTrace()
                     failed = true

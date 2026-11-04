@@ -12,6 +12,7 @@ data class DepthQualityConfig(val cvThreshold: Float = 0.20f) {
         "exit_seconds" to EXIT_SECONDS, "hysteresis_mm" to HYSTERESIS_MM,
         "lift_depth_mm" to LIFT_DEPTH_MM, "lift_seconds" to LIFT_SECONDS,
         "window_distance_m" to WINDOW_DISTANCE_M, "window_seconds" to WINDOW_SECONDS,
+        "window_bin_resolution" to WINDOW_BIN_RESOLUTION,
         "target_settle_seconds" to TARGET_SETTLE_SECONDS
     )
     companion object {
@@ -31,6 +32,7 @@ data class DepthQualityConfig(val cvThreshold: Float = 0.20f) {
         const val WINDOW_DISTANCE_M = 10.0
         const val WINDOW_SECONDS = 10.0
         const val TARGET_SETTLE_SECONDS = 2.0
+        const val WINDOW_BIN_RESOLUTION = 0.01 // 距离域1cm、时间域10ms，保留箱内全部样本矩。
 
         /** 显示、统计和偏深偏浅判定共用容差。 */
         fun toleranceMm(targetMm: Float): Float = if (targetMm >= TARGET_SPLIT_MM) TOL_HIGH_MM else TOL_LOW_MM

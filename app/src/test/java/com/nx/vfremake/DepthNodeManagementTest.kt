@@ -48,6 +48,20 @@ class DepthNodeManagementTest {
         assertFalse(slow.snapshot(5000, listOf(11)).servo100MsObserved)
     }
 
+    @Test fun eighthNodeArrivalClosesAnAlreadyRunningResearchStream() = runBlocking {
+        var clock = 1000L
+        val runtime = DepthNodeRuntime(DepthNodeStateStore(), nowMs = { clock })
+        val simulator = DepthNodeSimulator({ runtime.onDepthNodeFrame(it.canId, it.data) }, { clock })
+        simulator.command(P.cfgRequest(0x680, P.WRITE, P.PARAM_INDEX, 10, 1))
+        simulator.tick(List(8) { 40f })
+        val client = DepthNodeCfgClient(runtime, { simulator.command(it) }, 20)
+        val management = DepthNodeManagement(runtime, client)
+        assertTrue(management.enforceEightRowLimit())
+        clock += 50; simulator.tick(List(8) { 40f })
+        assertEquals(0, runtime.channel(0).flags and P.Flag.RESEARCH.mask)
+        assertEquals(0L, runtime.channel(0).parameterWords[10])
+    }
+
     @Test fun secondResearchNodeIsRejectedEvenBeforeFirstStatusFlagArrives() = runBlocking {
         var clock = 1000L
         val runtime = DepthNodeRuntime(DepthNodeStateStore(), nowMs = { clock })

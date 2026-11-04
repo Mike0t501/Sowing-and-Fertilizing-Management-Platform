@@ -15,7 +15,8 @@ object DepthRecordSchema {
     val HEADER = ORIGINAL_HEADER + NODE_HEADER
 
     /** 非OK深度留空；0mm保留；flags/seq/CRC采用0–255十进制以便表格分析。 */
-    fun nodeColumns(channel: DepthNodeChannel, sample: MeasuredDepthSample, event: String = ""): List<String> {
+    fun nodeColumns(channel: DepthNodeChannel, sample: MeasuredDepthSample,
+        event: String = sample.monitoring.events.sortedBy { it.ordinal }.joinToString("|") { it.name }): List<String> {
         val online = sample.quality != DepthNodeQuality.OFFLINE
         val ok = sample.quality == DepthNodeQuality.OK
         return listOf(if (online) "1" else "0", number(if (ok) sample.depthMm else null),
@@ -26,7 +27,8 @@ object DepthRecordSchema {
     }
 
     /** 原始7个业务字段+节点12列，前两列时间戳由记录器补齐。 */
-    fun completeRow(original: List<String>, channel: DepthNodeChannel, sample: MeasuredDepthSample, event: String = ""): List<String> {
+    fun completeRow(original: List<String>, channel: DepthNodeChannel, sample: MeasuredDepthSample,
+        event: String = sample.monitoring.events.sortedBy { it.ordinal }.joinToString("|") { it.name }): List<String> {
         require(original.size == 7) { "播深原始记录字段数必须为7" }
         return original + nodeColumns(channel, sample, event)
     }
@@ -46,11 +48,12 @@ object DepthRecordSchema {
 
     /** 可重复写入同一个meta文档，配置变化追加历史；历史CSV不改写。 */
     fun metadata(state: DepthNodeState, appVersion: String, startedAt: String, intervalMs: Long,
-        history: List<ConfigSnapshot>, activeRows: List<Int>): String {
+        history: List<ConfigSnapshot>, activeRows: List<Int>, eventFileName: String? = null): String {
         val metadata = linkedMapOf<String, Any?>(
             "record_schema" to RECORD_SCHEMA, "app_version" to appVersion,
             "detection_scheme" to DETECTION_SCHEME, "simulation" to state.simulated,
             "started_at" to startedAt, "interval_ms" to intervalMs, "active_rows" to activeRows.map { it + 1 },
+            "event_file" to eventFileName,
             "display_mode" to state.displayMode.name, "quality_monitor_parameters" to state.qualityConfig.metadata(),
             "channels" to state.channels.map { channel ->
                 val initial = history.firstOrNull { it.row == channel.row }

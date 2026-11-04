@@ -81,12 +81,16 @@ class DepthNodeRuntime(
     fun tick() {
         val now = nowMs()
         for (slot in 0..8) {
+            trim(arrivals[slot], now - 10_000)
+            val lost = arrivals[slot].sumOf { it.lost }
+            val denominator = arrivals[slot].size + lost
+            val lossRate = if (denominator == 0) 0f else lost.toFloat() / denominator
             while (research[slot].isNotEmpty() && research[slot].first < now - 1000) research[slot].removeFirst()
             val fps = research[slot].size.toFloat()
             val row = if (slot == 8) -1 else slot
             val old = channel(row)
-            val updated = refresh(old.copy(researchFps = fps), now)
-            if (updated != old) store.updateChannel(row) { refresh(it.copy(researchFps = fps), now) }
+            val updated = refresh(old.copy(researchFps = fps, lossRate10s = lossRate), now)
+            if (updated != old) store.updateChannel(row) { refresh(it.copy(researchFps = fps, lossRate10s = lossRate), now) }
         }
     }
 
