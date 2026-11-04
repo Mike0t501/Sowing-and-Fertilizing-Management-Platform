@@ -621,6 +621,7 @@ fun DepthCalibrationScreen(
                 onStepSelected = { step ->
                     if (step == 1) currentStep = 1
                     else if (step == 2 && cal.limitsSet) currentStep = 2
+                    else if (step == 3) currentStep = 3
                 }
             )
 
@@ -729,7 +730,9 @@ fun DepthCalibrationScreen(
                     onSaveClick  = { showSaveConfirm.value = true }
                 )
             }
-
+            AnimatedVisibility(visible = currentStep == 3, enter = expandVertically(), exit = shrinkVertically()) {
+                DepthNodeCalibrationSection(viewModel, motorIndex)
+            }
         }
     }
 
@@ -760,10 +763,11 @@ private fun StepIndicator(
     ) {
         listOf(
             1 to "步骤 1：限位设置",
-            2 to "步骤 2：深度校准"
+            2 to "步骤 2：深度校准",
+            3 to "步骤 3：检测节点标定"
         ).forEach { (step, label) ->
             val isSelected = currentStep == step
-            val isEnabled  = step == 1 || step2Enabled
+            val isEnabled  = step == 1 || step == 3 || step2Enabled
             TextButton(
                 onClick  = { onStepSelected(step) },
                 enabled  = isEnabled,
