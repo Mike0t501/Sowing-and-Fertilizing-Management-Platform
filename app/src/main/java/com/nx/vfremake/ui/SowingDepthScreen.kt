@@ -138,7 +138,7 @@ fun SowingDepthScreen(
                 if (depthRecorder.isRunning) depthRecorder.shutdown()
                 receiveCoroutine.shutdown()
                 depthCoroutine.shutdown()
-                if (portOpenedHere) {
+                if (portOpenedHere && !CanReceiveCoroutine.hasActiveClients()) {
                     try { mSerialPortCAN?.tryClose() } catch (_: Exception) {}
                     mSerialPortCAN = null
                 }

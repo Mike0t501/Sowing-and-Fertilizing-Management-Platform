@@ -309,13 +309,13 @@ class MainActivity : AppCompatActivity() {
                                 if (isTestMode) {
                                     if (!myTestModeCoroutine.isRunning) myTestModeCoroutine.start(context, isRunningState)
                                     // 【修复】：测试模式必须也打开接收，这样底部图表才能收到反馈发生变化！
-                                    if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel)
+                                    if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel, context)
                                 } else {
                                     if (!mDB9reCANseCoroutine.isRunning) {
                                         if (simGnss) mDB9reCANseCoroutine.start1Simulated(context, mVariableFertViewModel)
                                         else         mDB9reCANseCoroutine.start1(context, mVariableFertViewModel)
                                     }
-                                    if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel)
+                                    if (!mCanReceiveCoroutine.isRunning) mCanReceiveCoroutine.start(mVariableFertViewModel, context)
                                 }
 
                                 // 5b. 处方图控深模式：作业期间由 MainActivity 独占启动深度控制协程。

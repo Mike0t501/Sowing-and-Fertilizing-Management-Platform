@@ -63,6 +63,15 @@ class CanFrameRoutingTest {
         assertEquals(Pair(127, 2), CanReceiveCoroutine.classifyCanOpen(0x77F))
     }
 
+    @Test fun depthNodeRangeNeverFallsToFertilizerIncludingFactoryAndReservedOffsets() {
+        for (canId in 0x680..0x6C7) {
+            assertEquals(Pair(-1, -1), CanReceiveCoroutine.classifyCanOpen(canId))
+            assertEquals("DEPTH_NODE", routeOf(canId))
+        }
+        assertEquals("FERTILIZER", routeOf(0x67F))
+        assertEquals("FERTILIZER", routeOf(0x6C8))
+    }
+
     // ── 编码器帧路由：TPDO / SDO / Boot-up 全部不落施肥 ─────────────────────
 
     @Test

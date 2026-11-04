@@ -609,12 +609,12 @@ object CanOpenFun {
     private var lastTxElapsedMs = 0L
 
     /** 持锁前提下：距上一帧不足 [GLOBAL_INTER_FRAME_MS] 则补足等待，再发送。 */
-    private suspend fun paceThenSend(frame: ByteArray) {
+    private suspend fun paceThenSend(frame: ByteArray, transmitter: (ByteArray) -> Unit = ::sendFrame) {
         val sinceLast = SystemClock.elapsedRealtime() - lastTxElapsedMs
         if (sinceLast in 0 until GLOBAL_INTER_FRAME_MS) {
             delay(GLOBAL_INTER_FRAME_MS - sinceLast)
         }
-        sendFrame(frame)
+        transmitter(frame)
         lastTxElapsedMs = SystemClock.elapsedRealtime()
     }
 
@@ -623,6 +623,11 @@ object CanOpenFun {
      */
     suspend fun sendFrameSequenced(frame: ByteArray) {
         sdoMutex.withLock { paceThenSend(frame) }
+    }
+
+    /** 模拟传输仍参与全局20ms步调，但合成请求不得发送给现场硬件。 */
+    suspend fun sendFrameSequenced(frame: ByteArray, virtualTransmitter: (ByteArray) -> Unit) {
+        sdoMutex.withLock { paceThenSend(frame, virtualTransmitter) }
     }
 
     /**

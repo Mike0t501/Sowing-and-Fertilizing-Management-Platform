@@ -24,6 +24,10 @@ import com.nx.vfremake.data.DepthNodeState
 import com.nx.vfremake.data.DepthNodeChannel
 import com.nx.vfremake.data.DepthNodeStateStore
 import com.nx.vfremake.funClass.DepthNodeStorage
+import com.nx.vfremake.funClass.DepthNodeRuntime
+import com.nx.vfremake.funClass.DepthNodeCfgClient
+import com.nx.vfremake.funClass.DepthNodeSimulator
+import com.nx.vfremake.funClass.CanOpenFun
 import com.esri.arcgisruntime.data.ShapefileFeatureTable
 import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.layers.FeatureLayer
@@ -349,6 +353,38 @@ class VariableFertViewModel : ViewModel() {
     // ====== 检测节点：实时原子真源 + 最多 10Hz 界面投影 ======
     val depthNodeStore = DepthNodeStateStore()
     val depthNodeState = MutableLiveData(depthNodeStore.current())
+    val depthNodeRuntime = DepthNodeRuntime(depthNodeStore, nowMs = { android.os.SystemClock.elapsedRealtime() })
+    @Volatile var depthNodeSimulator: DepthNodeSimulator? = null
+        private set
+    private var realDepthNodeSnapshot: DepthNodeState? = null
+    val depthNodeClient = DepthNodeCfgClient(depthNodeRuntime, send = { frame ->
+        val bridge = CanOpenFun.wrapCanFrame(frame.canId, frame.data)
+        val simulator = depthNodeSimulator
+        if (simulator != null) CanOpenFun.sendFrameSequenced(bridge) { simulator.command(frame) }
+        else CanOpenFun.sendFrameSequenced(bridge)
+    })
+
+    /** 模拟会话跨页面保留；真实标定隔离，关闭测试模式后恢复。 */
+    @Synchronized
+    fun configureDepthNodeSimulation(enabled: Boolean) {
+        if (enabled && depthNodeSimulator == null) {
+            realDepthNodeSnapshot = currentDepthNodeState()
+            depthNodeStore.update { DepthNodeState(displayMode = it.displayMode, simulated = true) }
+            depthNodeRuntime.resetTracking()
+            depthNodeSimulator = DepthNodeSimulator(
+                emit = { depthNodeRuntime.onDepthNodeFrame(it.canId, it.data) },
+                nowMs = depthNodeRuntime.nowMs, initialRows = 0 until mSPParamData.rowNumber.coerceIn(1, 8)
+            )
+        } else if (!enabled && depthNodeSimulator != null) {
+            depthNodeSimulator = null
+            val saved = realDepthNodeSnapshot ?: DepthNodeState()
+            depthNodeStore.update { DepthNodeState(channels = saved.channels.mapIndexed { row, channel ->
+                DepthNodeStorage.apply(DepthNodeStorage.saved(channel), DepthNodeChannel(row))
+            }, displayMode = it.displayMode) }
+            realDepthNodeSnapshot = null
+            depthNodeRuntime.resetTracking()
+        }
+    }
 
     init {
         viewModelScope.launch {

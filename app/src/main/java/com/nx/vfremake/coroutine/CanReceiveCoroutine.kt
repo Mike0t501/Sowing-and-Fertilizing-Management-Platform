@@ -16,6 +16,7 @@ import com.nx.vfremake.funClass.CanLinkStats
 import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.ConvAndCtrlFun
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.funClass.DepthNodeProtocol
 import com.nx.vfremake.funClass.SdoReplyWaiters
 import com.nx.vfremake.funClass.TpdoArrivalMonitor
 import com.nx.vfremake.mRmcData
@@ -58,19 +59,27 @@ class CanReceiveCoroutine {
     private val servoDiagLogLastMs = LongArray(8) { 0L }
 
     /** 生产接收与回归测试共用的路由归属。 */
-    enum class FrameRoute { SERVO, SDO_WAITER, IGNORED, FERTILIZER }
+    enum class FrameRoute { SERVO, SDO_WAITER, DEPTH_NODE, IGNORED, FERTILIZER }
 
     companion object {
         /** 已配置伺服优先，旧独立编码器服务帧显式忽略。 */
         fun classifyRoute(canId: Int, servoNodeIds: List<Int>, hasSdoWaiter: Boolean = false): FrameRoute {
             val (nodeId, type) = classifyCanOpen(canId)
             return when {
+                type < 0 && DepthNodeProtocol.isDepthNodeId(canId) -> FrameRoute.DEPTH_NODE
                 type >= 0 && nodeId in servoNodeIds -> FrameRoute.SERVO
                 type >= 0 && nodeId in 21..28 -> FrameRoute.IGNORED
                 type == 0 && hasSdoWaiter -> FrameRoute.SDO_WAITER
                 else -> FrameRoute.FERTILIZER
             }
         }
+
+        private val sessionLock = Any()
+        private val clients = mutableSetOf<CanReceiveCoroutine>()
+        private var sharedReceiver: CanReceiveCoroutine? = null
+
+        /** 页面切换时串口接收不能出现两个读取者。 */
+        fun hasActiveClients(): Boolean = synchronized(sessionLock) { clients.isNotEmpty() }
 
         private const val TAG = "CanReceiveCoroutine"
         /** 伺服超过此时间未收到任何帧即标记离线（ms）。 */
@@ -99,17 +108,65 @@ class CanReceiveCoroutine {
         }
     }
 
-    fun shutdown() {
+    /** 释放本调用方租约，最后一个调用方离开才停止真正接收任务。 */
+    fun shutdown() = synchronized(sessionLock) {
+        if (!clients.remove(this)) return@synchronized
+        isRunning = false
+        if (clients.isEmpty()) {
+            sharedReceiver?.shutdownOwned()
+            sharedReceiver = null
+        }
+    }
+
+    private fun shutdownOwned() {
         isRunning = false
         scope.cancel()
         jobs.clear()
     }
 
-    fun start(mVariableFertViewModel: VariableFertViewModel, context: Context? = null) {
+    /** 作业、标定、诊断共用接收会话，避免并发读取UART流导致各自只读到半帧。 */
+    fun start(mVariableFertViewModel: VariableFertViewModel, context: Context? = null) = synchronized(sessionLock) {
+        if (!clients.add(this)) return@synchronized
+        isRunning = true
+        if (sharedReceiver == null) {
+            sharedReceiver = CanReceiveCoroutine().also { it.startOwned(mVariableFertViewModel, context) }
+        }
+    }
+
+    private fun startOwned(mVariableFertViewModel: VariableFertViewModel, context: Context?) {
         scope = CoroutineScope(Dispatchers.Default)
 
         val isTestMode = context != null &&
             MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1"
+
+        mVariableFertViewModel.configureDepthNodeSimulation(isTestMode)
+        jobs.add(scope.launch {
+            while (isActive) {
+                mVariableFertViewModel.depthNodeSimulator?.tick(
+                    mVariableFertViewModel.currentSowingDepthState().motors.map { it.targetDepth.takeIf { v -> v > 0f } ?: 40f }
+                )
+                mVariableFertViewModel.depthNodeRuntime.tick()
+                delay(10)
+            }
+        })
+        // 仅未知配置或CRC变化触发回读，回读任务与接收相互独立。
+        jobs.add(scope.launch {
+            val lastAttempt = LongArray(8) { -10000 }
+            while (isActive) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                for (channel in mVariableFertViewModel.currentDepthNodeState().channels) {
+                    if (channel.isOnline && channel.versionCompatible &&
+                        (channel.filterParams == null || channel.filterParams.crc != channel.cfgCrc) &&
+                        now - lastAttempt[channel.row] >= 5000) {
+                        lastAttempt[channel.row] = now
+                        try { mVariableFertViewModel.depthNodeClient.readAll(channel.baseId) }
+                        catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { Log.w(TAG, "节点参数回读失败: ${e.message}") }
+                    }
+                }
+                delay(1000)
+            }
+        })
 
         if (isTestMode) {
             val activeIndices = activeSowingDepthMotorIndices(
@@ -326,6 +383,11 @@ class CanReceiveCoroutine {
         // 识别是否为 CANopen 服务帧，并提取 Node-ID（纯函数提取至 companion，映射不变）
         // canOpenType: 0=SDO回复, 1=TPDO1, 2=心跳/Boot-up, -1=非CANopen
         val (canOpenNodeId, canOpenType) = classifyCanOpen(canId)
+        if (canOpenType < 0 && DepthNodeProtocol.isDepthNodeId(canId)) {
+            // 测试期间只接收合成测量，真实总线帧不得覆盖模拟标定。
+            if (!viewModel.currentDepthNodeState().simulated) onDepthNodeFrame(canId, data, viewModel)
+            return
+        }
         // 旧设备停用后也要吸收服务帧，否则会污染施肥字节协议。
         if (classifyRoute(canId, viewModel.currentSowingDepthState().motors.map { it.nodeId },
                 canOpenType == 0 && SdoReplyWaiters.hasWaiter(canId)) == FrameRoute.IGNORED) return
@@ -407,6 +469,11 @@ class CanReceiveCoroutine {
      * @param motorIndex 对应 ViewModel 中的电机下标（0~7）
      * @param sdoData    8 字节 SDO 数据段
      */
+    /** 实板与模拟器共用同一节点处理器，研究流只计数。 */
+    private fun onDepthNodeFrame(canId: Int, data: ByteArray, viewModel: VariableFertViewModel) {
+        viewModel.depthNodeRuntime.onDepthNodeFrame(canId, data)
+    }
+
     private fun onCanOpenSdoResponse(
         nodeId: Int,
         motorIndex: Int,
