@@ -19,6 +19,11 @@ import android.serialport.SerialPort
 import androidx.activity.result.ActivityResultLauncher
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.nx.vfremake.data.DepthNodeState
+import com.nx.vfremake.data.DepthNodeChannel
+import com.nx.vfremake.data.DepthNodeStateStore
+import com.nx.vfremake.funClass.DepthNodeStorage
 import com.esri.arcgisruntime.data.ShapefileFeatureTable
 import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.layers.FeatureLayer
@@ -29,6 +34,9 @@ import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.funClass.RmcData
 import com.nx.vfremake.funClass.SPParamData
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 // ax+b
@@ -336,6 +344,41 @@ class VariableFertViewModel : ViewModel() {
                 masterEnabled = masterEnabledOverride ?: current.masterEnabled
             )
         }
+    }
+
+    // ====== 检测节点：实时原子真源 + 最多 10Hz 界面投影 ======
+    val depthNodeStore = DepthNodeStateStore()
+    val depthNodeState = MutableLiveData(depthNodeStore.current())
+
+    init {
+        viewModelScope.launch {
+            var previous = depthNodeStore.current()
+            while (isActive) {
+                delay(100)
+                val snapshot = depthNodeStore.current()
+                if (snapshot !== previous) {
+                    depthNodeState.value = snapshot
+                    previous = snapshot
+                }
+            }
+        }
+    }
+
+    /** 测量消费者只能读原子快照，不读可能滞后 100ms 的 LiveData。 */
+    fun currentDepthNodeState(): DepthNodeState = depthNodeStore.current()
+
+    /** 更新节点配置/运行时；CAS transform 必须保持纯函数。 */
+    fun updateDepthNodeChannel(row: Int, updater: (DepthNodeChannel) -> DepthNodeChannel) =
+        depthNodeStore.updateChannel(row, updater)
+
+    /** 开机只恢复标定及显示设置，不恢复在线或实测深度。 */
+    fun restoreDepthNodePersistentState(saved: DepthNodeState) {
+        depthNodeStore.update { current -> current.copy(
+            displayMode = saved.displayMode,
+            channels = current.channels.mapIndexed { row, channel ->
+                DepthNodeStorage.apply(DepthNodeStorage.saved(saved.channels[row]), channel)
+            }
+        ) }
     }
 
     // ====== 从”开始作业”之后的时间平均统计 ======

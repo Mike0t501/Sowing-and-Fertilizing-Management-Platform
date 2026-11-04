@@ -133,6 +133,7 @@ class MainActivity : AppCompatActivity() {
             sharedPreHelper.loadSowingDepthState(),
             masterEnabledOverride = false
         )
+        mVariableFertViewModel.restoreDepthNodePersistentState(sharedPreHelper.loadDepthNodeState())
         setContent {
             VariableFert(
                 mapView,

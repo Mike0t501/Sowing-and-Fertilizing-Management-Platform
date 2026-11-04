@@ -19,6 +19,9 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import com.nx.vfremake.R
 import com.nx.vfremake.data.CalibrationMode
+import com.nx.vfremake.data.DepthNodeChannel
+import com.nx.vfremake.data.DepthNodeState
+import com.nx.vfremake.data.DepthDisplayMode
 import com.nx.vfremake.data.IndirectCalibPoint
 import com.nx.vfremake.data.RECORD_INTERVAL_MAX_MS
 import com.nx.vfremake.data.RECORD_INTERVAL_MIN_MS
@@ -26,6 +29,28 @@ import com.nx.vfremake.data.STANDARD_BLOCK_DEPTHS_MM
 import com.nx.vfremake.mSPParamData
 
 class MySharedPreFun(private val context: Context) {
+
+    /** 节点标定与旧 enc_N_* 无关；模拟标定调用方禁止写入真实存储。 */
+    fun saveDepthNodeCalibration(channel: DepthNodeChannel) {
+        require(channel.row in 0..7)
+        getSowingDepthSharedPre().edit()
+            .putString("dn_${channel.row}_calibration", DepthNodeStorage.encode(channel)).apply()
+    }
+
+    /** 显示档位只影响 UI，与控制、记录的原值无关。 */
+    fun saveDepthDisplayMode(mode: DepthDisplayMode) {
+        getSowingDepthSharedPre().edit().putString("depth_display_mode", mode.name).apply()
+    }
+
+    /** 旧独立编码器键不读取、不迁移；未标定节点需要重新采集电压标定。 */
+    fun loadDepthNodeState(): DepthNodeState {
+        val prefs = getSowingDepthSharedPre()
+        val mode = runCatching { DepthDisplayMode.valueOf(prefs.getString("depth_display_mode", "HALF_CM") ?: "HALF_CM") }
+            .getOrDefault(DepthDisplayMode.HALF_CM)
+        return DepthNodeState(channels = List(8) { row ->
+            DepthNodeStorage.decode(prefs.getString("dn_${row}_calibration", null), row)
+        }, displayMode = mode)
+    }
 
     /**
      * 获取设置SharedPreferences
