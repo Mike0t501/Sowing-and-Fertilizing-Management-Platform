@@ -22,6 +22,7 @@ import com.nx.vfremake.data.CalibrationMode
 import com.nx.vfremake.data.DepthNodeChannel
 import com.nx.vfremake.data.DepthNodeState
 import com.nx.vfremake.data.DepthDisplayMode
+import com.nx.vfremake.data.DepthQualityConfig
 import com.nx.vfremake.data.IndirectCalibPoint
 import com.nx.vfremake.data.RECORD_INTERVAL_MAX_MS
 import com.nx.vfremake.data.RECORD_INTERVAL_MIN_MS
@@ -42,6 +43,12 @@ class MySharedPreFun(private val context: Context) {
         getSowingDepthSharedPre().edit().putString("depth_display_mode", mode.name).apply()
     }
 
+    /** CV阈值为可调工程参数，和每次记录的元数据保持一致。 */
+    fun saveDepthQualityConfig(config: DepthQualityConfig) {
+        require(config.cvThreshold.isFinite() && config.cvThreshold in 0.01f..2f)
+        getSowingDepthSharedPre().edit().putFloat("depth_quality_cv_threshold", config.cvThreshold).apply()
+    }
+
     /** 旧独立编码器键不读取、不迁移；未标定节点需要重新采集电压标定。 */
     fun loadDepthNodeState(): DepthNodeState {
         val prefs = getSowingDepthSharedPre()
@@ -49,7 +56,8 @@ class MySharedPreFun(private val context: Context) {
             .getOrDefault(DepthDisplayMode.HALF_CM)
         return DepthNodeState(channels = List(8) { row ->
             DepthNodeStorage.decode(prefs.getString("dn_${row}_calibration", null), row)
-        }, displayMode = mode)
+        }, displayMode = mode, qualityConfig = DepthQualityConfig(
+            prefs.getFloat("depth_quality_cv_threshold", 0.2f).takeIf { it.isFinite() && it in 0.01f..2f } ?: 0.2f))
     }
 
     /**

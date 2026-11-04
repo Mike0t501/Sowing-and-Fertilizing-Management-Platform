@@ -34,6 +34,7 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val state by viewModel.depthNodeState.observeAsState(DepthNodeState())
+    val recording by viewModel.depthRecordingState.observeAsState(false)
     val channel = state.channels[row]
     val session = remember(viewModel) { DepthNodeCalibrationSession(viewModel.depthNodeRuntime) }
     val heights = remember(row) { mutableStateListOf<String>().also { list ->
@@ -54,9 +55,10 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
     var stopA by remember { mutableStateOf<Float?>(null) }
     var stopB by remember { mutableStateOf<Float?>(null) }
     var pendingImport by remember { mutableStateOf<DepthNodeCalibIoFun.FileDto?>(null) }
-    val canCapture = channel.isOnline && channel.versionCompatible && channel.quality != DepthNodeQuality.FAULT && !busy
+    val canCapture = channel.isOnline && channel.versionCompatible && channel.quality != DepthNodeQuality.FAULT && !busy && !recording
 
     fun action(block: suspend () -> Unit) {
+        if (viewModel.isDepthRecording()) { notice = "请先停止记录，再修改标定"; return }
         busy = true; notice = "处理中…"
         scope.launch {
             try { block() }
@@ -103,6 +105,7 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
     Card(Modifier.fillMaxWidth(), elevation = 2.dp) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("步骤3：检测节点标定", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            if (recording) Text("记录进行中，请停止记录后修改标定。", color = Color.Red, fontSize = 18.sp)
             Text("第${row + 1}行 · 基址 0x${channel.baseId.toString(16).uppercase()} · ${DepthDisplayFormat.qualityLabel(channel.quality)}",
                 color = if (canCapture) Color(0xFF237A35) else Color(0xFFC62828), fontSize = 18.sp)
             Text("节点输出传感器端子电压。摆臂、传感器和节点需成套重新标定；不使用旧编码器标定。", fontSize = 16.sp)
@@ -148,7 +151,7 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
                         fit = result; notice = "拟合完成，请核对残差并使用独立挡块验证"
                     } catch (e: Exception) { fit = null; notice = e.message ?: "拟合失败" }
                 }) { Text("计算拟合", fontSize = 16.sp) }
-                Button(enabled = !busy && fit != null, onClick = {
+                Button(enabled = !busy && !recording && fit != null, onClick = {
                     val result = fit ?: return@Button
                     val ps = points(); val deviations = captures.toSortedMap().values.map { it.stdMv }
                     val stampedAt = Instant.now().toString()
@@ -222,7 +225,7 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
                 OutlinedButton(enabled = !busy && channel.fitValid, onClick = {
                     exportLauncher.launch("depthNodeCalib_row${row + 1}.json")
                 }) { Text("导出节点标定JSON", fontSize = 16.sp) }
-                OutlinedButton(enabled = !busy, onClick = { importLauncher.launch(arrayOf("application/json", "text/*")) }) {
+                OutlinedButton(enabled = !busy && !recording, onClick = { importLauncher.launch(arrayOf("application/json", "text/*")) }) {
                     Text("导入节点标定JSON", fontSize = 16.sp)
                 }
                 if (state.simulated) OutlinedButton(enabled = !busy, onClick = {

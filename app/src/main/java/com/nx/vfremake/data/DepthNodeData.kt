@@ -74,6 +74,7 @@ data class DepthNodeState(
     val channels: List<DepthNodeChannel> = List(8) { DepthNodeChannel(it) },
     val factory: DepthNodeChannel = DepthNodeChannel(-1),
     val displayMode: DepthDisplayMode = DepthDisplayMode.HALF_CM,
+    val qualityConfig: DepthQualityConfig = DepthQualityConfig(),
     val simulated: Boolean = false
 )
 

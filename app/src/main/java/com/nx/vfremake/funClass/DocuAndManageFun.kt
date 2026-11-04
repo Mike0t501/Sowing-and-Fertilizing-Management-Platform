@@ -295,6 +295,14 @@ class DocuAndManageFun {
      * @note   保存目录未设置/授权失效/创建失败时抛 IOException
      */
     fun createExperimentFileWriter(context: Context, fileName: String, mimeType: String): OutputStreamWriter {
+        val fileUri = createExperimentDocument(context, fileName, mimeType)
+        val outputStream = context.contentResolver.openOutputStream(fileUri, "w")
+            ?: throw IOException("写出数据输出流获取失败")
+        return OutputStreamWriter(outputStream, Charsets.UTF_8)
+    }
+
+    /** 创建文档并返回稳定URI，meta.json后续更新必须复用它，不能创建重名副本。 */
+    fun createExperimentDocument(context: Context, fileName: String, mimeType: String): Uri {
         // 校验授权与目录存在性，失效时给操作员明确指引（否则 createDocument 抛
         // SecurityException，提示里只有一串 content:// 看不懂）
         val documentUri = getWriteDirDocumentUri(context)
@@ -306,10 +314,7 @@ class DocuAndManageFun {
         val fileUri = DocumentsContract.createDocument(
             context.contentResolver, documentUri, mimeType, fileName
         ) ?: throw IOException("文件创建失败")
-        // 获取documentUri对应的输出流
-        val outputStream = context.contentResolver.openOutputStream(fileUri, "w")
-            ?: throw IOException("写出数据输出流获取失败")
-        return OutputStreamWriter(outputStream)
+        return fileUri
     }
 
     /**

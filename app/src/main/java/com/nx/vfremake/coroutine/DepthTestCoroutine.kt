@@ -27,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Locale
 import kotlin.math.abs
 
 /**
@@ -155,27 +156,33 @@ class DepthTestCoroutine {
                 // ── 启动记录器：按配置周期采样被测电机一行 ───────────────────
                 // 周期取自播深控制页的全局设置（与手动记录共用），与下方 POLL_MS 的
                 // 到位判定轮询无关——改采样密度不应改变测试的到位/超时判定行为
-                recorder.start(
+                val recordingAccepted = recorder.start(
                     context = context,
                     mVariableFertViewModel = viewModel,
                     filePrefix = "depthTest",
                     header = DepthRecordFun.buildDepthRecordHeader(),
-                    intervalMs = config.recordIntervalMs
-                ) { _ ->
+                    intervalMs = config.recordIntervalMs,
+                    recordRows = listOf(config.motorIndex)
+                ) recordRows@{ _ ->
                     val m = viewModel.currentSowingDepthState().motors
-                        .getOrNull(config.motorIndex) ?: return@start emptyList()
-                    // 尾部追加该行摆臂编码器实测深度 3 列（离线/未标定为空串，不改旧列）
+                        .getOrNull(config.motorIndex) ?: return@recordRows emptyList()
+                    // 节点追加列由同一个记录器统一生成，不能在两种记录路径各写一套。
                     listOf(
                         listOf(
                             (m.motorIndex + 1).toString(),
                             currentStageLabel,
-                            "%.2f".format(currentTarget),
-                            "%.2f".format(m.currentDepth),
+                            "%.2f".format(Locale.ROOT, currentTarget),
+                            "%.2f".format(Locale.ROOT, m.currentDepth),
                             m.currentPosition.toString(),
                             if (m.isOnline) "1" else "0",
                             m.alarmCode.toString()
                         )
                     )
+                }
+
+                if (!recordingAccepted || !recorder.awaitReady()) {
+                    postStatus(viewModel, config, 0, stages.size, "记录失败", "记录文件准备失败，测试中止", anomalies)
+                    return@launch
                 }
 
                 // ── 逐级执行 ────────────────────────────────────────────────

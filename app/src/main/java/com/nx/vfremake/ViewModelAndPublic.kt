@@ -359,6 +359,21 @@ class VariableFertViewModel : ViewModel() {
     @Volatile var depthNodeSimulator: DepthNodeSimulator? = null
         private set
     private var realDepthNodeSnapshot: DepthNodeState? = null
+    private val depthRecordingFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+    val depthRecordingState = MutableLiveData(false)
+
+    /** 配置和标定页据此避免在记录期间改变标定/预设。 */
+    fun isDepthRecording(): Boolean = depthRecordingFlag.get()
+
+    /** 手动记录和一键测试共享一个记录租约，不能同时创建两套未关联文件。 */
+    fun tryBeginDepthRecording(): Boolean {
+        val acquired = depthRecordingFlag.compareAndSet(false, true)
+        if (acquired) depthRecordingState.postValue(true)
+        return acquired
+    }
+
+    /** 记录器完成文件收尾后才释放，避免后一会话接管尚未落盘的文件。 */
+    fun endDepthRecording() { depthRecordingFlag.set(false); depthRecordingState.postValue(false) }
     val depthNodeClient = DepthNodeCfgClient(depthNodeRuntime, send = { frame ->
         val bridge = CanOpenFun.wrapCanFrame(frame.canId, frame.data)
         val simulator = depthNodeSimulator
@@ -371,7 +386,7 @@ class VariableFertViewModel : ViewModel() {
     fun configureDepthNodeSimulation(enabled: Boolean) {
         if (enabled && depthNodeSimulator == null) {
             realDepthNodeSnapshot = currentDepthNodeState()
-            depthNodeStore.update { DepthNodeState(displayMode = it.displayMode, simulated = true) }
+            depthNodeStore.update { DepthNodeState(displayMode = it.displayMode, qualityConfig = it.qualityConfig, simulated = true) }
             depthNodeRuntime.resetTracking()
             depthNodeSimulator = DepthNodeSimulator(
                 emit = { depthNodeRuntime.onDepthNodeFrame(it.canId, it.data) },
@@ -382,7 +397,7 @@ class VariableFertViewModel : ViewModel() {
             val saved = realDepthNodeSnapshot ?: DepthNodeState()
             depthNodeStore.update { DepthNodeState(channels = saved.channels.mapIndexed { row, channel ->
                 DepthNodeStorage.apply(DepthNodeStorage.saved(channel), DepthNodeChannel(row))
-            }, displayMode = it.displayMode) }
+            }, displayMode = it.displayMode, qualityConfig = it.qualityConfig) }
             realDepthNodeSnapshot = null
             depthNodeRuntime.resetTracking()
         }
@@ -413,6 +428,7 @@ class VariableFertViewModel : ViewModel() {
     fun restoreDepthNodePersistentState(saved: DepthNodeState) {
         depthNodeStore.update { current -> current.copy(
             displayMode = saved.displayMode,
+            qualityConfig = saved.qualityConfig,
             channels = current.channels.mapIndexed { row, channel ->
                 DepthNodeStorage.apply(DepthNodeStorage.saved(saved.channels[row]), channel)
             }

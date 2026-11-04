@@ -50,6 +50,7 @@ import com.nx.vfremake.coroutine.DepthRecordFun
 import com.nx.vfremake.coroutine.SowingDepthCoroutine
 import com.nx.vfremake.funClass.DocuAndManageFun
 import java.io.File
+import java.util.Locale
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -108,6 +109,10 @@ fun SowingDepthScreen(
     // 手动实验数据记录器（采样周期见 state.recordIntervalMs，8 路电机；离开页面自动落盘保存）
     val depthRecorder = remember { DepthRecordFun() }
     var isRecording by remember { mutableStateOf(false) }
+    val recordActive by viewModel.depthRecordingState.observeAsState(false)
+    LaunchedEffect(recordActive) {
+        if (!recordActive && !depthRecorder.isRunning) isRecording = false
+    }
 
     // ── 独立串口与协程生命周期 ───────────────────────────────────────────────────
     // 进入页面时自动开启 CAN 串口 + 接收/控制协程；离开时自动关闭。
@@ -287,7 +292,7 @@ fun SowingDepthScreen(
             ).show()
             return
         }
-        depthRecorder.start(
+        val accepted = depthRecorder.start(
             context = context,
             mVariableFertViewModel = viewModel,
             filePrefix = "depthRec",
@@ -304,15 +309,15 @@ fun SowingDepthScreen(
                 listOf(
                     (m.motorIndex + 1).toString(),
                     "手动",
-                    "%.2f".format(m.targetDepth),
-                    "%.2f".format(m.currentDepth),
+                    "%.2f".format(Locale.ROOT, m.targetDepth),
+                    "%.2f".format(Locale.ROOT, m.currentDepth),
                     m.currentPosition.toString(),
                     if (m.isOnline) "1" else "0",
                     m.alarmCode.toString()
                 )
             }
         }
-        isRecording = true
+        isRecording = accepted
     }
 
     fun stopManualRecord() {
