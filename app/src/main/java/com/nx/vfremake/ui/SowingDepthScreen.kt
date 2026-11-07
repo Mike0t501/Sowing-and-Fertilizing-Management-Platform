@@ -1,8 +1,10 @@
 package com.nx.vfremake.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -10,15 +12,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.AlertDialog
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.Card
@@ -28,6 +31,7 @@ import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Scaffold
 import androidx.compose.material.Slider
 import androidx.compose.material.SliderDefaults
+import androidx.compose.material.Surface
 import androidx.compose.material.Switch
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -37,6 +41,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -54,21 +59,26 @@ import java.util.Locale
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.RECORD_INTERVAL_MAX_MS
 import com.nx.vfremake.data.RECORD_INTERVAL_MIN_MS
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.data.DepthNodeState
+import com.nx.vfremake.data.DepthNodeQuality
 import com.nx.vfremake.data.DepthDisplayMode
+import com.nx.vfremake.data.DepthQualityConfig
+import com.nx.vfremake.funClass.DepthDisplayFormat
 import com.nx.vfremake.funClass.MeasuredDepthSample
 import com.nx.vfremake.data.SERVO_ALARM_DRIVE_FAULT
 import com.nx.vfremake.data.SERVO_ALARM_INTERNAL_LIMIT
@@ -160,37 +170,11 @@ fun SowingDepthScreen(
 
     val state by viewModel.sowingDepthState.observeAsState(SowingDepthState())
     val nodeState by viewModel.depthNodeState.observeAsState(DepthNodeState())
-    var cvInput by remember(nodeState.qualityConfig.cvThreshold) {
-        mutableStateOf("%.1f".format(Locale.ROOT, nodeState.qualityConfig.cvThreshold * 100))
-    }
     val activeMotorsState by viewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
     val activeMotorIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorsState)
 
-    // 全局深度输入框的临时值（初始同步自 state，不随 state 每次变化而强制覆盖）
-    var globalDepthInput by remember { mutableStateOf("%.1f".format(state.globalTargetDepth)) }
-
-    // 全局深度滑块位置（限制在常用区间 20~80mm；手打的越界值不回写滑块）
-    var globalDepthSlider by remember {
-        mutableStateOf(state.globalTargetDepth.coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX))
-    }
-
-    // 位置运动速度本地状态（初始同步自 state，持久化到 SharedPreferences）
-    var positionSpeed by remember { mutableStateOf(state.positionSpeed) }
-
-    // 加减速度本地状态（初始同步自 state，持久化到 SharedPreferences）
-    var acceleration by remember { mutableStateOf(state.acceleration) }
-
-    // 实验数据CSV采样周期输入框（本页是该参数的唯一编辑入口，深度性能测试页只读取用）
-    var intervalInput by remember(state.recordIntervalMs) {
-        mutableStateOf(state.recordIntervalMs.toString())
-    }
-
-    // 单独设置弹窗：哪路电机正在设置（null = 未打开）
+    var settingsDialog by remember { mutableStateOf<DepthSettingsPanel?>(null) }
     var motorDialogIndex by remember { mutableStateOf<Int?>(null) }
-    var motorDialogInput by remember { mutableStateOf("") }
-    var motorDialogSlider by remember { mutableStateOf(DEPTH_QUICK_MIN) }
-
-    // 标定设置弹窗（选择电机后跳转）
     var showCalibrateDialog by remember { mutableStateOf(false) }
 
     // 整机标定导入/导出：导出启用行中已标定的各路，导入按文件来源路号回填
@@ -200,85 +184,24 @@ fun SowingDepthScreen(
         targetIndices = activeMotorIndices
     )
 
-    // ── 辅助：解析手打的深度值 ────────────────────────────────────────────────
-    // 20~80mm 只是滑块与一键按钮的常用区间，不是安全约束：标定量块 100mm、处方图控深
-    // 等场景仍需手打超出该区间的值，所以越界只提示、不拦截。真正的安全钳位在
-    // SowingDepthCoroutine 下发前的脉冲级 coerceIn(limitMin, limitMax) 里完成。
-    fun parseTypedDepth(text: String): Float? {
-        val depth = text.toFloatOrNull()
-        if (depth == null || depth <= 0f) {
-            Toast.makeText(context, "请输入有效的目标深度", Toast.LENGTH_SHORT).show()
-            return null
-        }
-        if (depth < DEPTH_QUICK_MIN || depth > DEPTH_QUICK_MAX) {
-            Toast.makeText(
-                context,
-                "目标深度 %.1f mm 超出常用范围 %.0f~%.0f mm"
-                    .format(depth, DEPTH_QUICK_MIN, DEPTH_QUICK_MAX),
-                Toast.LENGTH_SHORT
-            ).show()
-        }
-        return depth
+    fun saveGlobalSettings(recordIntervalMs: Int? = null) {
+        val current = viewModel.currentSowingDepthState()
+        MySharedPreFun(context).saveSowingDepthGlobalSettings(
+            jogSpeed = current.jogSpeed,
+            positionSpeed = current.positionSpeed,
+            acceleration = current.acceleration,
+            globalTargetDepth = current.globalTargetDepth,
+            recordIntervalMs = recordIntervalMs
+        )
     }
 
-    // ── 辅助：全部应用 ────────────────────────────────────────────────────────
-    // 手打+应用 / 滑块松手 / 一键按钮 三条输入路径共用的唯一出口
     fun applyGlobalDepth(depth: Float) {
-        // 三种输入方式互相同步显示
-        globalDepthInput  = "%.1f".format(depth)
-        globalDepthSlider = depth.coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX)
-        // 更新全局目标深度
         viewModel.updateSowingDepthGlobalSettings(globalTargetDepth = depth)
-        // 同步到每路电机的 targetDepth
         val updates = activeMotorIndices.associate { i ->
             i to { cal: ServoCalibration -> cal.copy(targetDepth = depth) }
         }
         viewModel.updateMultipleServos(updates)
-        // 持久化
-        scope.launch(Dispatchers.IO) {
-            MySharedPreFun(context).saveSowingDepthGlobalSettings(
-                jogSpeed          = state.jogSpeed,
-                positionSpeed     = positionSpeed,
-                acceleration      = acceleration,
-                globalTargetDepth = depth
-            )
-        }
-    }
-
-    // ── 辅助：单独设置 ────────────────────────────────────────────────────────
-    // 弹窗内三种输入方式共用出口；不关闭弹窗，便于操作员继续微调
-    fun applyMotorDepth(motorIndex: Int, depth: Float) {
-        motorDialogInput  = "%.1f".format(depth)
-        motorDialogSlider = depth.coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX)
-        viewModel.updateServoCalibration(motorIndex) { it.copy(targetDepth = depth) }
-    }
-
-    // ── 辅助：提交实验数据采样周期 ────────────────────────────────────────────
-    // 手动记录与一键性能测试共用这一个周期值，改完立即持久化。
-    // 非法/越界输入不写入，只把输入框回滚到当前生效值并提示——实验中途误输入不该
-    // 悄悄改变采样密度，否则同一批 CSV 的时间轴对不上。
-    fun applyRecordInterval(text: String) {
-        val v = text.trim().toIntOrNull()
-        if (v == null || v !in RECORD_INTERVAL_MIN_MS..RECORD_INTERVAL_MAX_MS) {
-            intervalInput = state.recordIntervalMs.toString()
-            Toast.makeText(
-                context,
-                "采样周期须为 $RECORD_INTERVAL_MIN_MS~$RECORD_INTERVAL_MAX_MS ms 的整数",
-                Toast.LENGTH_SHORT
-            ).show()
-            return
-        }
-        if (v == state.recordIntervalMs) return
-        viewModel.updateSowingDepthGlobalSettings(recordIntervalMs = v)
-        scope.launch(Dispatchers.IO) {
-            MySharedPreFun(context).saveSowingDepthGlobalSettings(
-                jogSpeed          = state.jogSpeed,
-                positionSpeed     = positionSpeed,
-                acceleration      = acceleration,
-                globalTargetDepth = state.globalTargetDepth,
-                recordIntervalMs  = v
-            )
-        }
+        saveGlobalSettings()
     }
 
     // ── 辅助：手动实验数据记录启停 ────────────────────────────────────────────
@@ -340,354 +263,169 @@ fun SowingDepthScreen(
         }
     }
 
-    // ── UI ───────────────────────────────────────────────────────────────────
     Scaffold(
-        topBar = { MyTopBar("播种深度控制", onClickBack) }
+        topBar = { MyTopBar("播种深度控制", onClickBack) },
+        backgroundColor = Color(0xFFF0F3F5)
     ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // ── 互斥警告（施肥系统运行中时显示）────────────────────────────────
-            if (isSystemRunning) {
-                Card(
-                    elevation         = 2.dp,
-                    shape             = RoundedCornerShape(10.dp),
-                    modifier          = Modifier.fillMaxWidth(),
-                    backgroundColor   = Color(0xFFFFF3E0)
-                ) {
-                    Text(
-                        "⚠ 施肥系统运行中，播种深度控制不可用（同一 CAN 串口）。请先停止作业。",
-                        fontSize = 13.sp,
-                        color    = Color(0xFFE65100),
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
-            }
-
-            // ── 测试模式提示（测试模式开启时显示）───────────────────────────────
-            val isTestMode = MySharedPreFun(context).getSpecificValue(
-                R.string.testMode_Switch_name) == "1"
-            if (isTestMode) {
-                Card(
-                    elevation       = 2.dp,
-                    shape           = RoundedCornerShape(10.dp),
-                    modifier        = Modifier.fillMaxWidth(),
-                    backgroundColor = Color(0xFFE3F2FD)
-                ) {
-                    Text(
-                        "测试模式：所有电机默认在线，CAN 帧将正常发送（用于通讯排查）",
-                        fontSize = 13.sp,
-                        color    = Color(0xFF1565C0),
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
-            }
-
-            // ── 深度控制总开关（红/绿背景指示状态）─────────────────────────────
-            val masterEnabled = state.masterEnabled
-            Card(
-                elevation       = 3.dp,
-                shape           = RoundedCornerShape(10.dp),
-                modifier        = Modifier.fillMaxWidth(),
-                backgroundColor = if (masterEnabled) Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
+        BoxWithConstraints(Modifier.fillMaxSize().padding(paddingValues)) {
+            val wide = maxWidth >= 560.dp
+            val columns = if (wide) 4 else 2
+            val tilePadding = if (maxHeight >= 660.dp) 14.dp else 8.dp
+            Column(
+                modifier = Modifier.fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Row(
-                    modifier              = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment     = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
-                        Text(
-                            "深度控制总开关",
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize   = 16.sp,
-                            color      = if (masterEnabled) Color(0xFF2E7D32) else Color(0xFFC62828)
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            if (masterEnabled) "● 运行中：电机响应深度设置"
-                            else                "○ 已停止：电机已禁用",
-                            fontSize = 12.sp,
-                            color    = if (masterEnabled) Color(0xFF388E3C) else Color(0xFF757575)
-                        )
-                    }
-                    Switch(
-                        checked         = masterEnabled,
-                        onCheckedChange = { viewModel.updateMasterEnabled(it) },
-                        modifier        = Modifier.scale(1.3f),
-                        enabled         = !isSystemRunning   // 施肥系统运行时禁用（CAN 串口互斥）
-                    )
-                }
-            }
-
-            // ── 全局目标深度 ─────────────────────────────────────────────────
-            Card(
-                elevation = 2.dp,
-                shape     = RoundedCornerShape(10.dp),
-                modifier  = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("全局目标深度", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                    Spacer(Modifier.height(8.dp))
-                    DepthQuickInput(
-                        textValue      = globalDepthInput,
-                        onTextChange   = { globalDepthInput = it },
-                        sliderValue    = globalDepthSlider,
-                        onSliderChange = { globalDepthSlider = it },
-                        onCommit       = { d -> applyGlobalDepth(d) },
-                        onCommitTyped  = {
-                            parseTypedDepth(globalDepthInput)?.let { d -> applyGlobalDepth(d) }
-                        },
-                        applyLabel     = "全部应用"
-                    )
-                }
-            }
-
-            // ── 运动参数（位置速度）──────────────────────────────────────────
-            Card(
-                elevation = 2.dp,
-                shape     = RoundedCornerShape(10.dp),
-                modifier  = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("运动参数", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                    Spacer(Modifier.height(8.dp))
-                    // steps=289 → (3000-100)/10 - 1，步长 10 RPM
-                    Text("位置运动速度: $positionSpeed RPM", fontSize = 14.sp)
-                    Slider(
-                        value                 = positionSpeed.toFloat(),
-                        onValueChange         = { positionSpeed = it.toInt() },
-                        onValueChangeFinished = {
-                            viewModel.updateSowingDepthGlobalSettings(positionSpeed = positionSpeed)
-                            scope.launch(Dispatchers.IO) {
-                                MySharedPreFun(context).saveSowingDepthGlobalSettings(
-                                    jogSpeed          = state.jogSpeed,
-                                    positionSpeed     = positionSpeed,
-                                    acceleration      = acceleration,
-                                    globalTargetDepth = state.globalTargetDepth
+                    val controlColor = if (state.masterEnabled) Color(0xFF236631) else Color(0xFF455A64)
+                    val controlBackground = if (state.masterEnabled) Color(0xFFE5F4E8) else Color.White
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        color = controlBackground
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(start = 12.dp, end = 4.dp).heightIn(min = 52.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("深度控制总开关", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    if (state.masterEnabled) "运行中" else "已停止",
+                                    fontSize = 13.sp,
+                                    color = controlColor
                                 )
                             }
-                        },
-                        valueRange = 100f..3000f,
-                        steps      = 289,
-                        colors     = SliderDefaults.colors(
-                            thumbColor       = Color(0xFF1565C0),
-                            activeTrackColor = Color(0xFF1565C0)
-                        )
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    // steps=58 → 步长 1000 RPM/s，范围 1000~60000
-                    Text("加减速度: $acceleration RPM/s", fontSize = 14.sp)
-                    Slider(
-                        value                 = acceleration.toFloat(),
-                        onValueChange         = { acceleration = it.toInt() },
-                        onValueChangeFinished = {
-                            viewModel.updateSowingDepthGlobalSettings(acceleration = acceleration)
-                            scope.launch(Dispatchers.IO) {
-                                MySharedPreFun(context).saveSowingDepthGlobalSettings(
-                                    jogSpeed          = state.jogSpeed,
-                                    positionSpeed     = positionSpeed,
-                                    acceleration      = acceleration,
-                                    globalTargetDepth = state.globalTargetDepth
-                                )
-                            }
-                        },
-                        valueRange = 1000f..60000f,
-                        steps      = 58,
-                        colors     = SliderDefaults.colors(
-                            thumbColor       = Color(0xFF1565C0),
-                            activeTrackColor = Color(0xFF1565C0)
-                        )
+                            Switch(
+                                checked = state.masterEnabled,
+                                onCheckedChange = viewModel::updateMasterEnabled,
+                                enabled = !isSystemRunning
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = ::emergencyStopAll,
+                        modifier = Modifier.heightIn(min = 52.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFFC62828))
+                    ) {
+                        Text("全部停止", fontSize = 16.sp, color = Color.White)
+                    }
+                }
+
+                if (isSystemRunning) {
+                    DepthNotice(
+                        "施肥系统运行中，请先停止作业再开启手动深度控制。",
+                        Color(0xFFFFEBD8), Color(0xFF9B3C00)
                     )
                 }
-            }
+                if (MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1") {
+                    DepthNotice(
+                        "测试模式 · 电机默认在线，CAN 帧正常发送",
+                        Color(0xFFE3F2FD), DepthControlBlue
+                    )
+                }
 
-            // ── 实验数据记录（手动）─────────────────────────────────────────
-            Card(
-                elevation       = 2.dp,
-                shape           = RoundedCornerShape(10.dp),
-                modifier        = Modifier.fillMaxWidth(),
-                backgroundColor = if (isRecording) Color(0xFFFFF8E1) else Color.White
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
-                        modifier              = Modifier.fillMaxWidth(),
-                        verticalAlignment     = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column {
-                            Text("实验数据记录", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                if (isRecording) "● 记录中（${state.recordIntervalMs}ms 采样，8 路电机）"
-                                else             "记录编码器位置/深度到 CSV，用于 Origin/Excel 分析",
-                                fontSize = 12.sp,
-                                color    = if (isRecording) Color(0xFFE65100) else Color.Gray
-                            )
-                        }
-                        Button(
-                            onClick = { if (isRecording) stopManualRecord() else startManualRecord() },
-                            colors  = ButtonDefaults.buttonColors(
-                                backgroundColor = if (isRecording) Color(0xFFD32F2F) else Color(0xFF388E3C)
-                            ),
-                            shape          = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
-                        ) {
-                            Text(
-                                if (isRecording) "停止记录" else "开始记录",
-                                color = Color.White, fontSize = 14.sp
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    // 采样周期：本页与深度性能测试页共用同一个值，记录进行中禁止改动
-                    Row(
-                        modifier          = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value           = intervalInput,
-                            onValueChange   = { intervalInput = it },
-                            label           = { Text("采样周期ms") },
-                            enabled         = !isRecording,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine      = true,
-                            modifier        = Modifier.width(140.dp)
+                    DepthSettingValue(
+                        "全局目标深度", "%.1f mm".format(Locale.ROOT, state.globalTargetDepth),
+                        Modifier.weight(1f)
+                    ) { settingsDialog = DepthSettingsPanel.GLOBAL_DEPTH }
+                    DepthSettingValue(
+                        "位置运动速度", "${state.positionSpeed} RPM",
+                        Modifier.weight(1f)
+                    ) { settingsDialog = DepthSettingsPanel.SPEED }
+                    DepthSettingValue(
+                        "加减速度", "${state.acceleration} RPM/s",
+                        Modifier.weight(1f)
+                    ) { settingsDialog = DepthSettingsPanel.ACCELERATION }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("逐行播深", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    if (activeMotorIndices.isNotEmpty()) {
+                        val online = activeMotorIndices.count { state.motors[it].isOnline }
+                        val alarms = activeMotorIndices.count { state.motors[it].alarmCode != 0 }
+                        Text(
+                            "伺服在线 $online/${activeMotorIndices.size} · 报警 $alarms",
+                            fontSize = 14.sp,
+                            color = if (alarms > 0) Color(0xFFB00020) else Color(0xFF455A64)
                         )
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                "$RECORD_INTERVAL_MIN_MS~$RECORD_INTERVAL_MAX_MS ms，" +
-                                        "与一键性能测试共用",
-                                fontSize = 12.sp, color = Color.Gray
-                            )
-                            Text(
-                                "须与伺服/编码器 TPDO 上报周期匹配，设得更快只会记到重复行",
-                                fontSize = 11.sp, color = Color.Gray
-                            )
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        OutlinedButton(
-                            onClick        = { applyRecordInterval(intervalInput) },
-                            enabled        = !isRecording,
-                            shape          = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                    }
+                }
+                if (activeMotorIndices.isEmpty()) {
+                    DepthNotice(
+                        "未启用播种深度电机，请先在参数设置页开启需要作业的行。",
+                        Color.White, Color(0xFF455A64)
+                    )
+                } else {
+                    activeMotorIndices.chunked(columns).forEach { indices ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("应用", fontSize = 13.sp)
+                            indices.forEach { index ->
+                                key(index) {
+                                    MotorStatusTile(
+                                        cal = state.motors[index],
+                                        measurement = viewModel.measuredDepthFacade.forRow(
+                                            index, nodeState.channels.getOrNull(index)
+                                        ),
+                                        displayMode = nodeState.displayMode,
+                                        verticalPadding = tilePadding,
+                                        modifier = Modifier.weight(1f),
+                                        onClick = { motorDialogIndex = index }
+                                    )
+                                }
+                            }
+                            repeat(columns - indices.size) { Spacer(Modifier.weight(1f)) }
                         }
                     }
                 }
-            }
 
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                Text("实测显示档位（仅影响显示）", fontSize = 16.sp)
-                DepthDisplayMode.values().forEach { mode ->
-                    OutlinedButton(onClick = {
-                        viewModel.depthNodeStore.update { it.copy(displayMode = mode) }
-                        MySharedPreFun(context).saveDepthDisplayMode(mode)
-                    }) {
-                        Text((if (nodeState.displayMode == mode) "✓ " else "") +
-                            (if (mode == DepthDisplayMode.HALF_CM) "0.5 cm" else "1 mm"), fontSize = 16.sp)
+                val actions = listOf(
+                    "标定设置" to { showCalibrateDialog = true },
+                    "性能测试" to onClickDepthTest,
+                    "实验设置" to { settingsDialog = DepthSettingsPanel.EXPERIMENT },
+                    (if (isRecording) "停止记录" else "开始记录") to {
+                        if (isRecording) stopManualRecord() else startManualRecord()
                     }
-                }
-            }
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(cvInput, { cvInput = it }, enabled = !isRecording && !recordActive,
-                    label = { Text("不稳定CV阈值%") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true, modifier = Modifier.width(200.dp))
-                OutlinedButton(enabled = !isRecording && !recordActive, onClick = {
-                    val percent = cvInput.toFloatOrNull()
-                    if (percent != null && percent.isFinite() && percent in 1f..200f) {
-                        val config = com.nx.vfremake.data.DepthQualityConfig(percent / 100)
-                        viewModel.depthNodeStore.update { it.copy(qualityConfig = config) }
-                        MySharedPreFun(context).saveDepthQualityConfig(config)
-                    } else Toast.makeText(context, "CV阈值须为1–200%", Toast.LENGTH_SHORT).show()
-                }) { Text("应用监测阈值", fontSize = 16.sp) }
-                Text("默认20%为工程初值，需按试验修订；记录使用实际阈值。", fontSize = 16.sp)
-            }
-
-            // ── 8 路电机状态卡片 ─────────────────────────────────────────────
-            Text(
-                "电机状态",
-                fontWeight = FontWeight.SemiBold,
-                fontSize   = 14.sp,
-                color      = Color.Gray
-            )
-
-            if (activeMotorIndices.isEmpty()) {
-                Text(
-                    "未启用播种深度电机，请先在参数设置页开启需要作业的行。",
-                    fontSize = 14.sp,
-                    color = Color.Gray
                 )
-            } else {
-                activeMotorIndices.forEach { i ->
-                    val cal = state.motors[i]
-                    MotorStatusCard(
-                        cal             = cal,
-                        motorIndex      = i,
-                        measurement     = viewModel.measuredDepthFacade.forRow(i),
-                        displayMode     = nodeState.displayMode,
-                        onSingleSet     = {
-                            motorDialogInput  = "%.1f".format(cal.targetDepth)
-                            motorDialogSlider = cal.targetDepth
-                                .coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX)
-                            motorDialogIndex  = i
-                        },
-                        onCalibrate     = { onClickCalibrate(i) }
-                    )
+                actions.chunked(columns).forEach { group ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        group.forEach { (label, onClick) ->
+                            val recordingAction = isRecording && label == "停止记录"
+                            OutlinedButton(
+                                onClick = onClick,
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    backgroundColor = if (recordingAction) Color(0xFFFFEBEE) else Color.White,
+                                    contentColor = if (recordingAction) Color(0xFFB00020) else DepthControlBlue
+                                ),
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                            ) {
+                                Text(label, fontSize = 15.sp)
+                            }
+                        }
+                    }
                 }
             }
-
-            Spacer(Modifier.height(4.dp))
-
-            // ── 底部操作按钮 ─────────────────────────────────────────────────
-            Row(
-                modifier              = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedButton(
-                    onClick  = { showCalibrateDialog = true },
-                    modifier = Modifier.weight(1f),
-                    shape    = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(vertical = 14.dp)
-                ) {
-                    Text("标定设置", fontSize = 14.sp)
-                }
-                OutlinedButton(
-                    onClick  = { onClickDepthTest() },
-                    modifier = Modifier.weight(1f),
-                    shape    = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(vertical = 14.dp),
-                    border   = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF1565C0))
-                ) {
-                    Text("性能测试", color = Color(0xFF1565C0), fontSize = 14.sp)
-                }
-                Button(
-                    onClick  = { emergencyStopAll() },
-                    modifier = Modifier.weight(1f),
-                    colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFFD32F2F)),
-                    shape    = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(vertical = 14.dp)
-                ) {
-                    Text("全部停止", color = Color.White, fontSize = 14.sp)
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
         }
     }
 
@@ -717,230 +455,467 @@ fun SowingDepthScreen(
         )
     }
 
-    // ── 单独设置弹窗 ─────────────────────────────────────────────────────────
-    // 三种输入方式（手打+应用 / 滑块松手 / 一键按钮）都是即时下发，没有待确认的中间
-    // 状态，所以底部只留「关闭」——避免出现「点了取消但值其实已经下发」的误导。
-    motorDialogIndex?.let { idx ->
-        AlertDialog(
-            onDismissRequest = { motorDialogIndex = null },
-            title            = { Text("电机 ${idx + 1} 独立目标深度") },
-            text             = {
-                DepthQuickInput(
-                    textValue      = motorDialogInput,
-                    onTextChange   = { motorDialogInput = it },
-                    sliderValue    = motorDialogSlider,
-                    onSliderChange = { motorDialogSlider = it },
-                    onCommit       = { d -> applyMotorDepth(idx, d) },
-                    onCommitTyped  = {
-                        parseTypedDepth(motorDialogInput)?.let { d -> applyMotorDepth(idx, d) }
-                    },
-                    applyLabel     = "应用"
+    when (settingsDialog) {
+        DepthSettingsPanel.GLOBAL_DEPTH -> {
+            DepthControlDialog(
+                title = "全局目标深度",
+                onDismiss = { settingsDialog = null }
+            ) {
+                Text("应用到全部已启用行，覆盖各行单独设定。", fontSize = 15.sp)
+                DepthTargetEditor(
+                    initialDepth = state.globalTargetDepth,
+                    applyLabel = "全部应用",
+                    onApply = ::applyGlobalDepth
                 )
-            },
-            confirmButton = {
-                TextButton(onClick = { motorDialogIndex = null }) { Text("关闭") }
             }
-        )
+        }
+        DepthSettingsPanel.SPEED -> {
+            MotionSettingDialog(
+                title = "位置运动速度",
+                value = state.positionSpeed,
+                range = 100..3000,
+                step = 10,
+                unit = "RPM",
+                onDismiss = { settingsDialog = null },
+                onApply = {
+                    viewModel.updateSowingDepthGlobalSettings(positionSpeed = it)
+                    saveGlobalSettings()
+                }
+            )
+        }
+        DepthSettingsPanel.ACCELERATION -> {
+            MotionSettingDialog(
+                title = "加减速度",
+                value = state.acceleration,
+                range = 1000..60000,
+                step = 1000,
+                unit = "RPM/s",
+                onDismiss = { settingsDialog = null },
+                onApply = {
+                    viewModel.updateSowingDepthGlobalSettings(acceleration = it)
+                    saveGlobalSettings()
+                }
+            )
+        }
+        DepthSettingsPanel.EXPERIMENT -> {
+            DepthControlDialog(
+                title = "实验设置",
+                onDismiss = { settingsDialog = null }
+            ) {
+                DepthExperimentSettings(
+                    state = state,
+                    nodeState = nodeState,
+                    isRecording = isRecording,
+                    recordActive = recordActive,
+                    onIntervalChange = { interval ->
+                        viewModel.updateSowingDepthGlobalSettings(recordIntervalMs = interval)
+                        saveGlobalSettings(interval)
+                    },
+                    onDisplayModeChange = { mode ->
+                        viewModel.depthNodeStore.update { it.copy(displayMode = mode) }
+                        MySharedPreFun(context).saveDepthDisplayMode(mode)
+                    },
+                    onCvChange = { percent ->
+                        val config = DepthQualityConfig(percent / 100)
+                        viewModel.depthNodeStore.update { it.copy(qualityConfig = config) }
+                        MySharedPreFun(context).saveDepthQualityConfig(config)
+                    }
+                )
+            }
+        }
+        null -> Unit
     }
 
-    // ── 标定设置：选择电机弹窗 ────────────────────────────────────────────────
+    motorDialogIndex?.takeIf { it in activeMotorIndices }?.let { index ->
+        val cal = state.motors[index]
+        val measurement = viewModel.measuredDepthFacade.forRow(index, nodeState.channels.getOrNull(index))
+        DepthControlDialog(
+            title = "第 ${index + 1} 行 · 独立目标深度",
+            onDismiss = { motorDialogIndex = null },
+            maxWidth = 760.dp,
+            extraAction = {
+                OutlinedButton(
+                    onClick = {
+                        motorDialogIndex = null
+                        onClickCalibrate(index)
+                    },
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) { Text("标定本行", fontSize = 15.sp) }
+            }
+        ) {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val details: @Composable () -> Unit = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            "Node-ID ${cal.nodeId} · 伺服${motorStatusLabel(cal)} · " +
+                                if (cal.limitsSet) "已限位" else "未限位",
+                            fontSize = 14.sp,
+                            color = Color(0xFF455A64)
+                        )
+                        DepthValueLine("伺服换算深度", servoDepthText(cal), DepthControlBlue)
+                        motorAlarmText(cal.alarmCode)?.let {
+                            DepthNotice(it, Color(0xFFFFEBEE), Color(0xFFB00020))
+                        }
+                        MeasuredDepthReadout(measurement, cal.targetDepth, nodeState.displayMode)
+                    }
+                }
+                val editor: @Composable () -> Unit = {
+                    DepthTargetEditor(initialDepth = cal.targetDepth, applyLabel = "应用") { depth ->
+                        viewModel.updateServoCalibration(index) { it.copy(targetDepth = depth) }
+                    }
+                }
+                if (maxWidth >= 640.dp) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                        Column(Modifier.weight(1f)) { details() }
+                        Column(Modifier.weight(1f)) { editor() }
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        details()
+                        Divider()
+                        editor()
+                    }
+                }
+            }
+        }
+    }
+
     if (showCalibrateDialog) {
-        AlertDialog(
-            onDismissRequest = { showCalibrateDialog = false },
-            title            = { Text("选择要标定的电机") },
-            text             = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    activeMotorIndices.forEach { i ->
-                        val cal = state.motors[i]
-                        val statusColor = motorStatusColor(cal)
+        DepthControlDialog(
+            title = "选择要标定的电机",
+            onDismiss = { showCalibrateDialog = false }
+        ) {
+            if (activeMotorIndices.isEmpty()) {
+                Text("暂无已启用行", fontSize = 15.sp)
+            }
+            activeMotorIndices.chunked(2).forEach { indices ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    indices.forEach { index ->
+                        val cal = state.motors[index]
                         OutlinedButton(
-                            onClick  = { showCalibrateDialog = false; onClickCalibrate(i) },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape    = RoundedCornerShape(6.dp)
+                            onClick = {
+                                showCalibrateDialog = false
+                                onClickCalibrate(index)
+                            },
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                            shape = RoundedCornerShape(6.dp)
                         ) {
-                            Box(
-                                Modifier
-                                    .size(10.dp)
-                                    .clip(CircleShape)
-                                    .background(statusColor)
-                            )
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(motorStatusColor(cal)))
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                "电机 ${i + 1}（Node-ID: ${cal.nodeId}）" +
-                                if (cal.limitsSet) "  已限位" else "  未限位",
-                                fontSize = 13.sp
+                                "第 ${index + 1} 行 · " + if (cal.limitsSet) "已限位" else "未限位",
+                                fontSize = 14.sp
                             )
                         }
                     }
-                    Divider(Modifier.padding(vertical = 4.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick  = { showCalibrateDialog = false; calibIo.export() },
-                            modifier = Modifier.weight(1f),
-                            shape    = RoundedCornerShape(6.dp)
-                        ) { Text("导出全部标定", fontSize = 13.sp) }
-                        OutlinedButton(
-                            onClick  = { showCalibrateDialog = false; calibIo.import() },
-                            modifier = Modifier.weight(1f),
-                            shape    = RoundedCornerShape(6.dp)
-                        ) { Text("导入全部标定", fontSize = 13.sp) }
-                    }
+                    if (indices.size == 1) Spacer(Modifier.weight(1f))
                 }
-            },
-            confirmButton   = {},
-            dismissButton   = {
-                TextButton(onClick = { showCalibrateDialog = false }) { Text("取消") }
             }
-        )
+            Divider()
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { showCalibrateDialog = false; calibIo.export() },
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                ) { Text("导出全部标定") }
+                OutlinedButton(
+                    onClick = { showCalibrateDialog = false; calibIo.import() },
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                ) { Text("导入全部标定") }
+            }
+        }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 单路电机状态卡片
-// ─────────────────────────────────────────────────────────────────────────────
+private enum class DepthSettingsPanel { GLOBAL_DEPTH, SPEED, ACCELERATION, EXPERIMENT }
+
+private val DepthControlBlue = Color(0xFF1565C0)
 
 @Composable
-private fun MotorStatusCard(
-    cal:         ServoCalibration,
-    motorIndex:  Int,
+private fun DepthNotice(text: String, background: Color, foreground: Color) {
+    Surface(
+        color = background,
+        shape = RoundedCornerShape(6.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(text, color = foreground, fontSize = 14.sp, modifier = Modifier.padding(8.dp))
+    }
+}
+
+@Composable
+private fun DepthSettingValue(label: String, value: String, modifier: Modifier, onClick: () -> Unit) {
+    Card(modifier = modifier, shape = RoundedCornerShape(8.dp), elevation = 1.dp) {
+        Column(
+            modifier = Modifier.fillMaxWidth()
+                .clickable(role = Role.Button, onClickLabel = "设置$label", onClick = onClick)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Text(label, fontSize = 13.sp, color = Color(0xFF455A64))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(value, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = DepthControlBlue)
+                Text("›", fontSize = 16.sp, color = DepthControlBlue)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MotorStatusTile(
+    cal: ServoCalibration,
     measurement: MeasuredDepthSample,
     displayMode: DepthDisplayMode,
-    onSingleSet: () -> Unit,
-    onCalibrate: () -> Unit
+    verticalPadding: Dp,
+    modifier: Modifier,
+    onClick: () -> Unit
 ) {
-    val statusColor   = motorStatusColor(cal)
-    val statusLabel   = motorStatusLabel(cal)
-
-    Card(
-        elevation = 1.dp,
-        shape     = RoundedCornerShape(8.dp),
-        modifier  = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            // 标题行：状态圆点 + 电机号 + Node-ID + 状态文字
-            Row(
-                verticalAlignment     = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
-                    Modifier
-                        .size(12.dp)
-                        .clip(CircleShape)
-                        .background(statusColor)
-                )
-                Text(
-                    "电机 ${motorIndex + 1}",
-                    fontSize   = 15.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    "Node-ID: ${cal.nodeId}",
-                    fontSize = 12.sp,
-                    color    = Color.Gray
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    statusLabel,
-                    fontSize = 12.sp,
-                    color    = statusColor,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-
-            Divider(
-                color     = Color(0xFFEEEEEE),
-                thickness = 0.5.dp,
-                modifier  = Modifier.padding(vertical = 8.dp)
+    val formatter = remember { DepthDisplayFormat() }
+    val measuredDepth = formatter.format(measurement.depthMm, displayMode)
+    val measuredText = when (measurement.quality) {
+        DepthNodeQuality.OK -> measuredDepth
+        DepthNodeQuality.SETTLING -> "稳定中"
+        else -> DepthDisplayFormat.qualityLabel(measurement.quality)
+    }
+    val statusColor = when {
+        cal.alarmCode != 0 -> Color(0xFFB00020)
+        !cal.isOnline -> Color(0xFF455A64)
+        !cal.isEnabled -> Color(0xFF8A5100)
+        else -> Color(0xFF236631)
+    }
+    Card(modifier = modifier, shape = RoundedCornerShape(8.dp), elevation = 1.dp) {
+        Column(
+            modifier = Modifier.fillMaxWidth().clickable(
+                role = Role.Button, onClickLabel = "设置本行播深", onClick = onClick
             )
-
-            MeasuredDepthReadout(measurement, cal.targetDepth, displayMode)
-            Spacer(Modifier.height(12.dp))
-
-            // 深度信息行
+        ) {
             Row(
-                modifier              = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth()
+                    .background(statusColor.copy(alpha = 0.09f))
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment     = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                // 当前深度
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("伺服换算深度", fontSize = 14.sp, color = Color.Gray)
-                    if (cal.fitValid && cal.isOnline) {
-                        Text(
-                            "%.1f mm".format(cal.currentDepth),
-                            fontSize   = 18.sp,
-                            color      = Color(0xFF1565C0),
-                            fontFamily = FontFamily.Monospace
-                        )
-                    } else {
-                        Text(
-                            if (!cal.fitValid) "未校准" else "---",
-                            fontSize = 14.sp,
-                            color    = Color.Gray
-                        )
-                    }
-                }
+                Text("第 ${cal.motorIndex + 1} 行", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text("${motorStatusLabel(cal)} ›", fontSize = 13.sp, color = statusColor)
+            }
+            Column(
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = verticalPadding),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                DepthValueLine("节点实测", measuredText, measuredDepthColor(measurement, cal.targetDepth))
+                DepthValueLine("目标", targetDepthText(cal.targetDepth), DepthControlBlue)
+                DepthValueLine("伺服换算", servoDepthText(cal), Color(0xFF455A64))
+            }
+        }
+    }
+}
 
-                // 目标深度
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("目标深度", fontSize = 11.sp, color = Color.Gray)
-                    if (cal.targetDepth > 0f) {
-                        Text(
-                            "%.1f mm".format(cal.targetDepth),
-                            fontSize   = 18.sp,
-                            color      = Color(0xFF388E3C),
-                            fontFamily = FontFamily.Monospace
-                        )
-                    } else {
-                        Text("未设置", fontSize = 14.sp, color = Color.Gray)
-                    }
-                }
+@Composable
+private fun DepthValueLine(label: String, value: String, valueColor: Color) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, modifier = Modifier.weight(1f), fontSize = 13.sp, color = Color(0xFF455A64))
+        Text(value, fontSize = 15.sp, color = valueColor, fontWeight = FontWeight.SemiBold)
+    }
+}
 
-                // 操作按钮列
+private fun targetDepthText(depth: Float): String =
+    if (depth > 0f) "%.1f mm".format(Locale.ROOT, depth) else "未设置"
+
+private fun servoDepthText(cal: ServoCalibration): String = when {
+    !cal.fitValid -> "未校准"
+    !cal.isOnline -> "—"
+    else -> "%.1f mm".format(Locale.ROOT, cal.currentDepth)
+}
+
+private fun motorAlarmText(alarmCode: Int): String? = when (alarmCode) {
+    0 -> null
+    SERVO_ALARM_DRIVE_FAULT -> "驱动器故障（已 Quick Stop）"
+    SERVO_ALARM_INTERNAL_LIMIT -> "驱动器内部限位激活（已 Quick Stop）"
+    SERVO_ALARM_SDO_ABORT -> "SDO 通信错误"
+    else -> "报警码 $alarmCode"
+}
+
+@Composable
+private fun DepthControlDialog(
+    title: String,
+    onDismiss: () -> Unit,
+    maxWidth: Dp = 520.dp,
+    onApply: (() -> Unit)? = null,
+    extraAction: @Composable () -> Unit = {},
+    content: @Composable () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                .widthIn(max = maxWidth).fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            elevation = 8.dp
+        ) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Text(title, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
                 Column(
-                    horizontalAlignment = Alignment.End,
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                    Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Button(
-                        onClick         = onSingleSet,
-                        colors          = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF455A64)),
-                        shape           = RoundedCornerShape(6.dp),
-                        contentPadding  = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                    content()
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    extraAction()
+                    Spacer(Modifier.weight(1f))
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                        colors = ButtonDefaults.textButtonColors(contentColor = DepthControlBlue)
                     ) {
-                        Text("单独设置", color = Color.White, fontSize = 12.sp)
+                        Text(if (onApply == null) "关闭" else "取消", fontSize = 15.sp)
                     }
-                    OutlinedButton(
-                        onClick         = onCalibrate,
-                        shape           = RoundedCornerShape(6.dp),
-                        contentPadding  = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                        border          = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF1565C0))
-                    ) {
-                        Text("标定", color = Color(0xFF1565C0), fontSize = 12.sp)
+                    if (onApply != null) {
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = { onApply(); onDismiss() },
+                            modifier = Modifier.heightIn(min = 48.dp),
+                            colors = ButtonDefaults.buttonColors(backgroundColor = DepthControlBlue)
+                        ) {
+                            Text("应用", fontSize = 15.sp, color = Color.White)
+                        }
                     }
                 }
             }
+        }
+    }
+}
 
-            // 报警信息（仅在报警时显示）
-            if (cal.alarmCode != 0) {
-                Spacer(Modifier.height(6.dp))
-                val alarmText = when (cal.alarmCode) {
-                    SERVO_ALARM_DRIVE_FAULT -> "⚠ 驱动器故障（已 Quick Stop）"
-                    SERVO_ALARM_INTERNAL_LIMIT -> "⚠ 驱动器内部限位激活（已 Quick Stop）"
-                    SERVO_ALARM_SDO_ABORT -> "⚠ SDO 通信错误"
-                    else -> "⚠ 报警码: ${cal.alarmCode}"
+@Composable
+private fun MotionSettingDialog(
+    title: String,
+    value: Int,
+    range: IntRange,
+    step: Int,
+    unit: String,
+    onDismiss: () -> Unit,
+    onApply: (Int) -> Unit
+) {
+    var draft by remember { mutableStateOf(value) }
+    DepthControlDialog(title = title, onDismiss = onDismiss, onApply = { onApply(draft) }) {
+        Text("$draft $unit", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = DepthControlBlue)
+        Slider(
+            value = draft.coerceIn(range).toFloat(),
+            onValueChange = { draft = (it / step).roundToInt() * step },
+            valueRange = range.first.toFloat()..range.last.toFloat(),
+            steps = (range.last - range.first) / step - 1,
+            colors = SliderDefaults.colors(thumbColor = DepthControlBlue, activeTrackColor = DepthControlBlue)
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("${range.first} $unit", fontSize = 14.sp)
+            Text("${range.last} $unit", fontSize = 14.sp)
+        }
+    }
+}
+
+@Composable
+private fun DepthExperimentSettings(
+    state: SowingDepthState,
+    nodeState: DepthNodeState,
+    isRecording: Boolean,
+    recordActive: Boolean,
+    onIntervalChange: (Int) -> Unit,
+    onDisplayModeChange: (DepthDisplayMode) -> Unit,
+    onCvChange: (Float) -> Unit
+) {
+    val context = LocalContext.current
+    var intervalInput by remember(state.recordIntervalMs) { mutableStateOf(state.recordIntervalMs.toString()) }
+    var cvInput by remember(nodeState.qualityConfig.cvThreshold) {
+        mutableStateOf("%.1f".format(Locale.ROOT, nodeState.qualityConfig.cvThreshold * 100))
+    }
+    Text("实验数据记录", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = intervalInput,
+            onValueChange = { intervalInput = it },
+            label = { Text("采样周期 (ms)") },
+            enabled = !isRecording,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true,
+            modifier = Modifier.weight(1f)
+        )
+        OutlinedButton(
+            enabled = !isRecording,
+            modifier = Modifier.heightIn(min = 48.dp),
+            onClick = {
+                val interval = intervalInput.trim().toIntOrNull()
+                if (interval == null || interval !in RECORD_INTERVAL_MIN_MS..RECORD_INTERVAL_MAX_MS) {
+                    intervalInput = state.recordIntervalMs.toString()
+                    Toast.makeText(context, "采样周期须为 $RECORD_INTERVAL_MIN_MS~$RECORD_INTERVAL_MAX_MS ms 的整数",
+                        Toast.LENGTH_SHORT).show()
+                } else {
+                    onIntervalChange(interval)
                 }
+            }
+        ) { Text("应用周期") }
+    }
+    Text(
+        "$RECORD_INTERVAL_MIN_MS~$RECORD_INTERVAL_MAX_MS ms，与一键性能测试共用，须与伺服/编码器 TPDO 上报周期匹配。",
+        fontSize = 13.sp, color = Color(0xFF455A64)
+    )
+    Divider()
+    Text("实测显示档位（仅影响显示）", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        DepthDisplayMode.values().forEach { mode ->
+            OutlinedButton(
+                onClick = { onDisplayModeChange(mode) },
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+            ) {
                 Text(
-                    alarmText,
-                    fontSize = 12.sp,
-                    color    = Color(0xFFB00020),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFFFFE0E0), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                    (if (nodeState.displayMode == mode) "✓ " else "") +
+                        (if (mode == DepthDisplayMode.HALF_CM) "0.5 cm" else "1 mm"),
+                    fontSize = 15.sp
                 )
             }
         }
     }
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = cvInput,
+            onValueChange = { cvInput = it },
+            enabled = !isRecording && !recordActive,
+            label = { Text("不稳定 CV 阈值 (%)") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            singleLine = true,
+            modifier = Modifier.weight(1f)
+        )
+        OutlinedButton(
+            enabled = !isRecording && !recordActive,
+            modifier = Modifier.heightIn(min = 48.dp),
+            onClick = {
+                val percent = cvInput.toFloatOrNull()
+                if (percent != null && percent in 1f..200f) {
+                    onCvChange(percent)
+                } else {
+                    Toast.makeText(context, "CV 阈值须为 1–200%", Toast.LENGTH_SHORT).show()
+                }
+            }
+        ) { Text("应用阈值") }
+    }
+    Text("默认 20% 为工程初值，需按试验修订。记录使用实际阈值。", fontSize = 13.sp, color = Color(0xFF455A64))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -978,6 +953,53 @@ private const val DEPTH_QUICK_STEPS = 11
 private val DEPTH_PRESETS = listOf(20f, 30f, 40f, 50f, 60f, 70f, 80f)
 
 @Composable
+private fun DepthTargetEditor(initialDepth: Float, applyLabel: String, onApply: (Float) -> Unit) {
+    val context = LocalContext.current
+    var input by remember {
+        mutableStateOf(
+            if (initialDepth.isFinite() && initialDepth > 0f) "%.1f".format(Locale.ROOT, initialDepth) else ""
+        )
+    }
+    var slider by remember {
+        mutableStateOf(if (initialDepth.isFinite()) initialDepth.coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX)
+            else DEPTH_QUICK_MIN)
+    }
+    fun applyDepth(depth: Float) {
+        input = "%.1f".format(Locale.ROOT, depth)
+        slider = depth.coerceIn(DEPTH_QUICK_MIN, DEPTH_QUICK_MAX)
+        onApply(depth)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("滑块松手或点击预设时立即应用。", fontSize = 14.sp, color = Color(0xFF455A64))
+        DepthQuickInput(
+            textValue = input,
+            onTextChange = { input = it },
+            sliderValue = slider,
+            onSliderChange = { slider = it },
+            onCommit = ::applyDepth,
+            onCommitTyped = {
+                val depth = input.toFloatOrNull()
+                if (depth == null || !depth.isFinite() || depth <= 0f) {
+                    Toast.makeText(context, "请输入有效的目标深度", Toast.LENGTH_SHORT).show()
+                } else {
+                    // 常用区间仅用于快捷操作，允许标定量块等场景手动输入更大的深度。
+                    if (depth !in DEPTH_QUICK_MIN..DEPTH_QUICK_MAX) {
+                        Toast.makeText(
+                            context,
+                            "目标深度 %.1f mm 超出常用范围 %.0f~%.0f mm"
+                                .format(Locale.ROOT, depth, DEPTH_QUICK_MIN, DEPTH_QUICK_MAX),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    applyDepth(depth)
+                }
+            },
+            applyLabel = applyLabel
+        )
+    }
+}
+
+@Composable
 private fun DepthQuickInput(
     textValue: String,
     onTextChange: (String) -> Unit,
@@ -1003,7 +1025,7 @@ private fun DepthQuickInput(
             )
             Button(
                 onClick        = onCommitTyped,
-                colors         = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1565C0)),
+                colors         = ButtonDefaults.buttonColors(backgroundColor = DepthControlBlue),
                 shape          = RoundedCornerShape(8.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
             ) {
@@ -1023,8 +1045,8 @@ private fun DepthQuickInput(
             valueRange            = DEPTH_QUICK_MIN..DEPTH_QUICK_MAX,
             steps                 = DEPTH_QUICK_STEPS,
             colors                = SliderDefaults.colors(
-                thumbColor       = Color(0xFF1565C0),
-                activeTrackColor = Color(0xFF1565C0)
+                thumbColor       = DepthControlBlue,
+                activeTrackColor = DepthControlBlue
             )
         )
 
@@ -1046,7 +1068,7 @@ private fun DepthQuickInput(
                             onClick        = { onCommit(preset) },
                             modifier       = Modifier.weight(1f).height(48.dp),
                             colors         = ButtonDefaults.buttonColors(
-                                backgroundColor = Color(0xFF1565C0)
+                                backgroundColor = DepthControlBlue
                             ),
                             shape          = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(0.dp)
@@ -1063,6 +1085,7 @@ private fun DepthQuickInput(
                             onClick        = { onCommit(preset) },
                             modifier       = Modifier.weight(1f).height(48.dp),
                             shape          = RoundedCornerShape(8.dp),
+                            colors         = ButtonDefaults.outlinedButtonColors(contentColor = DepthControlBlue),
                             contentPadding = PaddingValues(0.dp)
                         ) {
                             Text("%.0f".format(preset), fontSize = 16.sp)
