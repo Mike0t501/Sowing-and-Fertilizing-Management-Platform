@@ -24,6 +24,8 @@ class DepthQualityService(
     @Synchronized fun accept(channel: DepthNodeChannel) {
         val row = channel.row
         if (row !in 0..7) return
+        // 流中的旧帧可能在用户保存新标定后才被消费。
+        if (!sameCalibration(channel, store.current().channels[row])) return
         val sample = measured.forRow(row, channel)
         val previousSeq = lastSeq[row]
         val previousTime = lastAt[row]
@@ -55,6 +57,20 @@ class DepthQualityService(
         monitors = Array(8) { DepthQualityMonitor(it) }
         lastSeq.fill(null); lastAt.fill(null); lastBoot.fill(null)
     }
+
+    @Synchronized fun updateCalibration(row: Int, updater: (DepthNodeChannel) -> DepthNodeChannel) {
+        val before = store.current().channels[row]
+        val now = nowMs()
+        store.updateChannel(row) { DepthNodeRuntime.refresh(updater(it), now) }
+        if (!sameCalibration(before, store.current().channels[row])) {
+            publish(row, monitors[row].invalidate("CALIBRATION_CHANGE"))
+            lastSeq[row] = null; lastAt[row] = null; lastBoot[row] = null
+        }
+    }
+
+    private fun sameCalibration(a: DepthNodeChannel, b: DepthNodeChannel): Boolean =
+        a.fitValid == b.fitValid && a.c0 == b.c0 && a.c1 == b.c1 && a.c2 == b.c2 &&
+            a.offsetTrimMm == b.offsetTrimMm && a.calibratedAt == b.calibratedAt && a.linearVoltageUnit == b.linearVoltageUnit
 
     private fun publish(row: Int, update: DepthQualityMonitor.Update) {
         update.completed.forEach { recording?.add(it) }

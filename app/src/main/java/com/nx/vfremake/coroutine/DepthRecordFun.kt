@@ -15,6 +15,7 @@ package com.nx.vfremake.coroutine
 
 import android.content.Context
 import android.os.SystemClock
+import com.nx.vfremake.data.DepthTestConfig
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.funClass.DocuAndManageFun
 import com.nx.vfremake.funClass.DepthRecordSchema
@@ -33,6 +34,8 @@ import android.net.Uri
 import java.time.Instant
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -56,7 +59,7 @@ import java.util.Locale
 class DepthRecordFun {
     // 定义一个协程作用域，保存作业引用的HashSet，以便于管理
     private val scope = CoroutineScope(Dispatchers.IO)
-    private val jobs = HashSet<Job>()
+    @Volatile private var recordingJob: Job? = null
 
     // 开始写出数据标志位
     @Volatile var isRunning = false
@@ -70,10 +73,15 @@ class DepthRecordFun {
      * @note   取消协程后由 finally 块完成 flush/close 与保存结果通知
      */
     fun shutdown() {
-        jobs.forEach { it.cancel() }
-        jobs.clear()
+        recordingJob?.cancel()
         isRunning = false
         ready.complete(false)
+    }
+
+    suspend fun shutdownAndJoin() {
+        val job = recordingJob
+        shutdown()
+        job?.join()
     }
 
     /**
@@ -86,6 +94,7 @@ class DepthRecordFun {
      * @param  getRows:每次采样返回若干行（不含时间戳/相对时间两列），入参为当前相对时间ms
      * @note
      */
+    @OptIn(ExperimentalCoroutinesApi::class)
     fun start(
         context: Context,
         mVariableFertViewModel: VariableFertViewModel,
@@ -94,9 +103,12 @@ class DepthRecordFun {
         intervalMs: Long = 100L,
         recordRows: List<Int> = activeSowingDepthMotorIndices(mSPParamData.rowNumber,
             mVariableFertViewModel.activeMotorsState.value ?: mSPParamData.activeMotors),
+        trial: DepthTestConfig? = null,
+        simulatedGnss: Boolean = false,
         getRows: (relativeMs: Long) -> List<List<String>>,
     ): Boolean {
-        require(header == DepthRecordSchema.HEADER && intervalMs in 20..1000)
+        require(header == (if (trial == null) DepthRecordSchema.HEADER else DepthRecordSchema.TRIAL_HEADER) &&
+            intervalMs in 20..1000)
         if (isRunning || !mVariableFertViewModel.tryBeginDepthRecording()) {
             ready = CompletableDeferred(false)
             mVariableFertViewModel.writeSaveNotice.postValue(true to "已有播深记录会话，请先停止")
@@ -110,7 +122,7 @@ class DepthRecordFun {
         val fileName = "${filePrefix}_$timeStampfilename.csv"
         val eventFileName = "depthEvt_$timeStampfilename.csv"
 
-        jobs.add(scope.launch {
+        recordingJob = scope.launch(start = CoroutineStart.ATOMIC) {
             // 文件创建放在IO协程内：目录未设置/创建失败时通知用户而非主线程崩溃
             var fileWriter: OutputStreamWriter? = null
             var eventWriter: OutputStreamWriter? = null
@@ -125,7 +137,10 @@ class DepthRecordFun {
             suspend fun writeMetadata() {
                 val uri = metadataUri ?: return
                 val state = metadataState ?: return
-                val json = DepthRecordSchema.metadata(state, BuildConfig.VERSION_NAME, startedAt, intervalMs, history.toList(), recordRows, eventFileName)
+                val json = DepthRecordSchema.metadata(
+                    state, BuildConfig.VERSION_NAME, startedAt, intervalMs, history.toList(), recordRows,
+                    eventFileName, trial, simulatedGnss
+                )
                 checkNotNull(context.contentResolver.openOutputStream(uri, "wt")) { "无法更新记录元数据" }
                     .bufferedWriter(Charsets.UTF_8).use { it.write(json) }
             }
@@ -194,7 +209,9 @@ class DepthRecordFun {
                         val motorIndex = (row.firstOrNull()?.toIntOrNull() ?: error("记录缺少行号")) - 1
                         val channel = mVariableFertViewModel.currentDepthNodeState().channels[motorIndex]
                         val sample = mVariableFertViewModel.measuredDepthFacade.forRow(motorIndex, channel)
-                        val complete = DepthRecordSchema.completeRow(row, channel, sample)
+                        val baseSize = DepthRecordSchema.ORIGINAL_HEADER.size - 2
+                        val complete = DepthRecordSchema.completeRow(row.take(baseSize), channel, sample) + row.drop(baseSize)
+                        check(complete.size == header.size - 2) { "播深记录字段与表头不匹配" }
                         fileWriter.append(DepthRecordSchema.csvLine(listOf(absTs, relativeMs.toString()) + complete))
                         dataRowCount++
                     }
@@ -253,7 +270,7 @@ class DepthRecordFun {
                 isRunning = false
                 mVariableFertViewModel.endDepthRecording()
             }
-        })
+        }
         return true
     }
 

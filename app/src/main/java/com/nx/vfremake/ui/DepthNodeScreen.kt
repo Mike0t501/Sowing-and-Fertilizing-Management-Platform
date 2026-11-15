@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -26,6 +27,7 @@ import com.nx.vfremake.funClass.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.time.Instant
 import java.util.Locale
 
 /** 固定设置页入口；回读与写入分开反馈，选择预设不代表已经生效。 */
@@ -35,8 +37,11 @@ fun DepthNodeScreen(viewModel: VariableFertViewModel, onBack: () -> Unit, onCali
     val scope = rememberCoroutineScope()
     val state by viewModel.depthNodeState.observeAsState(DepthNodeState())
     val recording by viewModel.depthRecordingState.observeAsState(false)
-    var selectedRow by remember { mutableStateOf(0) }
+    val working by viewModel.workRunning.observeAsState(false)
+    val trialActive by viewModel.depthTrialActive.observeAsState(false)
+    var selectedRow by rememberSaveable { mutableStateOf(0) }
     val channel = state.channels[selectedRow]
+    val measurement = viewModel.measuredDepthFacade.forRow(selectedRow, channel)
     var busy by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf("") }
     var preset by remember { mutableStateOf(DepthNodePresets.Preset.MEDIAN_EMA) }
@@ -48,10 +53,12 @@ fun DepthNodeScreen(viewModel: VariableFertViewModel, onBack: () -> Unit, onCali
     var pendingBudget by remember { mutableStateOf<DepthResearchBudget.Budget?>(null) }
     var secondResearchConfirm by remember { mutableStateOf(false) }
     var showProvision by remember { mutableStateOf(false) }
+    var showLinearDialog by rememberSaveable { mutableStateOf(false) }
     var observedRxFps by remember { mutableStateOf(0.0) }
     var observedTxFps by remember { mutableStateOf(0.0) }
     var servo100MsObserved by remember { mutableStateOf(false) }
     val writeEnabled = !busy && !recording && !isSystemRunning && channel.isOnline && channel.versionCompatible
+    val calibrationLocked = recording || working || trialActive || isSystemRunning
 
     DisposableEffect(viewModel) {
         if (MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) != "1") MySerialPortFun.ensureCanPortOpen(context)
@@ -110,14 +117,24 @@ fun DepthNodeScreen(viewModel: VariableFertViewModel, onBack: () -> Unit, onCali
             verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("0–5 V 角度传感器 + dingoFW 变送节点", fontSize = 22.sp, fontWeight = FontWeight.Bold)
             if (state.simulated) Text("测试模式：合成帧走真实解析与配置路径，标定与真实数据隔离。", color = Color(0xFF9C6500), fontSize = 18.sp)
-            if (recording || isSystemRunning) Text("作业或记录进行中：可查看诊断，配置写入已禁用。", color = Color.Red, fontSize = 18.sp)
+            if (calibrationLocked) Text("作业、试验或记录进行中，可查看实时诊断。", color = Color.Red, fontSize = 18.sp)
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 (0..7).forEach { row -> OutlinedButton(enabled = !busy, onClick = { selectedRow = row }) {
                     Text((if (row == selectedRow) "✓ " else "") + "第${row + 1}行", fontSize = 16.sp)
                 } }
             }
-            Text("当前管理：第${selectedRow + 1}行 / 0x${channel.baseId.toString(16).uppercase()} / ${DepthDisplayFormat.qualityLabel(channel.quality)}",
+            Text("当前管理：第${selectedRow + 1}行 / 0x${channel.baseId.toString(16).uppercase()} / ${DepthDisplayFormat.qualityLabel(measurement.quality)}",
                 fontSize = 20.sp, color = if (channel.versionCompatible) Color(0xFF1565C0) else Color.Red)
+            DepthVoltageReadout(measurement, showMean = true, fontSize = 18.sp)
+            externalLinearEquation(channel)?.let { Text("外部系数 · $it", fontSize = 16.sp) }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(enabled = !busy && !calibrationLocked, onClick = { showLinearDialog = true }) {
+                    Text("输入线性系数", fontSize = 16.sp)
+                }
+                OutlinedButton(enabled = !busy && !calibrationLocked, onClick = { onCalibrate(selectedRow) }) {
+                    Text("本行节点标定", fontSize = 16.sp)
+                }
+            }
             if (!channel.versionCompatible) Text("ICD主版本不兼容：已停止解析STATUS，请核对固件。", color = Color.Red, fontSize = 20.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(enabled = !busy, onClick = { perform(false) {
@@ -131,7 +148,6 @@ fun DepthNodeScreen(viewModel: VariableFertViewModel, onBack: () -> Unit, onCali
                 OutlinedButton(enabled = !busy, onClick = { perform(false) {
                     val v = viewModel.depthNodeClient.version(channel.baseId); notice = "dingo核心版本：${v.major}.${v.minor}.${v.build}"
                 } }) { Text("核心版本", fontSize = 16.sp) }
-                OutlinedButton(enabled = !busy && !recording, onClick = { onCalibrate(selectedRow) }) { Text("本行节点标定", fontSize = 16.sp) }
             }
             Card(Modifier.fillMaxWidth(), elevation = 2.dp) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -215,9 +231,11 @@ fun DepthNodeScreen(viewModel: VariableFertViewModel, onBack: () -> Unit, onCali
             if (notice.isNotEmpty()) Text(notice, color = Color(0xFF37474F), fontSize = 18.sp)
             Text("8行实时诊断", fontSize = 22.sp, fontWeight = FontWeight.Bold)
             state.channels.forEach { node -> Card(Modifier.fillMaxWidth(), elevation = 1.dp) {
+                val sample = viewModel.measuredDepthFacade.forRow(node.row, node)
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("第${node.row + 1}行  0x${node.baseId.toString(16).uppercase()}  ${if (node.isOnline) "在线" else "离线"}  ${DepthDisplayFormat.qualityLabel(node.quality)}",
+                    Text("第${node.row + 1}行  0x${node.baseId.toString(16).uppercase()}  ${DepthDisplayFormat.qualityLabel(sample.quality)}",
                         fontSize = 20.sp, fontWeight = FontWeight.Bold, color = if (node.versionCompatible) Color(0xFF1565C0) else Color.Red)
+                    DepthVoltageReadout(sample, showMean = true, fontSize = 18.sp)
                     Text("ICD ${node.icdVer?.let { "0x%02X".format(it) } ?: "--"} / fw ${node.fwRev ?: "--"} · uptime ${node.uptimeS ?: "--"}s · VDDA ${node.vddaMv ?: "--"}mV · 温度 ${node.mcuTempC ?: "--"}℃ · tx_drop ${node.txDrop ?: "--"}", fontSize = 16.sp)
                     Text("近10s丢帧率 %.3f%% · 本次启动丢帧 ${node.lostFrames} · 研究流 %.1f帧/s".format(Locale.ROOT, node.lossRate10s * 100, node.researchFps), fontSize = 16.sp)
                     Text("CRC ${node.cfgCrc?.let { "0x%02X".format(it) } ?: "--"} · ${DepthNodePresets.currentName(node)} · flags 0x%02X".format(node.flags), fontSize = 16.sp)
@@ -226,6 +244,16 @@ fun DepthNodeScreen(viewModel: VariableFertViewModel, onBack: () -> Unit, onCali
             } }
         }
     }
+
+    if (showLinearDialog) DepthNodeLinearDialog(channel, measurement, calibrationLocked,
+        onDismiss = { showLinearDialog = false }, onSave = { a, b, unit ->
+            val savedAt = Instant.now().toString()
+            viewModel.saveDepthNodeCalibration(context, selectedRow) {
+                DepthNodeCalib.withLinearCoefficients(it, a, b, unit, savedAt)
+            }
+            showLinearDialog = false
+            notice = "第${selectedRow + 1}行线性系数已保存"
+        })
 
     pendingBudget?.let { calculated -> AlertDialog(onDismissRequest = { pendingBudget = null; secondResearchConfirm = false },
         title = { Text(if (secondResearchConfirm) "多节点研究流二次确认" else "研究流带宽预算") },

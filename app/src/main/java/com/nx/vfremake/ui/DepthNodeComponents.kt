@@ -8,12 +8,31 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import com.nx.vfremake.data.*
 import com.nx.vfremake.funClass.DepthDisplayFormat
+import com.nx.vfremake.funClass.DepthNodeProtocol.Flag
 import com.nx.vfremake.funClass.MeasuredDepthSample
 import java.util.Locale
 import kotlin.math.abs
+
+internal fun voltageText(mv: Float?): String = mv?.let { "%.1f mV".format(Locale.ROOT, it) } ?: "—"
+
+@Composable
+internal fun DepthVoltageReadout(sample: MeasuredDepthSample, showMean: Boolean,
+    fontSize: TextUnit = 16.sp, color: Color = Color.Unspecified, alertColor: Color = Color(0xFFC62828)) {
+    val warning = when {
+        sample.voltageFlags and Flag.SAT.mask != 0 -> " · 饱和"
+        sample.quality == DepthNodeQuality.FAULT -> " · 故障/无效"
+        else -> ""
+    }
+    Column {
+        Text("滤波电压 ${voltageText(sample.uFiltMv)}$warning",
+            fontSize = fontSize, color = if (warning.isEmpty()) color else alertColor)
+        if (showMean) Text("周期均值 ${voltageText(sample.uMeanMv)}", fontSize = fontSize, color = color)
+    }
+}
 
 /** 质量优先于深度差值；未标定、离线不能显示为正常绿色。 */
 internal fun measuredDepthColor(sample: MeasuredDepthSample, target: Float): Color = when (sample.quality) {
@@ -39,6 +58,7 @@ internal fun MeasuredDepthReadout(sample: MeasuredDepthSample, target: Float, mo
             val text = formatter.format(sample.depthMm, mode)
             Text(if (sample.quality == DepthNodeQuality.OK) text else DepthDisplayFormat.qualityLabel(sample.quality),
                 fontSize = 30.sp, fontWeight = FontWeight.Bold, color = color)
+            DepthVoltageReadout(sample, showMean = true)
         }
         Column(horizontalAlignment = Alignment.End) {
             val eventLabels = sample.monitoring.events.sortedBy { it.ordinal }.joinToString(" / ") { when (it) {

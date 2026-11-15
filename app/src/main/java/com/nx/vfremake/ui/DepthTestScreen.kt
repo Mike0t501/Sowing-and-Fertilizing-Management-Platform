@@ -1,525 +1,511 @@
-/**
- ***********************************************************************************************************
- * @author  :NIANXI
- * @date    :2026年7月4日
- * @file    :
- * @brief   :一键播种深度性能测试界面
- * ---------------------------------------------------------------------------------------------------------
- *                                         Change History
- * ---------------------------------------------------------------------------------------------------------
- * 选择被测电机 + 配置梯度/速度/加速度等参数，一键执行往返梯度测试（默认 20→80→20mm，梯度 20mm）
- * 测试全程 100ms 采样记录 CSV（depthTest_ 前缀），可在「查看已保存记录」界面查看
- ***********************************************************************************************************
- */
-
 package com.nx.vfremake.ui
 
+import android.os.SystemClock
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.AlertDialog
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.Card
-import androidx.compose.material.Divider
 import androidx.compose.material.LinearProgressIndicator
 import androidx.compose.material.OutlinedButton
 import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Scaffold
+import androidx.compose.material.Surface
 import androidx.compose.material.Text
+import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.coroutine.CanReceiveCoroutine
 import com.nx.vfremake.coroutine.DepthTestCoroutine
-import com.nx.vfremake.coroutine.SowingDepthCoroutine
+import com.nx.vfremake.data.DepthNodeState
 import com.nx.vfremake.data.DepthTestConfig
+import com.nx.vfremake.data.DepthTestPhase
+import com.nx.vfremake.data.DepthTestStatus
+import com.nx.vfremake.data.DepthTrialFix
+import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.data.activeSowingDepthMotorIndices
+import com.nx.vfremake.funClass.DepthDisplayFormat
 import com.nx.vfremake.funClass.DocuAndManageFun
+import com.nx.vfremake.funClass.MeasuredDepthSample
 import com.nx.vfremake.funClass.MySerialPortFun
+import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.funClass.WriteDirStatus
 import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mSPParamData
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.Locale
 
-/**
- * 生成梯度序列预览（与 DepthTestCoroutine.buildStageSequence 逻辑一致，仅用于界面展示）
- * 参数非法或级数过多时返回空列表
- */
-private fun previewStages(start: Float?, end: Float?, step: Float?): List<Float> {
-    if (start == null || end == null || step == null) return emptyList()
-    if (step < 1f || start >= end) return emptyList()
-    if ((end - start) / step > 50f) return emptyList()
-    val up = mutableListOf<Float>()
-    var d = start
-    while (d < end - 0.01f) {
-        up.add(d)
-        d += step
-    }
-    up.add(end)
-    return up + up.reversed().drop(1)
-}
-
-/** 深度数值展示：整数省略小数位 */
-private fun fmtDepth(v: Float): String =
-    if (v % 1f == 0f) "%.0f".format(v) else "%.1f".format(v)
-
-/**
- * 一键播种深度性能测试界面
- *
- * 测试流程：运行到起始深度 → 按梯度逐级至终点 → 按梯度逐级返回起始深度，
- * 每级到位后停留设定时长。全程 100ms 采样记录编码器位置/深度/时间戳到 CSV。
- *
- * @param viewModel 共享 ViewModel（sowingDepthState / depthTestStatus / writeSaveNotice）
- * @param onBack    返回上级页面
- */
 @Composable
 fun DepthTestScreen(
     viewModel: VariableFertViewModel,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-
     val state by viewModel.sowingDepthState.observeAsState(SowingDepthState())
+    val nodes by viewModel.depthNodeState.observeAsState(DepthNodeState())
     val status by viewModel.depthTestStatus.observeAsState()
-    val activeMotorsState by viewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
-    val activeMotorIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorsState)
-
-    // 一键测试协程实例（页面级持有；离开页面 shutdown 时记录器自动落盘保存）
-    val testCoroutine = remember { DepthTestCoroutine() }
-
-    // ── 参数输入 ─────────────────────────────────────────────────────────────
-    var motorIndex by remember { mutableStateOf(0) }
-    var startInput by remember { mutableStateOf("20") }
-    var endInput   by remember { mutableStateOf("80") }
-    var stepInput  by remember { mutableStateOf("20") }
-    var dwellInput by remember { mutableStateOf("2.0") }
-    var tolInput   by remember { mutableStateOf("0.5") }
-    // 速度/加速度跟随全局设置初始化（测试启动时写回全局并持久化）
-    var speedInput by remember(state.positionSpeed) { mutableStateOf(state.positionSpeed.toString()) }
-    var accelInput by remember(state.acceleration) { mutableStateOf(state.acceleration.toString()) }
-
-    // 测试进行中：点击启动即置 true；收到 running=false 的状态（完成/失败/中止）后清除
-    var busy by remember { mutableStateOf(false) }
-    LaunchedEffect(status) {
-        status?.let { busy = it.running }
+    val location by viewModel.depthTrialLocation.observeAsState()
+    val workRunning by viewModel.workRunning.observeAsState(false)
+    val trialActive by viewModel.depthTrialActive.observeAsState(false)
+    val recording by viewModel.depthRecordingState.observeAsState(false)
+    val activeMotors by viewModel.activeMotorsState.observeAsState(mSPParamData.activeMotors)
+    val rows = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotors)
+    val testMode = remember(context) {
+        MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1"
     }
-    LaunchedEffect(activeMotorIndices) {
-        if (activeMotorIndices.isNotEmpty() && motorIndex !in activeMotorIndices) {
-            motorIndex = activeMotorIndices.first()
+    val runner = remember(viewModel) { DepthTestCoroutine() }
+
+    var selectedRow by rememberSaveable { mutableIntStateOf(0) }
+    var start by rememberSaveable { mutableStateOf("20") }
+    var end by rememberSaveable { mutableStateOf("80") }
+    var step by rememberSaveable { mutableStateOf("20") }
+    var dwell by rememberSaveable { mutableStateOf("2.0") }
+    var tolerance by rememberSaveable { mutableStateOf("0.5") }
+    var speed by rememberSaveable { mutableStateOf(viewModel.currentSowingDepthState().positionSpeed.toString()) }
+    var acceleration by rememberSaveable { mutableStateOf(viewModel.currentSowingDepthState().acceleration.toString()) }
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
+    var showFullSequence by rememberSaveable { mutableStateOf(false) }
+    var showExitConfirmation by rememberSaveable { mutableStateOf(false) }
+    var acceptedStart by remember { mutableStateOf(false) }
+    var stopping by remember { mutableStateOf(false) }
+    var leaveAfterStop by remember { mutableStateOf(false) }
+    var writeDirStatus by remember { mutableStateOf<WriteDirStatus?>(null) }
+    val running = acceptedStart || trialActive || status?.running == true
+    val busy = running || stopping
+
+    LaunchedEffect(rows) {
+        if (selectedRow !in rows) rows.firstOrNull()?.let { selectedRow = it }
+    }
+    LaunchedEffect(context) {
+        writeDirStatus = withContext(Dispatchers.IO) { DocuAndManageFun().getWriteDirInfo(context).status }
+    }
+    LaunchedEffect(acceptedStart, trialActive, status) {
+        if (acceptedStart && !viewModel.isDepthTrialActive() && status?.running != true) acceptedStart = false
+    }
+    LaunchedEffect(running, recording, stopping) {
+        if (stopping && !running && !recording) {
+            stopping = false
+            if (leaveAfterStop) onBack()
         }
     }
-
-    // ── 串口与协程生命周期（与 DepthCalibrationScreen 同模式）──────────────────
-    // 本页需要 CanReceiveCoroutine 更新反馈 + SowingDepthCoroutine Phase 4 下发位置帧。
-    // 施肥作业运行中时 MainActivity 已独占持有协程实例，本页跳过启动避免双实例竞争。
-    // 离开页面不关串口：跨页 DisposableEffect 时序竞态，释放由 Activity 级生命周期负责。
-    DisposableEffect(Unit) {
-        val receiveCoroutine: CanReceiveCoroutine?
-        val depthCoroutine: SowingDepthCoroutine?
-        if (!isSystemRunning) {
+    DisposableEffect(runner) {
+        onDispose { runner.shutdown() }
+    }
+    // 本页只保留接收租约供启动前查看伺服状态。执行器由试验协程独占。
+    DisposableEffect(viewModel, workRunning, testMode) {
+        val receiver = if (!workRunning && !isSystemRunning && !testMode &&
             MySerialPortFun.ensureCanPortOpen(context)
-            receiveCoroutine = CanReceiveCoroutine().also { it.start(viewModel, context) }
-            depthCoroutine   = SowingDepthCoroutine().also { it.start(viewModel, context) }
-        } else {
-            receiveCoroutine = null
-            depthCoroutine   = null
-        }
-        onDispose {
-            // 测试中离开页面：目标深度回写当前深度，电机在下一次 Phase 4 下发时停在原地
-            // （返回上一页后 SowingDepthScreen 会重启协程），再取消测试协程并落盘保存
-            if (testCoroutine.isRunning) {
-                val idx = viewModel.depthTestStatus.value?.motorIndex ?: motorIndex
-                val cur = viewModel.currentSowingDepthState().motors.getOrNull(idx)?.currentDepth
-                if (cur != null) {
-                    viewModel.updateServoCalibration(idx) { it.copy(targetDepth = cur) }
-                }
-            }
-            testCoroutine.shutdown()
-            receiveCoroutine?.shutdown()
-            depthCoroutine?.shutdown()
-        }
+        ) CanReceiveCoroutine().also { it.start(viewModel, context) } else null
+        onDispose { receiver?.shutdown() }
     }
 
-    // ── 启动测试 ─────────────────────────────────────────────────────────────
-    fun startTest() {
-        if (isSystemRunning) {
-            Toast.makeText(context, "作业进行中，无法启动性能测试", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (motorIndex !in activeMotorIndices) {
-            Toast.makeText(context, "请先在参数设置页启用要测试的播种深度电机", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (DocuAndManageFun().getWriteDirDocumentUri(context) == null) {
-            Toast.makeText(
-                context,
-                "保存目录未设置或已失效，请在系统设置中选择实验数据保存目录",
-                Toast.LENGTH_LONG
-            ).show()
-            return
-        }
-        val start = startInput.toFloatOrNull()
-        val end   = endInput.toFloatOrNull()
-        val step  = stepInput.toFloatOrNull()
-        val dwell = dwellInput.toFloatOrNull()
-        val tol   = tolInput.toFloatOrNull()
-        val speed = speedInput.toIntOrNull()
-        val accel = accelInput.toIntOrNull()
-        if (start == null || end == null || step == null || dwell == null ||
-            tol == null || speed == null || accel == null
-        ) {
-            Toast.makeText(context, "参数格式有误，请检查输入", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (previewStages(start, end, step).isEmpty()) {
-            Toast.makeText(context, "梯度序列无效：须满足 起始<终点、梯度≥1mm", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (speed !in 100..3000) {
-            Toast.makeText(context, "运动速度须在 100~3000 RPM 内", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (accel !in 1000..60000) {
-            Toast.makeText(context, "加速度须在 1000~60000 RPM/s 内", Toast.LENGTH_SHORT).show()
-            return
-        }
-        busy = true
-        testCoroutine.start(
-            context, viewModel,
-            DepthTestConfig(
-                motorIndex    = motorIndex,
-                startDepthMm  = start,
-                endDepthMm    = end,
-                stepMm        = step,
-                dwellMs       = (dwell * 1000).toLong().coerceAtLeast(0L),
-                toleranceMm   = if (tol > 0f) tol else 0.5f,
-                positionSpeed = speed,
-                acceleration  = accel,
-                // 采样周期在播深控制页统一设置，此处只做快照，保证一次测试全程同频
-                recordIntervalMs = state.recordIntervalMs.toLong()
-            )
+    fun requestStop(leave: Boolean = false) {
+        if (stopping) return
+        leaveAfterStop = leave
+        stopping = true
+        runner.abort()
+    }
+
+    fun requestBack() {
+        if (!busy && !viewModel.isDepthTrialActive()) onBack()
+        else if (!stopping) showExitConfirmation = true
+    }
+
+    BackHandler(busy) { requestBack() }
+    if (showExitConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showExitConfirmation = false },
+            title = { Text("停止试验并返回？") },
+            text = { Text("将停止当前试验，保存已采样的数据后返回。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showExitConfirmation = false
+                    if (busy || viewModel.isDepthTrialActive()) requestStop(leave = true) else onBack()
+                }) { Text("停止并返回") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitConfirmation = false }) { Text("留在试验页") }
+            }
         )
     }
 
-    // ── UI ───────────────────────────────────────────────────────────────────
+    val startMm = start.toFloatOrNull()
+    val endMm = end.toFloatOrNull()
+    val stepMm = step.toFloatOrNull()
+    val dwellSeconds = dwell.toFloatOrNull()?.takeIf { it in 0f..600f }
+    val toleranceMm = tolerance.toFloatOrNull()?.takeIf { it.isFinite() && it > 0f }
+    val speedRpm = speed.toIntOrNull()?.takeIf { it in 100..3000 }
+    val accelerationRpm = acceleration.toIntOrNull()?.takeIf { it in 1000..60000 }
+    val stages = remember(startMm, endMm, stepMm) {
+        if (startMm == null || endMm == null || stepMm == null) emptyList()
+        else DepthTestConfig.stageDepths(startMm, endMm, stepMm)
+    }
+    val motor = state.motors.getOrNull(selectedRow)
+    val startBlocker = when {
+        workRunning || isSystemRunning -> "请先停止主界面作业。"
+        recording -> "请先结束其他记录，等待文件保存完成。"
+        testMode -> "当前为测试模式。关闭测试模式后才能启动真实伺服试验。"
+        state.masterEnabled -> "请先返回播深控制页关闭控制总开关。"
+        selectedRow !in rows || motor == null -> "请先在参数设置中启用被测行。"
+        !motor.limitsSet || !motor.fitValid -> "第 ${selectedRow + 1} 行需要完成伺服限位和深度标定。"
+        motor.isOnline && motor.alarmCode != 0 -> "第 ${selectedRow + 1} 行伺服报警，请先排除故障。"
+        stages.isEmpty() -> "检查起止深度及步长，步长至少 1 mm。"
+        dwellSeconds == null -> "每级停留时间应在 0–600 秒内。"
+        toleranceMm == null -> "到位容差应大于 0 mm。"
+        speedRpm == null -> "运动速度应在 100–3000 RPM 内。"
+        accelerationRpm == null -> "加减速度应在 1000–60000 RPM/s 内。"
+        writeDirStatus == null -> "正在检查实验数据目录。"
+        writeDirStatus != WriteDirStatus.OK -> "请在系统设置中选择可写的实验数据目录。"
+        else -> null
+    }
+
+    fun startTrial() {
+        if (busy || viewModel.isDepthTrialActive() || viewModel.workRunning.value == true || viewModel.isDepthRecording() ||
+            startBlocker != null
+        ) return
+        val config = DepthTestConfig(
+            motorIndex = selectedRow,
+            startDepthMm = startMm ?: return,
+            endDepthMm = endMm ?: return,
+            stepMm = stepMm ?: return,
+            dwellMs = ((dwellSeconds ?: return).toDouble() * 1000).toLong(),
+            toleranceMm = toleranceMm ?: return,
+            positionSpeed = speedRpm ?: return,
+            acceleration = accelerationRpm ?: return,
+            recordIntervalMs = state.recordIntervalMs.toLong()
+        )
+        if (runner.start(context, viewModel, config)) {
+            acceptedStart = true
+        } else {
+            Toast.makeText(context, "当前无法启动试验，请查看试验状态。", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     Scaffold(
-        topBar = { MyTopBar("深度性能测试", onBack) }
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // 作业模式警告
-            if (isSystemRunning) {
-                Card(
-                    backgroundColor = Color(0xFFFFF3CD),
-                    elevation = 0.dp,
-                    modifier = Modifier.fillMaxWidth()
+        topBar = { MyTopBar("变量播深试验", ::requestBack) },
+        bottomBar = {
+            Surface(elevation = 6.dp) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        "⚠ 作业模式运行中，请停止作业后再进行性能测试",
-                        color = Color(0xFF856404),
-                        modifier = Modifier.padding(12.dp),
-                        fontSize = 13.sp
-                    )
+                    val caption = when {
+                        stopping -> "正在停止并保存已采样数据"
+                        busy -> "第 ${(status?.motorIndex?.takeIf { it >= 0 } ?: selectedRow) + 1} 行 · 试验中"
+                        startBlocker != null -> startBlocker
+                        else -> "已选第 ${selectedRow + 1} 行 · ${stages.size} 级"
+                    }
+                    Text(caption, modifier = Modifier.weight(1f), fontSize = 14.sp, color = Color(0xFF455A64))
+                    Button(
+                        onClick = { if (busy) requestStop() else startTrial() },
+                        enabled = !stopping && (busy || startBlocker == null),
+                        modifier = Modifier.heightIn(min = 52.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            backgroundColor = if (busy) Color(0xFFC62828) else Color(0xFF176E49),
+                            contentColor = Color.White
+                        )
+                    ) {
+                        Text(
+                            if (busy) "停止试验" else "开始试验",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
-
-            // ── 被测电机选择 ─────────────────────────────────────────────────
-            Card(
-                elevation = 2.dp,
-                shape     = RoundedCornerShape(10.dp),
-                modifier  = Modifier.fillMaxWidth()
+        }
+    ) { padding ->
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
+            val wide = maxWidth >= 760.dp
+            Column(
+                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("被测电机", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                    if (activeMotorIndices.isEmpty()) {
-                        Text(
-                            "未启用播种深度电机，请先在参数设置页开启需要测试的行。",
-                            fontSize = 13.sp,
-                            color = Color.Gray
-                        )
-                    } else {
-                    activeMotorIndices.chunked(4).forEach { rowIndices ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            rowIndices.forEach { i ->
-                                val cal = state.motors[i]
-                                val selected = motorIndex == i
-                                OutlinedButton(
-                                    onClick        = { if (!busy) motorIndex = i },
-                                    modifier       = Modifier.weight(1f),
-                                    shape          = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(vertical = 6.dp),
-                                    border         = BorderStroke(
-                                        if (selected) 2.dp else 1.dp,
-                                        if (selected) Color(0xFF1565C0) else Color.LightGray
-                                    ),
-                                    colors = ButtonDefaults.outlinedButtonColors(
-                                        backgroundColor =
-                                            if (selected) Color(0xFFE3F2FD) else Color.White
-                                    )
-                                ) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text(
-                                            "${i + 1}号",
-                                            fontSize   = 14.sp,
-                                            color      = Color.Black,
-                                            fontWeight = if (selected) FontWeight.SemiBold
-                                                         else FontWeight.Normal
-                                        )
-                                        Text(
-                                            motorStatusLabel(cal),
-                                            fontSize = 10.sp,
-                                            color    = motorStatusColor(cal)
+                if (busy) {
+                    val row = status?.motorIndex?.takeIf { it >= 0 } ?: selectedRow
+                    TrialLiveCard(
+                        row = row,
+                        status = status,
+                        motor = state.motors.getOrNull(row),
+                        sample = viewModel.measuredDepthFacade.forRow(row, nodes.channels.getOrNull(row)),
+                        fix = location,
+                        recording = recording,
+                        stopping = stopping
+                    )
+                } else {
+                    status?.takeUnless { it.phase == DepthTestPhase.IDLE }?.let { TrialResultCard(it) }
+
+                    val rowPicker: @Composable (Modifier) -> Unit = { modifier ->
+                        TrialCard("1  选择被测行", modifier) {
+                            if (rows.isEmpty()) Text("参数设置中尚未启用播深单体。", fontSize = 15.sp)
+                            rows.chunked(if (wide) 4 else 3).forEach { group ->
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    group.forEach { row ->
+                                        TrialRowButton(
+                                            row, state.motors[row], row == selectedRow,
+                                            Modifier.weight(1f), onClick = { selectedRow = row }
                                         )
                                     }
+                                    repeat((if (wide) 4 else 3) - group.size) { Spacer(Modifier.weight(1f)) }
                                 }
                             }
-                            repeat(4 - rowIndices.size) {
-                                Spacer(modifier = Modifier.weight(1f))
+                            Text(
+                                "每次只驱动一行。启动时验证伺服反馈，到位后按时间停留。无定位时继续采样，坐标留空。",
+                                fontSize = 14.sp, color = Color(0xFF455A64)
+                            )
+                        }
+                    }
+                    val setup: @Composable (Modifier) -> Unit = { modifier ->
+                        TrialCard("2  设置梯度", modifier) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TrialField("起始深度 (mm)", start, { start = it }, Modifier.weight(1f))
+                                TrialField("终点深度 (mm)", end, { end = it }, Modifier.weight(1f))
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TrialField("步长 (mm)", step, { step = it }, Modifier.weight(1f))
+                                TrialField("每级停留 (s)", dwell, { dwell = it }, Modifier.weight(1f))
+                            }
+                            TextButton(onClick = { showAdvanced = !showAdvanced }) {
+                                Text(if (showAdvanced) "收起到位与运动参数" else "到位与运动参数", fontSize = 15.sp)
+                            }
+                            if (showAdvanced) {
+                                TrialField("到位容差 (mm)", tolerance, { tolerance = it }, Modifier.fillMaxWidth())
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    TrialField("速度 (RPM)", speed, { speed = it }, Modifier.weight(1f), KeyboardType.Number)
+                                    TrialField("加减速 (RPM/s)", acceleration, { acceleration = it }, Modifier.weight(1f), KeyboardType.Number)
+                                }
                             }
                         }
                     }
-                    }
-                    // 选中电机实时反馈
-                    val selectedMotorIndex = if (motorIndex in activeMotorIndices) {
-                        motorIndex
+                    if (wide) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            rowPicker(Modifier.weight(1f))
+                            setup(Modifier.weight(1f))
+                        }
                     } else {
-                        activeMotorIndices.firstOrNull() ?: 0
+                        rowPicker(Modifier.fillMaxWidth())
+                        setup(Modifier.fillMaxWidth())
                     }
-                    val sel = state.motors[selectedMotorIndex]
-                    Divider()
-                    if (activeMotorIndices.isNotEmpty()) {
-                    Row(
-                        modifier              = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("当前深度 %.2f mm".format(sel.currentDepth),
-                            fontSize = 13.sp, color = Color.DarkGray)
-                        Text("编码器 ${sel.currentPosition}",
-                            fontSize = 13.sp, color = Color.DarkGray)
-                        Text(
-                            if (!sel.limitsSet || !sel.fitValid) "未标定" else "已标定",
-                            fontSize = 13.sp,
-                            color    = if (!sel.limitsSet || !sel.fitValid) Color(0xFFD32F2F)
-                                       else Color(0xFF388E3C)
-                        )
-                    }
-                    }
-                }
-            }
-
-            // ── 测试参数 ─────────────────────────────────────────────────────
-            Card(
-                elevation = 2.dp,
-                shape     = RoundedCornerShape(10.dp),
-                modifier  = Modifier.fillMaxWidth()
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("测试参数", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = startInput, onValueChange = { startInput = it },
-                            label = { Text("起始深度mm") }, enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true, modifier = Modifier.weight(1f)
-                        )
-                        OutlinedTextField(
-                            value = endInput, onValueChange = { endInput = it },
-                            label = { Text("终点深度mm") }, enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true, modifier = Modifier.weight(1f)
-                        )
-                        OutlinedTextField(
-                            value = stepInput, onValueChange = { stepInput = it },
-                            label = { Text("梯度mm") }, enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true, modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = dwellInput, onValueChange = { dwellInput = it },
-                            label = { Text("停留时间s") }, enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true, modifier = Modifier.weight(1f)
-                        )
-                        OutlinedTextField(
-                            value = tolInput, onValueChange = { tolInput = it },
-                            label = { Text("到位容差mm") }, enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true, modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = speedInput, onValueChange = { speedInput = it },
-                            label = { Text("运动速度RPM") }, enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true, modifier = Modifier.weight(1f)
-                        )
-                        OutlinedTextField(
-                            value = accelInput, onValueChange = { accelInput = it },
-                            label = { Text("加速度RPM/s") }, enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true, modifier = Modifier.weight(1f)
-                        )
-                    }
-                    // 梯度序列预览
-                    val stages = previewStages(
-                        startInput.toFloatOrNull(), endInput.toFloatOrNull(), stepInput.toFloatOrNull()
-                    )
-                    Text(
-                        if (stages.isEmpty()) "梯度序列无效（须满足 起始<终点、梯度≥1mm）"
-                        else "序列：${stages.joinToString("→") { fmtDepth(it) }} mm（共 ${stages.size} 级）",
-                        fontSize = 12.sp,
-                        color    = if (stages.isEmpty()) Color(0xFFD32F2F) else Color.Gray
-                    )
-                    // 采样周期只读展示：唯一编辑入口在播深控制页，两处记录共用同一个值
-                    Text(
-                        "CSV 采样周期 ${state.recordIntervalMs}ms（在播深控制页修改，与手动记录共用）",
-                        fontSize = 12.sp,
-                        color    = Color.Gray
-                    )
-                }
-            }
-
-            // ── 测试状态 ─────────────────────────────────────────────────────
-            status?.let { s ->
-                Card(
-                    elevation       = 2.dp,
-                    shape           = RoundedCornerShape(10.dp),
-                    modifier        = Modifier.fillMaxWidth(),
-                    backgroundColor = when {
-                        s.running   -> Color(0xFFE3F2FD)
-                        s.finished  -> Color(0xFFE8F5E9)
-                        else        -> Color(0xFFFFF3E0)
-                    }
-                ) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(
-                            modifier              = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment     = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                when {
-                                    s.running  -> "测试进行中：电机 ${s.motorIndex + 1}"
-                                    s.finished -> "测试完成：电机 ${s.motorIndex + 1}"
-                                    else       -> "测试未完成"
-                                },
-                                fontWeight = FontWeight.SemiBold, fontSize = 15.sp
-                            )
-                            if (s.stageCount > 0) {
-                                Text("第 ${s.stageIndex}/${s.stageCount} 级", fontSize = 13.sp)
+                    TrialCard("3  核对往返序列") {
+                        if (stages.isEmpty()) {
+                            Text("参数有效后显示往返序列。", color = Color(0xFF455A64), fontSize = 15.sp)
+                        } else {
+                            Text("共 ${stages.size} 级 · 深度单位 mm", fontSize = 14.sp, color = Color(0xFF455A64))
+                            val format = { depth: Float -> depth.toString().removeSuffix(".0") }
+                            val sequence = if (showFullSequence || stages.size <= 15) {
+                                stages.joinToString(" → ", transform = format)
+                            } else {
+                                stages.take(7).joinToString(" → ", transform = format) +
+                                    " → … → " + stages.takeLast(7).joinToString(" → ", transform = format)
+                            }
+                            Text(sequence, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            if (stages.size > 15) {
+                                TextButton(onClick = { showFullSequence = !showFullSequence }) {
+                                    Text(if (showFullSequence) "收起序列" else "展开完整序列")
+                                }
                             }
                         }
-                        if (s.running) {
-                            LinearProgressIndicator(
-                                progress = if (s.stageCount > 0)
-                                    s.stageIndex.toFloat() / s.stageCount else 0f,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Text(
-                                "${s.stageLabel} mm　目标 %.1f mm".format(s.targetDepth),
-                                fontSize = 13.sp
-                            )
-                        }
-                        if (s.message.isNotEmpty()) {
-                            Text(s.message, fontSize = 13.sp, color = Color.DarkGray)
-                        }
-                        if (s.anomalies.isNotEmpty()) {
-                            Text(
-                                "异常：${s.anomalies.joinToString("；")}",
-                                fontSize = 12.sp, color = Color(0xFFD32F2F)
-                            )
-                        }
+                        Text(
+                            "CSV 每 ${state.recordIntervalMs} ms 采样。保存后可在「实验数据」查看。",
+                            fontSize = 14.sp, color = Color(0xFF455A64)
+                        )
                     }
                 }
             }
-
-            // ── 启动 / 中止 ──────────────────────────────────────────────────
-            if (busy) {
-                Button(
-                    onClick  = { testCoroutine.abort() },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape    = RoundedCornerShape(8.dp),
-                    colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFFD32F2F)),
-                    contentPadding = PaddingValues(vertical = 14.dp)
-                ) {
-                    Text("中止测试", color = Color.White, fontSize = 16.sp)
-                }
-            } else {
-                Button(
-                    onClick  = { startTest() },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape    = RoundedCornerShape(8.dp),
-                    colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF388E3C)),
-                    contentPadding = PaddingValues(vertical = 14.dp)
-                ) {
-                    Text("开始测试", color = Color.White, fontSize = 16.sp)
-                }
-            }
-
-            Text(
-                "测试流程：先运行到起始深度，再按梯度逐级至终点后逐级返回；每级到位停留设定时长。\n" +
-                    "全程 100ms 采样记录 CSV（depthTest_ 前缀），可在「设置→查看已保存记录」中查看。",
-                fontSize = 12.sp, color = Color.Gray
-            )
-            Spacer(Modifier.height(8.dp))
         }
     }
 
-    // ── 实验数据保存结果一次性提示：成功 Toast，失败弹窗 ──────────────────────
-    val writeSaveNotice by viewModel.writeSaveNotice.observeAsState()
-    val writeSaveFailText = remember { mutableStateOf("") }
-    val showWriteSaveFail = remember { mutableStateOf(false) }
-    LaunchedEffect(writeSaveNotice) {
-        writeSaveNotice?.let { (isFail, msg) ->
-            if (isFail) {
-                writeSaveFailText.value = msg
-                showWriteSaveFail.value = true
-            } else {
-                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-            }
-            viewModel.writeSaveNotice.postValue(null)  // 消费一次，避免重复弹
+    val saveNotice by viewModel.writeSaveNotice.observeAsState()
+    val showSaveError = remember { mutableStateOf(false) }
+    var saveError by remember { mutableStateOf("") }
+    LaunchedEffect(saveNotice) {
+        saveNotice?.let { (failed, message) ->
+            if (failed) {
+                saveError = message
+                showSaveError.value = true
+            } else Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            viewModel.writeSaveNotice.value = null
         }
     }
-    if (showWriteSaveFail.value) {
-        ShowConfirmDialog(
-            title = "实验数据保存失败",
-            text = writeSaveFailText.value,
-            showDialog = showWriteSaveFail,
-            showDismiss = false
-        )
+    if (showSaveError.value) {
+        ShowConfirmDialog("实验数据保存失败", saveError, showDialog = showSaveError, showDismiss = false)
     }
 }
+
+@Composable
+private fun TrialLiveCard(
+    row: Int,
+    status: DepthTestStatus?,
+    motor: ServoCalibration?,
+    sample: MeasuredDepthSample,
+    fix: DepthTrialFix?,
+    recording: Boolean,
+    stopping: Boolean
+) {
+    val phase = if (stopping) DepthTestPhase.STOPPING else status?.phase ?: DepthTestPhase.PREPARING
+    val stage = status?.stageIndex ?: 0
+    val count = status?.stageCount ?: 0
+    val now = SystemClock.elapsedRealtime()
+    val location = fix?.takeIf { it.ageAt(now) != null }
+    val position = motor?.takeIf { it.isOnline && it.positionAtMs > 0L && now - it.positionAtMs in 0L..2_000L }
+    val phaseLabel = when (phase) {
+        DepthTestPhase.MOVING -> "前往目标"
+        DepthTestPhase.DWELL -> "到位停留"
+        DepthTestPhase.TIMEOUT -> "到位超时"
+        DepthTestPhase.STOPPING -> "正在停止"
+        DepthTestPhase.PREPARING, DepthTestPhase.IDLE -> "正在准备"
+        else -> "正在收尾"
+    }
+    TrialCard("第 ${row + 1} 行 · $phaseLabel") {
+        if (count > 0) {
+            Text("进度  $stage / $count 级", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            LinearProgressIndicator(progress = (stage.toFloat() / count).coerceIn(0f, 1f), modifier = Modifier.fillMaxWidth())
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TrialReadout("目标", depthText(status?.targetDepth?.takeIf { stage > 0 }), Modifier.weight(1f))
+            TrialReadout("伺服解算", depthText(position?.takeIf { it.fitValid }?.currentDepth), Modifier.weight(1f))
+            TrialReadout("传感器实测", depthText(sample.depthMm), Modifier.weight(1f))
+        }
+        Text(
+            "编码器 ${position?.currentPosition ?: "—"} · 传感器${DepthDisplayFormat.qualityLabel(sample.quality)}",
+            fontSize = 15.sp
+        )
+        val gnss = when {
+            location == null -> "无有效定位 · 坐标留空"
+            location.rowLongitude != null && location.rowLatitude != null ->
+                coordinateText("单体", location.rowLongitude, location.rowLatitude)
+            else -> coordinateText("天线 · 等待航向", location.antennaLongitude, location.antennaLatitude)
+        }
+        Text(if (location?.simulated == true) "模拟 GNSS · $gnss" else "GNSS · $gnss", fontSize = 15.sp)
+        Text(
+            when {
+                phase == DepthTestPhase.STOPPING -> "CSV 正在收尾"
+                recording && phase != DepthTestPhase.PREPARING -> "CSV 正在采样"
+                else -> "CSV 正在准备"
+            },
+            color = Color(0xFF176E49), fontWeight = FontWeight.Bold, fontSize = 15.sp
+        )
+        status?.message?.takeIf { it.isNotBlank() }?.let { Text(it, fontSize = 15.sp) }
+        status?.anomalies?.lastOrNull()?.let { Text(it, fontSize = 15.sp, color = Color(0xFFC62828)) }
+    }
+}
+
+@Composable
+private fun TrialResultCard(status: DepthTestStatus) {
+    val title = when (status.phase) {
+        DepthTestPhase.COMPLETE -> "上次试验已完成"
+        DepthTestPhase.ABORTED -> "上次试验已停止"
+        else -> "上次试验结果"
+    }
+    TrialCard(title) {
+        if (status.message.isNotBlank()) Text(status.message, fontSize = 15.sp)
+        if (status.anomalies.isNotEmpty()) {
+            Text("异常 ${status.anomalies.size} 项 · ${status.anomalies.last()}", fontSize = 15.sp, color = Color(0xFFC62828))
+        }
+    }
+}
+
+@Composable
+private fun TrialCard(
+    title: String,
+    modifier: Modifier = Modifier.fillMaxWidth(),
+    content: @Composable () -> Unit
+) {
+    Card(modifier, shape = RoundedCornerShape(10.dp), elevation = 2.dp) {
+        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text(title, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+            content()
+        }
+    }
+}
+
+@Composable
+private fun TrialRowButton(row: Int, motor: ServoCalibration, isSelected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = 56.dp).semantics { selected = isSelected },
+        border = BorderStroke(if (isSelected) 2.dp else 1.dp, if (isSelected) Color(0xFF1565C0) else Color(0xFFB0BEC5)),
+        colors = ButtonDefaults.outlinedButtonColors(backgroundColor = if (isSelected) Color(0xFFE3F2FD) else Color.White)
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("第 ${row + 1} 行", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(
+                if (motor.isOnline) motorStatusLabel(motor) else "待回读",
+                color = if (motor.isOnline) motorStatusColor(motor) else Color(0xFF546E7A),
+                fontSize = 13.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun TrialField(
+    label: String,
+    value: String,
+    onChange: (String) -> Unit,
+    modifier: Modifier,
+    keyboardType: KeyboardType = KeyboardType.Decimal
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label) },
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        singleLine = true,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun TrialReadout(label: String, value: String, modifier: Modifier) {
+    Surface(modifier, color = Color(0xFFEAF1F4), shape = RoundedCornerShape(8.dp)) {
+        Column(Modifier.padding(8.dp)) {
+            Text(label, fontSize = 14.sp, color = Color(0xFF455A64))
+            Text(value, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+private fun depthText(value: Float?): String =
+    value?.takeIf { it.isFinite() }?.let { String.format(Locale.ROOT, "%.1f mm", it) } ?: "—"
+
+private fun coordinateText(label: String, longitude: Double, latitude: Double): String =
+    String.format(Locale.ROOT, "%s %.7f°, %.7f°", label, longitude, latitude)

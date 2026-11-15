@@ -23,6 +23,7 @@ import com.nx.vfremake.mRmcData
 import com.nx.vfremake.canMonitorData
 import com.nx.vfremake.mSPParamData
 import com.nx.vfremake.mSerialPortCAN
+import com.nx.vfremake.isSystemRunning
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -152,9 +153,13 @@ class CanReceiveCoroutine {
         })
         jobs.add(scope.launch {
             while (isActive) {
-                mVariableFertViewModel.depthNodeSimulator?.tick(
-                    mVariableFertViewModel.currentSowingDepthState().motors.map { it.targetDepth.takeIf { v -> v > 0f } ?: 40f }
-                )
+                mVariableFertViewModel.depthNodeSimulator?.let { simulator ->
+                    val state = mVariableFertViewModel.currentSowingDepthState()
+                    val useWorkTarget = mVariableFertViewModel.depthPrescriptionMode.value == true && isSystemRunning
+                    simulator.tick(state.motors.indices.map { row ->
+                        state.depthTargetMm(row, useWorkTarget)?.takeIf { it > 0f } ?: 40f
+                    })
+                }
                 mVariableFertViewModel.depthNodeRuntime.tick()
                 delay(10)
             }
@@ -518,6 +523,7 @@ class CanReceiveCoroutine {
                     val depth = if (cal.fitValid) cal.fitA * pos + cal.fitB else cal.currentDepth
                     cal.copy(
                         currentPosition = pos,
+                        positionAtMs    = android.os.SystemClock.elapsedRealtime(),
                         currentDepth    = depth,
                         isOnline        = true,
                         lastHeardMs     = servoLastSeen[motorIndex]
@@ -616,6 +622,7 @@ class CanReceiveCoroutine {
             }
             cal.copy(
                 currentPosition = tpdo.actualPos,
+                positionAtMs     = android.os.SystemClock.elapsedRealtime(),
                 currentDepth    = depth,
                 isOnline        = true,
                 isEnabled       = flags.operationEnabled,

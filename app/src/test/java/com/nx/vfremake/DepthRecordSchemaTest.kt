@@ -2,6 +2,7 @@
 package com.nx.vfremake
 
 import com.google.gson.JsonParser
+import com.nx.vfremake.coroutine.MyWriteSaveFun
 import com.nx.vfremake.data.*
 import com.nx.vfremake.funClass.*
 import com.nx.vfremake.funClass.DepthNodeProtocol as P
@@ -20,7 +21,8 @@ class DepthRecordSchemaTest {
     @Test fun manualAndTestRowsShareMappingAndZeroIsNotMissing() {
         val channel = DepthNodeChannel(0, isOnline = true, seq = 42, cfgCrc = 108, uFiltMv = 2345.6f,
             uMeanMv = 2350f, spanMv = 12f)
-        val sample = MeasuredDepthSample(0f, 0.1f, DepthNodeQuality.OK, 0, 0.2f)
+        val sample = MeasuredDepthSample(0f, 0.1f, DepthNodeQuality.OK, 0, 0.2f,
+            uFiltMv = channel.uFiltMv, uMeanMv = channel.uMeanMv)
         val row = listOf("1", "手动", "40.00", "39.90", "123", "1", "0")
         val originalLocale = Locale.getDefault()
         try {
@@ -33,6 +35,36 @@ class DepthRecordSchemaTest {
             val invalid = DepthRecordSchema.nodeColumns(channel, sample.copy(quality = DepthNodeQuality.FAULT))
             assertEquals(listOf("", "", ""), invalid.subList(1, 4))
         } finally { Locale.setDefault(originalLocale) }
+    }
+
+    @Test fun workAndDepthRecordsSharePerRowVoltageValuesEvenWithoutCalibration() {
+        var now = 100L
+        val store = DepthNodeStateStore()
+        val runtime = DepthNodeRuntime(store, nowMs = { now })
+        val measured = MeasuredDepthFacade(store::current) { now }
+        runtime.onDepthNodeFrame(P.baseForRow(0) + P.STATUS, P.statusData(0f, 2.5f, 2f, 23, 0, 5))
+        runtime.onDepthNodeFrame(P.baseForRow(1) + P.STATUS, P.statusData(2540f, null, 2f, 24, P.Flag.SAT.mask, 6))
+        val first = measured.forRow(0)
+        val second = measured.forRow(1)
+        assertEquals(DepthNodeQuality.UNCALIBRATED, first.quality)
+        assertEquals(DepthNodeQuality.FAULT, second.quality)
+        assertEquals(P.Flag.SAT.mask, second.voltageFlags)
+        assertEquals(listOf("0.0", "2.5", "0", "5", "23", "UNCALIBRATED"), DepthRecordSchema.workVoltageColumns(runtime.channel(0), first))
+        assertEquals(listOf("2540.0", "", "2", "6", "24", "FAULT"), DepthRecordSchema.workVoltageColumns(runtime.channel(1), second))
+        assertEquals(listOf("0.0", "2.5"), DepthRecordSchema.nodeColumns(runtime.channel(0), first).subList(4, 6))
+        now += 1001L
+        val expired = measured.forRow(0)
+        assertNull(expired.uFiltMv)
+        assertEquals(listOf("", ""), DepthRecordSchema.nodeColumns(runtime.channel(0), expired).subList(4, 6))
+        assertEquals(listOf("", ""), DepthRecordSchema.workVoltageColumns(runtime.channel(0), expired).take(2))
+    }
+
+    @Test fun workVoltageColumnsAreAppendedOnlyToTheDepthGroup() {
+        val recorder = MyWriteSaveFun()
+        val expected = listOf("ds_u_filt_mv", "ds_u_mean_mv", "ds_flags", "ds_seq", "ds_cfg_crc", "ds_quality")
+        assertEquals(expected, recorder.buildSaveHeader(includeFert = true, includeDepth = true).takeLast(6))
+        assertEquals(expected, recorder.buildSaveHeader(includeFert = false, includeDepth = true).takeLast(6))
+        assertFalse(recorder.buildSaveHeader(includeFert = true, includeDepth = false).any { it in expected })
     }
 
     @Test fun csvEscapingPreservesChineseStageAndQuotedFields() {
@@ -53,6 +85,7 @@ class DepthRecordSchemaTest {
         assertEquals(3, parsed["configuration_history"].asJsonArray.size())
         val channels = parsed["channels"].asJsonArray
         assertEquals(1, channels[0].asJsonObject["filter_params_readback"].asJsonObject["rankN"].asInt)
+        assertEquals("UNCALIBRATED", channels[0].asJsonObject["calibration_source"].asString)
         assertTrue(channels[1].asJsonObject["filter_params_readback"].isJsonNull)
         assertTrue(channels[1].asJsonObject["report_ms"].isJsonNull)
         assertEquals(0.2f, parsed["quality_monitor_parameters"].asJsonObject["cv_threshold"].asFloat, 0f)

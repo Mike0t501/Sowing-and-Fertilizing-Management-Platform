@@ -3,6 +3,7 @@ package com.nx.vfremake.funClass
 
 import com.google.gson.Gson
 import com.nx.vfremake.data.DepthNodeChannel
+import com.nx.vfremake.data.DepthNodeVoltageUnit
 
 /** 仅包含标定和地址；实际滤波参数必须重新回读，不能从缓存假定生效。 */
 object DepthNodeStorage {
@@ -13,7 +14,8 @@ object DepthNodeStorage {
         val fitOrder: Int = 2, val c0: Double = 0.0, val c1: Double = 0.0, val c2: Double = 0.0,
         val fitValid: Boolean = false, val maxResidualMm: Float = 0f,
         val calibratedAt: String = "", val offsetTrimMm: Float = 0f, val zeroCheckedAt: String = "",
-        val stopLoMv: Int = 0, val stopHiMv: Int = 0
+        val stopLoMv: Int = 0, val stopHiMv: Int = 0,
+        val linearVoltageUnit: DepthNodeVoltageUnit? = null
     )
     data class Point(val mv: Float, val mm: Float)
 
@@ -21,7 +23,8 @@ object DepthNodeStorage {
     fun saved(channel: DepthNodeChannel): Saved = Saved(channel.baseId,
         channel.calibrationPoints.map { Point(it.first, it.second) }, channel.calibrationStdMv,
         channel.fitOrder, channel.c0, channel.c1, channel.c2, channel.fitValid, channel.fitMaxResidualMm,
-        channel.calibratedAt, channel.offsetTrimMm, channel.zeroCheckedAt, channel.stopLoMv, channel.stopHiMv)
+        channel.calibratedAt, channel.offsetTrimMm, channel.zeroCheckedAt, channel.stopLoMv, channel.stopHiMv,
+        channel.linearVoltageUnit)
 
     /** SharedPreferences 中每行一个 dn_N_calibration JSON，不写入运行时字段。 */
     fun encode(channel: DepthNodeChannel): String = gson.toJson(saved(channel))
@@ -37,7 +40,14 @@ object DepthNodeStorage {
         require(value.stdMv.all { it.isFinite() && it >= 0 })
         require(value.stopLoMv in 0..5000 && value.stopHiMv in 0..5000 && value.offsetTrimMm.isFinite())
         require(value.maxResidualMm.isFinite() && value.maxResidualMm >= 0)
-        require(!value.fitValid || value.points.size >= if (value.fitOrder == 1) 3 else 4)
+        val unit = value.linearVoltageUnit
+        if (unit == null) {
+            require(!value.fitValid || value.points.size >= if (value.fitOrder == 1) 3 else 4)
+        } else {
+            require(value.fitValid && value.fitOrder == 1 && value.c2 == 0.0 && value.points.isEmpty() && value.stdMv.isEmpty())
+            require(value.calibratedAt.isNotBlank() && (value.c1 * unit.mvPerUnit).isFinite() &&
+                DepthNodeCalib.isValidLinear(value.c1, value.c0, value.offsetTrimMm))
+        }
         apply(value, DepthNodeChannel(row))
     }.getOrElse { DepthNodeChannel(row) }
 
@@ -48,6 +58,6 @@ object DepthNodeStorage {
         c0 = saved.c0, c1 = saved.c1, c2 = saved.c2, fitValid = saved.fitValid,
         fitMaxResidualMm = saved.maxResidualMm, calibratedAt = saved.calibratedAt,
         offsetTrimMm = saved.offsetTrimMm, zeroCheckedAt = saved.zeroCheckedAt,
-        stopLoMv = saved.stopLoMv, stopHiMv = saved.stopHiMv
+        stopLoMv = saved.stopLoMv, stopHiMv = saved.stopHiMv, linearVoltageUnit = saved.linearVoltageUnit
     )
 }

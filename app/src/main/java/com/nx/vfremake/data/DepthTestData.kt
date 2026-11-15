@@ -1,5 +1,7 @@
 package com.nx.vfremake.data
 
+import kotlin.math.ceil
+
 /**
  * 一键播种深度性能测试配置
  *
@@ -35,7 +37,40 @@ data class DepthTestConfig(
     val positionSpeed: Int,
     val acceleration: Int,
     val recordIntervalMs: Long = 100L
-)
+) {
+    companion object {
+        private const val MAX_STAGES = 1000
+
+        /** 界面预览和实际控制共享同一往返序列，末级不足整步时仍包含终点。 */
+        fun stageDepths(start: Float, end: Float, step: Float): List<Float> {
+            if (!start.isFinite() || !end.isFinite() || !step.isFinite() ||
+                start < 0f || start >= end || step < 1f
+            ) return emptyList()
+            val steps = ceil((end.toDouble() - start) / step)
+            if (steps > (MAX_STAGES - 1) / 2) return emptyList()
+            val outward = List(steps.toInt()) { (start.toDouble() + it * step.toDouble()).toFloat() }
+                .filter { it < end }.distinct() + end
+            return outward + outward.asReversed().drop(1)
+        }
+    }
+}
+
+enum class DepthTestPhase { IDLE, PREPARING, MOVING, DWELL, TIMEOUT, STOPPING, ABORTED, FAILED, COMPLETE }
+
+data class DepthTrialFix(
+    val fixAtMs: Long,
+    val antennaLongitude: Double,
+    val antennaLatitude: Double,
+    val rowLongitude: Double?,
+    val rowLatitude: Double?,
+    val simulated: Boolean
+) {
+    fun ageAt(nowMs: Long): Long? = (nowMs - fixAtMs).takeIf { it in 0..MAX_AGE_MS }
+
+    companion object {
+        const val MAX_AGE_MS = 2500L
+    }
+}
 
 /**
  * 性能测试实时状态（DepthTestCoroutine postValue → DepthTestScreen observe）
@@ -59,5 +94,6 @@ data class DepthTestStatus(
     val stageLabel: String = "",
     val targetDepth: Float = 0f,
     val message: String = "",
-    val anomalies: List<String> = emptyList()
+    val anomalies: List<String> = emptyList(),
+    val phase: DepthTestPhase = DepthTestPhase.IDLE,
 )

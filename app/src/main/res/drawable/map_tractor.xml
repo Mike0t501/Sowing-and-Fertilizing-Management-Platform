@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="34dp" android:height="42dp"
+    android:viewportWidth="34" android:viewportHeight="42">
+    <!-- 轮胎和车身共用外轮廓，浅色描边在处方图上也清晰。 -->
+    <path android:fillColor="#202E3A" android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.4" android:strokeLineJoin="round"
+        android:pathData="M17,1.6 C13.7,1.6 11.2,3 10.6,6.1 L10.1,8.4 H7.1 Q4.6,8.4 4.6,11 V18 Q4.6,20.2 7,20.2 H9.5 V22.2 H6.2 Q2,22.2 2,26.2 V35 Q2,39.2 6.2,39.2 H11.7 L14.3,37.2 H19.7 L22.3,39.2 H27.8 Q32,39.2 32,35 V26.2 Q32,22.2 27.8,22.2 H24.5 V20.2 H27 Q29.4,20.2 29.4,18 V11 Q29.4,8.4 26.9,8.4 H23.9 L23.4,6.1 C22.8,3 20.3,1.6 17,1.6 Z" />
+    <path android:fillColor="#00000000" android:strokeColor="#566A79"
+        android:strokeWidth="1.1" android:strokeLineCap="round"
+        android:pathData="M6.4,12.1 H9 M6.4,15 H9 M6.4,17.9 H9 M25,12.1 H27.6 M25,15 H27.6 M25,17.9 H27.6 M4.1,26 H8 M4.1,29.4 H8 M4.1,32.8 H8 M4.1,36.2 H8 M26,26 H29.9 M26,29.4 H29.9 M26,32.8 H29.9 M26,36.2 H29.9" />
+    <path android:fillColor="#2469BB" android:strokeColor="#102D51"
+        android:strokeWidth="0.8" android:strokeLineJoin="round"
+        android:pathData="M17,3.5 C14.1,3.5 12.2,4.9 12,7.2 L10.8,20 L8.7,24.4 V34.3 L12,36 H22 L25.3,34.3 V24.4 L23.2,20 L22,7.2 C21.8,4.9 19.9,3.5 17,3.5 Z" />
+    <path android:fillColor="#5A9DE0"
+        android:pathData="M17,4.4 Q13.4,4.4 13,7.4 L12.4,15.9 L17,18.1 L21.6,15.9 L21,7.4 Q20.6,4.4 17,4.4 Z" />
+    <path android:fillColor="#E7F7FF"
+        android:pathData="M13.3,7.1 L15.4,5.9 L15.2,8.5 H13.1 Z M20.7,7.1 L18.6,5.9 L18.8,8.5 H20.9 Z" />
+    <path android:fillColor="#B8DFF5" android:strokeColor="#194677"
+        android:strokeWidth="1" android:strokeLineJoin="round"
+        android:pathData="M12.7,20.3 Q17,18.4 21.3,20.3 L23,23.9 V30.8 Q17,34.1 11,30.8 V23.9 Z" />
+    <path android:fillColor="#5C94BA"
+        android:pathData="M13,21.9 Q17,20.3 21,21.9 L22,24 H12 Z M12.4,29.4 H21.6 L21.1,31 Q17,32.8 12.9,31 Z" />
+    <path android:fillColor="#E3F4FF"
+        android:pathData="M14.4,25.4 H19.6 Q20.4,25.4 20.4,26.2 V27.3 Q20.4,28.1 19.6,28.1 H14.4 Q13.6,28.1 13.6,27.3 V26.2 Q13.6,25.4 14.4,25.4 Z" />
+    <path android:fillColor="#173956"
+        android:pathData="M15.3,35.3 H18.7 V38.3 L17,40.3 L15.3,38.3 Z" />
+</vector>

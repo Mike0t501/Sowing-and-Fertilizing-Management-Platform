@@ -45,7 +45,8 @@ data class ServoCalibration(
     val isEnabled: Boolean = false,       // 驱动器是否已使能
     val isOnline: Boolean = false,        // 是否在线（最近收到心跳或 TPDO）
     val alarmCode: Int = SERVO_ALARM_NONE, // 见 SERVO_ALARM_*；由状态字/SDO 接收路径更新
-    val lastHeardMs: Long = 0L            // CanReceiveCoroutine 最后收到该电机任意 CAN 帧的时间戳（ms）
+    val lastHeardMs: Long = 0L,           // 最后收到该电机任意 CAN 帧的系统时间
+    val positionAtMs: Long = 0L           // 最近一帧位置反馈的单调时间，心跳不会刷新
 )
 
 /**
@@ -78,7 +79,28 @@ data class SowingDepthState(
      * true  → 协程对在线电机执行 DS402 初始化，并按 motors[i].targetDepth 下发位置命令；
      * false → 已初始化的电机会被 Shutdown，禁止接收新指令。
      */
-    val masterEnabled: Boolean = false
+    val masterEnabled: Boolean = false,
+    val configuredRowTargetsMm: Map<Int, Float> = emptyMap(),
+    val depthPrescription: DepthPrescriptionTargets = DepthPrescriptionTargets()
+) {
+    /** 主界面使用作业目标，标定和性能测试继续使用自己的伺服目标。 */
+    fun depthTargetMm(row: Int, usePrescription: Boolean): Float? {
+        val motor = motors.getOrNull(row) ?: return null
+        if (!usePrescription) return motor.targetDepth.takeIf { it.isFinite() }
+        val target = when (depthPrescription.source) {
+            DepthPrescriptionSource.FIXED -> configuredRowTargetsMm[row] ?: globalTargetDepth
+            DepthPrescriptionSource.PRESCRIPTION -> depthPrescription.depthsMm.getOrNull(row)
+            else -> null
+        }
+        return target?.takeIf { it.isFinite() && it > 0f }
+    }
+}
+
+enum class DepthPrescriptionSource { FIXED, LOADING, UNAVAILABLE, MISSING_FIELD, PRESCRIPTION }
+
+data class DepthPrescriptionTargets(
+    val source: DepthPrescriptionSource = DepthPrescriptionSource.FIXED,
+    val depthsMm: List<Float?> = emptyList()
 )
 
 enum class CalibrationMode { DIRECT, INDIRECT }
@@ -165,32 +187,26 @@ val ServoCalibration.deepDirection: Int
     get() = limitMax.compareTo(limitMin)
 
 /**
- * 控深就绪诊断：返回阻止处方图深度命令下发的首要原因（人类可读），全部就绪返回 null。
+ * 控深就绪诊断：返回阻止位置命令下发的首要原因，全部就绪返回 null。
  *
  * 仅读状态、无副作用，供主界面在按「开始」后做一次性提示。
- * 优先级：处方图侧（未加载/深度字段缺失——电机只会停在种子深度、永不跟图，
- * 田间排查最隐蔽，故排最前）> 电机侧，电机侧与
+ * 固定播深直接检查电机，处方图播深先检查数据源。电机侧与
  * [com.nx.vfremake.coroutine.SowingDepthCoroutine] 的门控顺序一致：
  *   无任何在线（Phase1/2/4 全跳过）> 在线但限位未标定（Phase4 b）> 在线但拟合无效（Phase4 c）。
  *
- * @param mapLoaded            处方图 FeatureTable 是否已加载（shapefileFeatureTable != null）
- * @param depthFieldOk         全局 depthQueryField 是否非空（loadShp 已验证字段存在于 shp）
  * @param configuredDepthField 用户配置的深度字段名，仅用于拼提示文案
  */
 fun SowingDepthState.depthControlReadinessWarning(
     rowNumber: Int = 8,
     activeMotors: BooleanArray? = null,
-    mapLoaded: Boolean = true,
-    depthFieldOk: Boolean = true,
     configuredDepthField: String = ""
 ): String? {
-    if (!mapLoaded) {
-        return "处方图未加载，深度不会随处方图变化。\n" +
-            "请先在主界面加载 .shp 处方图后再开始作业。"
-    }
-    if (!depthFieldOk) {
-        return "处方图中未找到播种深度字段「$configuredDepthField」，深度不会随处方图变化。\n" +
-            "请在处方图设置对话框第 3 步选择正确的深度字段（电机只会保持当前目标深度）。"
+    when (depthPrescription.source) {
+        DepthPrescriptionSource.LOADING -> return "正在加载播深处方图，等待加载完成后下发深度目标。"
+        DepthPrescriptionSource.UNAVAILABLE -> return "播深处方图加载失败。请重新导入，或移除播深处方图以使用设定深度。"
+        DepthPrescriptionSource.MISSING_FIELD -> return "处方图中未找到播种深度字段「$configuredDepthField」。\n" +
+            "请在处方图设置中选择正确的深度字段。"
+        DepthPrescriptionSource.FIXED, DepthPrescriptionSource.PRESCRIPTION -> Unit
     }
     val activeIndices = activeSowingDepthMotorIndices(rowNumber, activeMotors)
     if (activeIndices.isEmpty()) {
@@ -198,14 +214,14 @@ fun SowingDepthState.depthControlReadinessWarning(
     }
     val online = activeIndices.mapNotNull { motors.getOrNull(it) }.filter { it.isOnline }
     if (online.isEmpty()) {
-        return "处方图控深已开启，但未检测到任何深度伺服在线（CAN 节点 11–18 无心跳/TPDO）。\n" +
+        return "播深作业已开启，但未检测到任何深度伺服在线（CAN 节点 11–18 无心跳/TPDO）。\n" +
             "已发送 NMT 广播，但因无电机在线，未下发任何位置命令。\n" +
             "请检查：①伺服供电与 CAN 接线 ②CAN 波特率是否匹配 ③节点 ID 是否为 11–18。"
     }
     val notCalibrated = online.filter { !it.limitsSet || !it.fitValid }
     if (notCalibrated.isNotEmpty()) {
         val list = notCalibrated.joinToString("、") { "${it.motorIndex + 1}号" }
-        return "深度电机 $list 在线但未完成标定（限位/拟合），处方图深度命令已被忽略。\n" +
+        return "深度电机 $list 在线但未完成标定（限位/拟合），当前无法下发深度目标。\n" +
             "请先在「播种深度标定」页完成限位标定与深度拟合后再开始。"
     }
     return null

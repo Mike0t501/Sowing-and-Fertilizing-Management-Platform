@@ -2,6 +2,7 @@
 package com.nx.vfremake
 
 import com.nx.vfremake.data.DepthNodeChannel
+import com.nx.vfremake.data.DepthNodeVoltageUnit
 import com.nx.vfremake.funClass.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -62,5 +63,49 @@ class DepthCalibrationFitTest {
         assertTrue(DepthNodeCalibIoFun.decode(json.replace("0.025", "0.125")).isFailure)
         assertTrue(DepthNodeCalibIoFun.decode(json.replace("\"version\": 1", "\"version\": 2")).isFailure)
         assertTrue(abs(DepthNodeCalib.derivative(2000f, applied) - 0.025) < 1e-9)
+    }
+
+    @Test fun externalUnitsNormalizeAndKeepPerRowStateOnRestoreAndImport() {
+        val at = "2026-11-09T00:00:00Z"
+        val original = DepthNodeChannel(1, offsetTrimMm = 5f, zeroCheckedAt = at, stopLoMv = 500)
+        val fromV = DepthNodeCalib.withLinearCoefficients(original, 20.0, -10.0, DepthNodeVoltageUnit.V, at)
+        val fromMv = DepthNodeCalib.withLinearCoefficients(original, 0.02, -10.0, DepthNodeVoltageUnit.MV, at)
+        assertEquals(40f, DepthNodeCalib.depthFromMv(2500f, fromV)!!, 0f)
+        assertEquals(fromV.c1, fromMv.c1, 0.0)
+        assertEquals(0f, fromV.offsetTrimMm, 0f)
+        assertEquals("", fromV.zeroCheckedAt)
+        assertEquals(500, fromV.stopLoMv)
+        assertTrue(fromV.calibrationPoints.isEmpty())
+
+        val stored = DepthNodeStorage.encode(fromV)
+        assertEquals(fromV, DepthNodeStorage.decode(stored, 1))
+        assertFalse(DepthNodeStorage.decode(stored, 0).fitValid)
+        val json = DepthNodeCalibIoFun.encode(fromV, "3.1.0", at)
+        val file = DepthNodeCalibIoFun.decode(json).getOrThrow()
+        assertEquals(2, file.version)
+        val target = DepthNodeChannel(4, isOnline = true, uFiltMv = 2500f)
+        val restored = DepthNodeCalibIoFun.apply(file, target)
+        assertEquals(target.baseId, restored.baseId)
+        assertEquals(DepthNodeVoltageUnit.V, restored.linearVoltageUnit)
+        assertTrue(restored.isOnline)
+        assertEquals(40f, DepthNodeCalib.depthFromMv(restored.uFiltMv!!, restored)!!, 0f)
+        assertTrue(DepthNodeCalibIoFun.decode(json.replace("\"version\": 2", "\"version\": 1")).isFailure)
+        assertTrue(DepthNodeCalibIoFun.decode(json.replace("\"c2\": 0.0", "\"c2\": 0.1")).isFailure)
+    }
+
+    @Test fun externalCalibrationAcceptsNegativeSlopeAndRejectsNonfiniteZeroAndOverflow() {
+        val channel = DepthNodeChannel(0)
+        val calibrated = DepthNodeCalib.withLinearCoefficients(channel, -20.0, 90.0, DepthNodeVoltageUnit.V, "now")
+        assertEquals(40f, DepthNodeCalib.depthFromMv(2500f, calibrated)!!, 0f)
+        for ((a, b) in listOf(0.0 to 1.0, Double.NaN to 1.0, 1.0 to Double.POSITIVE_INFINITY, 1e39 to 0.0)) {
+            assertTrue(runCatching { DepthNodeCalib.withLinearCoefficients(channel, a, b, DepthNodeVoltageUnit.MV, "now") }.isFailure)
+        }
+    }
+
+    @Test fun externalCoefficientAcceptsChineseKeyboardSignsAndDigits() {
+        assertEquals(-10.0, DepthNodeCalib.parseCoefficient(" －１０ ")!!, 0.0)
+        assertEquals(-0.02, DepthNodeCalib.parseCoefficient("−０．０２")!!, 0.0)
+        assertEquals(0.02, DepthNodeCalib.parseCoefficient("2e-2")!!, 0.0)
+        assertNull(DepthNodeCalib.parseCoefficient(""))
     }
 }

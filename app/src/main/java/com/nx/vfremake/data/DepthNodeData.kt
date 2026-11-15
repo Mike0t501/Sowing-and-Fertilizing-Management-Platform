@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicReference
 /** 质量按优先级排列；0 深度合法，只有 OK 才提供可用深度。 */
 enum class DepthNodeQuality { OFFLINE, FAULT, OUT_OF_RANGE, SETTLING, UNCALIBRATED, OK }
 enum class DepthDisplayMode { HALF_CM, ONE_MM }
+enum class DepthNodeVoltageUnit(val label: String, val mvPerUnit: Double) { MV("mV", 1.0), V("V", 1000.0) }
 enum class DepthEventType { SHALLOW, DEEP, LIFT_OFF, UNSTABLE }
 data class DepthQualityStatus(val events: Set<DepthEventType> = emptySet(), val windowReady: Boolean = false,
     val passRate: Float? = null, val coefficientOfVariation: Float? = null, val distanceWindow: Boolean = false)
@@ -55,7 +56,7 @@ data class DepthNodeChannel(
     val fitValid: Boolean = false, val fitMaxResidualMm: Float = 0f,
     val calibratedAt: String = "", val offsetTrimMm: Float = 0f, val zeroCheckedAt: String = "",
     val stopLoMv: Int = 0, val stopHiMv: Int = 0,
-    // 以下字段均为运行时，不落盘；未曾收到 STATUS 与 elapsed=0 必须能区分。
+    // isOnline 至 configError 为运行时字段；未曾收到 STATUS 与 elapsed=0 必须能区分。
     val isOnline: Boolean = false, val hasStatus: Boolean = false, val lastHeardMs: Long = 0,
     val seq: Int? = null, val lostFrames: Long = 0, val receivedFrames: Long = 0,
     val lossRate10s: Float = 0f,
@@ -70,7 +71,8 @@ data class DepthNodeChannel(
     val bootCount: Int = 0,
     val reportMs: Int = 50, val parameterWords: Map<Int, Long> = emptyMap(),
     val filterParams: DepthNodeFilterParams? = null, val configReadAtMs: Long? = null,
-    val configError: String? = null
+    val configError: String? = null,
+    val linearVoltageUnit: DepthNodeVoltageUnit? = null // 外部系数的输入单位，空值表示无外部系数。
 ) {
     val versionCompatible: Boolean get() = icdVer == null || icdVer ushr 4 == P.ICD_VERSION ushr 4
 }

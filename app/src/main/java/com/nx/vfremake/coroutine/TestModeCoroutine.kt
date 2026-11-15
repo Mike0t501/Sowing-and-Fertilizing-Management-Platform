@@ -1,7 +1,6 @@
 package com.nx.vfremake.coroutine
 
 import android.content.Context
-import androidx.compose.runtime.MutableState
 import com.nx.vfremake.R
 import com.nx.vfremake.fittingCoefficientA
 import com.nx.vfremake.fittingCoefficientB
@@ -30,7 +29,7 @@ class TestModeCoroutine {
         isRunning = false
     }
 
-    fun start(context: Context, isRunningState: MutableState<Boolean>) {
+    fun start(context: Context, onFinished: () -> Unit) {
         // 【修复】：每次启动重建 scope，防止上次因异常取消的 scope 导致 launch 永远无效
         scope = CoroutineScope(Dispatchers.Default)
         var elapsedTime = 0L
@@ -47,8 +46,8 @@ class TestModeCoroutine {
             (MySharedPreFun(context).getSpecificValue(R.string.testMode_testSendMode_name))
                 ?: context.getString(R.string.testMode_testSendMode_defeatValue)
 
+        isRunning = true
         jobs.add(scope.launch {
-            isRunning = true
             while (elapsedTime < testModeDurationTime) {
                 delay(200) // 每200毫秒发送一次数据
                 elapsedTime += 200
@@ -82,7 +81,7 @@ class TestModeCoroutine {
                 )
             }
             shutdown()
-            isRunningState.value = false
+            onFinished()
         })
     }
 }

@@ -7,7 +7,8 @@ import com.nx.vfremake.data.DepthNodeChannel
 import com.nx.vfremake.data.DepthQualityStatus
 
 data class MeasuredDepthSample(val depthMm: Float?, val rawDepthMm: Float?, val quality: DepthNodeQuality,
-    val ageMs: Long, val spanMm: Float? = null, val monitoring: DepthQualityStatus = DepthQualityStatus())
+    val ageMs: Long, val spanMm: Float? = null, val monitoring: DepthQualityStatus = DepthQualityStatus(),
+    val uFiltMv: Float? = null, val uMeanMv: Float? = null, val voltageFlags: Int = 0)
 
 /** 只读检测节点，禁止用伺服换算值回退成所谓实测深度。 */
 class MeasuredDepthFacade(private val state: () -> DepthNodeState, private val nowMs: () -> Long) {
@@ -17,8 +18,10 @@ class MeasuredDepthFacade(private val state: () -> DepthNodeState, private val n
             ?: return MeasuredDepthSample(null, null, DepthNodeQuality.OFFLINE, Long.MAX_VALUE)
         val now = nowMs()
         val fresh = DepthNodeRuntime.refresh(channel, now)
+        val voltage = fresh.takeIf { it.isOnline && it.versionCompatible }
         return MeasuredDepthSample(fresh.depthMm, fresh.depthRawMm, fresh.quality,
             if (fresh.hasStatus) (now - fresh.lastHeardMs).coerceAtLeast(0) else Long.MAX_VALUE, fresh.spanMm,
-            if (fresh.quality in setOf(DepthNodeQuality.OK, DepthNodeQuality.OUT_OF_RANGE)) fresh.monitoring else DepthQualityStatus())
+            if (fresh.quality in setOf(DepthNodeQuality.OK, DepthNodeQuality.OUT_OF_RANGE)) fresh.monitoring else DepthQualityStatus(),
+            voltage?.uFiltMv?.takeIf { it.isFinite() }, voltage?.uMeanMv?.takeIf { it.isFinite() }, voltage?.flags ?: 0)
     }
 }

@@ -63,6 +63,19 @@ class DepthQualityServiceTest {
         assertTrue(recording.drain().isEmpty())
     }
 
+    @Test fun newCalibrationResetsTheRowAndDropsSamplesQueuedWithTheOldCurve() {
+        warm(); step(2100, 20f); step(2400, 20f)
+        val queued = runtime.channel(0)
+        assertTrue(DepthEventType.SHALLOW in facade.forRow(0).monitoring.events)
+        service.updateCalibration(0) { it.copy(c0 = it.c0 + 20) }
+        val changed = facade.forRow(0)
+        assertEquals(40f, changed.depthMm!!, 0f)
+        assertEquals(DepthQualityStatus(), changed.monitoring)
+        service.accept(queued)
+        step(2500, 20f)
+        assertEquals(DepthQualityStatus(), facade.forRow(0).monitoring)
+    }
+
     @Test fun wallClockChangesCannotMakeNegativeEventDuration() {
         val event = DepthQualityEvent(0, DepthEventType.LIFT_OFF, 1000, 1500, 10000, 5000,
             null, 0f, 3f, 40f, "RECOVERED")

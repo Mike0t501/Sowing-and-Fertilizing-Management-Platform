@@ -28,6 +28,8 @@ import java.time.Instant
 import java.util.Locale
 import kotlin.math.roundToInt
 
+private val defaultNodeCalibrationHeights = listOf("0", "20", "40", "60", "80", "100")
+
 /** 仅本区管理节点标定；不发送伺服运动命令，也不写targetDepth。 */
 @Composable
 internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: Int) {
@@ -35,18 +37,21 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
     val scope = rememberCoroutineScope()
     val state by viewModel.depthNodeState.observeAsState(DepthNodeState())
     val recording by viewModel.depthRecordingState.observeAsState(false)
+    val working by viewModel.workRunning.observeAsState(false)
+    val trialActive by viewModel.depthTrialActive.observeAsState(false)
     val channel = state.channels[row]
+    val measurement = viewModel.measuredDepthFacade.forRow(row, channel)
     val session = remember(viewModel) { DepthNodeCalibrationSession(viewModel.depthNodeRuntime) }
     val heights = remember(row) { mutableStateListOf<String>().also { list ->
-        if (channel.calibrationPoints.isEmpty()) list.addAll(listOf("0", "20", "40", "60", "80", "100"))
+        if (channel.calibrationPoints.isEmpty()) list.addAll(defaultNodeCalibrationHeights)
         else list.addAll(channel.calibrationPoints.map { it.second.toString() })
     } }
     val captures = remember(row) { mutableStateMapOf<Int, DepthCalibrationFit.Capture>().also { map ->
         channel.calibrationPoints.forEachIndexed { i, point -> map[i] = DepthCalibrationFit.Capture(
             point.first, channel.calibrationStdMv.getOrNull(i) ?: Float.NaN, 0) }
     } }
-    var order by remember(row) { mutableStateOf(channel.fitOrder) }
-    var fit by remember(row) { mutableStateOf(if (channel.fitValid)
+    var order by remember(row) { mutableStateOf(if (channel.linearVoltageUnit == null) channel.fitOrder else 2) }
+    var fit by remember(row) { mutableStateOf(if (channel.fitValid && channel.linearVoltageUnit == null)
         DepthCalibrationFit.fit(channel.calibrationPoints, channel.fitOrder).getOrNull() else null) }
     var busy by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf("") }
@@ -55,10 +60,14 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
     var stopA by remember { mutableStateOf<Float?>(null) }
     var stopB by remember { mutableStateOf<Float?>(null) }
     var pendingImport by remember { mutableStateOf<DepthNodeCalibIoFun.FileDto?>(null) }
-    val canCapture = channel.isOnline && channel.versionCompatible && channel.quality != DepthNodeQuality.FAULT && !busy && !recording
+    var confirmPointFit by remember(row) { mutableStateOf(false) }
+    val locked = recording || working || trialActive || !viewModel.canEditDepthNodeCalibration()
+    val canCapture = !busy && !locked && measurement.quality !in setOf(DepthNodeQuality.OFFLINE, DepthNodeQuality.FAULT)
 
-    fun action(block: suspend () -> Unit) {
-        if (viewModel.isDepthRecording()) { notice = "请先停止记录，再修改标定"; return }
+    fun action(requiresIdle: Boolean = true, block: suspend () -> Unit) {
+        if (requiresIdle && !viewModel.canEditDepthNodeCalibration()) {
+            notice = "请先停止作业、试验和记录，再修改标定"; return
+        }
         busy = true; notice = "处理中…"
         scope.launch {
             try { block() }
@@ -68,12 +77,7 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
         }
     }
 
-    fun persist(updater: (DepthNodeChannel) -> DepthNodeChannel) {
-        val now = viewModel.depthNodeRuntime.nowMs()
-        viewModel.updateDepthNodeChannel(row) { DepthNodeRuntime.refresh(updater(it), now) }
-        if (!viewModel.currentDepthNodeState().simulated) MySharedPreFun(context)
-            .saveDepthNodeCalibration(viewModel.currentDepthNodeState().channels[row])
-    }
+    fun persist(updater: (DepthNodeChannel) -> DepthNodeChannel) = viewModel.saveDepthNodeCalibration(context, row, updater)
 
     fun points(): List<Pair<Float, Float>> = captures.toSortedMap().map { (index, capture) ->
         val height = heights[index].toFloatOrNull()
@@ -81,8 +85,20 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
         capture.meanMv to height
     }
 
+    fun savePointFit() = action {
+        val result = checkNotNull(fit)
+        val ps = points()
+        val deviations = captures.toSortedMap().values.map { it.stdMv }
+        val stampedAt = Instant.now().toString()
+        persist { it.copy(calibrationPoints = ps, calibrationStdMv = deviations,
+            fitOrder = result.order, c0 = result.c0, c1 = result.c1, c2 = result.c2,
+            fitValid = true, fitMaxResidualMm = result.maxResidualMm, linearVoltageUnit = null,
+            calibratedAt = stampedAt, offsetTrimMm = 0f, zeroCheckedAt = "") }
+        notice = "检测节点标定已保存"; viewModel.depthNodeSimulator?.holdDepth(row, null)
+    }
+
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) action {
+        if (uri != null) action(requiresIdle = false) {
             val json = DepthNodeCalibIoFun.encode(viewModel.currentDepthNodeState().channels[row], BuildConfig.VERSION_NAME, Instant.now().toString())
             withContext(Dispatchers.IO) {
                 checkNotNull(context.contentResolver.openOutputStream(uri)) { "无法创建标定文件" }
@@ -105,12 +121,13 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
     Card(Modifier.fillMaxWidth(), elevation = 2.dp) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("步骤3：检测节点标定", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            if (recording) Text("记录进行中，请停止记录后修改标定。", color = Color.Red, fontSize = 18.sp)
-            Text("第${row + 1}行 · 基址 0x${channel.baseId.toString(16).uppercase()} · ${DepthDisplayFormat.qualityLabel(channel.quality)}",
+            if (locked) Text("请先停止作业、试验和记录，再修改标定。", color = Color.Red, fontSize = 18.sp)
+            Text("第${row + 1}行 · 基址 0x${channel.baseId.toString(16).uppercase()} · ${DepthDisplayFormat.qualityLabel(measurement.quality)}",
                 color = if (canCapture) Color(0xFF237A35) else Color(0xFFC62828), fontSize = 18.sp)
             Text("节点输出传感器端子电压。摆臂、传感器和节点需成套重新标定；不使用旧编码器标定。", fontSize = 16.sp)
-            Text("滤波 ${channel.uFiltMv?.let { "%.1f".format(Locale.ROOT, it) } ?: "--"} mV · 周期均值 ${channel.uMeanMv?.let { "%.1f".format(Locale.ROOT, it) } ?: "--"} mV · 极差 ${channel.spanMv ?: "--"} mV", fontSize = 18.sp)
-            if (!channel.isOnline) Text("节点离线：检查接线和地址；未配号设备请先到设置页“播深检测节点管理”。", color = Color.Red, fontSize = 16.sp)
+            DepthVoltageReadout(measurement, showMean = true, fontSize = 18.sp)
+            Text("周期极差 ${voltageText(channel.spanMv.takeIf { measurement.quality != DepthNodeQuality.OFFLINE && channel.versionCompatible })}", fontSize = 18.sp)
+            if (measurement.quality == DepthNodeQuality.OFFLINE) Text("节点离线：检查接线和地址；未配号设备请先到设置页“播深检测节点管理”。", color = Color.Red, fontSize = 16.sp)
             if (state.simulated) Text("测试模式：采点时按该挡块高度保持模拟信号；标定仅保存在本次模拟会话，不覆盖真实标定。", color = Color(0xFF9C6500), fontSize = 16.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 listOf(1, 2).forEach { degree -> OutlinedButton(enabled = !busy, onClick = { order = degree; fit = null }) {
@@ -151,15 +168,8 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
                         fit = result; notice = "拟合完成，请核对残差并使用独立挡块验证"
                     } catch (e: Exception) { fit = null; notice = e.message ?: "拟合失败" }
                 }) { Text("计算拟合", fontSize = 16.sp) }
-                Button(enabled = !busy && !recording && fit != null, onClick = {
-                    val result = fit ?: return@Button
-                    val ps = points(); val deviations = captures.toSortedMap().values.map { it.stdMv }
-                    val stampedAt = Instant.now().toString()
-                    persist { it.copy(calibrationPoints = ps, calibrationStdMv = deviations,
-                        fitOrder = result.order, c0 = result.c0, c1 = result.c1, c2 = result.c2,
-                        fitValid = true, fitMaxResidualMm = result.maxResidualMm,
-                        calibratedAt = stampedAt, offsetTrimMm = 0f, zeroCheckedAt = "") }
-                    notice = "检测节点标定已保存"; viewModel.depthNodeSimulator?.holdDepth(row, null)
+                Button(enabled = !busy && !locked && fit != null, onClick = {
+                    if (channel.linearVoltageUnit != null) confirmPointFit = true else savePointFit()
                 }) { Text("保存标定", fontSize = 16.sp) }
             }
             fit?.let { result ->
@@ -168,14 +178,19 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
                     color = if (result.maxResidualMm <= 2f) Color(0xFF237A35) else Color.Red)
                 Text("各点残差(mm)：" + result.residualsMm.joinToString(" / ") { "%.3f".format(Locale.ROOT, it) }, fontSize = 16.sp)
             }
-            if (channel.fitValid) Text("已保存：${channel.fitOrder}次 · 最大残差${channel.fitMaxResidualMm}mm · ${channel.calibratedAt}", fontSize = 16.sp)
+            if (channel.fitValid) {
+                val equation = externalLinearEquation(channel)
+                val summary = if (equation != null) "外部系数 · $equation"
+                    else "${channel.fitOrder}次 · 最大残差${channel.fitMaxResidualMm}mm"
+                Text("已保存：$summary · ${channel.calibratedAt}", fontSize = 16.sp)
+            }
             Divider()
             Text("② 独立验证点（不参与拟合）", fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(verifyInput, { verifyInput = it }, label = { Text("验证挡块mm") }, singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.width(180.dp))
                 val expected = verifyInput.toFloatOrNull()
-                val measured = viewModel.measuredDepthFacade.forRow(row).rawDepthMm
+                val measured = if (channel.linearVoltageUnit == null) measurement.rawDepthMm else measurement.depthMm
                 Text("验证误差：" + (if (expected != null && measured != null) "%+.2f mm".format(Locale.ROOT, measured - expected) else "--"), fontSize = 20.sp)
                 if (state.simulated) OutlinedButton(enabled = !busy, onClick = {
                     runCatching { viewModel.depthNodeSimulator?.holdDepth(row, verifyInput.toFloat()) }.onFailure { notice = "验证高度须为0–100mm" }
@@ -191,8 +206,13 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
                     viewModel.depthNodeSimulator?.holdDepth(row, expected)
                     val capture = session.capture(row)
                     val stampedAt = Instant.now().toString()
-                    persist { current -> current.copy(offsetTrimMm = current.offsetTrimMm + expected -
-                        requireNotNull(DepthNodeCalib.depthFromMv(capture.meanMv, current)), zeroCheckedAt = stampedAt) }
+                    persist { current ->
+                        val trim = current.offsetTrimMm + expected - requireNotNull(DepthNodeCalib.depthFromMv(capture.meanMv, current))
+                        require(trim.isFinite() && (current.linearVoltageUnit == null || DepthNodeCalib.isValidLinear(current.c1, current.c0, trim))) {
+                            "零点修正超出数值范围"
+                        }
+                        current.copy(offsetTrimMm = trim, zeroCheckedAt = stampedAt)
+                    }
                     notice = "零点偏移已更新"; viewModel.depthNodeSimulator?.holdDepth(row, null)
                 } }) { Text("采集并修正", fontSize = 16.sp) }
                 Text("当前修正：%.2f mm".format(Locale.ROOT, channel.offsetTrimMm), fontSize = 16.sp)
@@ -225,7 +245,7 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
                 OutlinedButton(enabled = !busy && channel.fitValid, onClick = {
                     exportLauncher.launch("depthNodeCalib_row${row + 1}.json")
                 }) { Text("导出节点标定JSON", fontSize = 16.sp) }
-                OutlinedButton(enabled = !busy && !recording, onClick = { importLauncher.launch(arrayOf("application/json", "text/*")) }) {
+                OutlinedButton(enabled = !busy && !locked, onClick = { importLauncher.launch(arrayOf("application/json", "text/*")) }) {
                     Text("导入节点标定JSON", fontSize = 16.sp)
                 }
                 if (state.simulated) OutlinedButton(enabled = !busy, onClick = {
@@ -236,15 +256,21 @@ internal fun DepthNodeCalibrationSection(viewModel: VariableFertViewModel, row: 
             if (notice.isNotEmpty()) Text(notice, fontSize = 18.sp, color = Color(0xFF37474F))
         }
     }
+    if (confirmPointFit) AlertDialog(onDismissRequest = { confirmPointFit = false },
+        title = { Text("确认替换第${row + 1}行外部系数") },
+        text = { Text("将应用多点标定，清除旧零点修正，并重新开始质量统计。", fontSize = 16.sp) },
+        confirmButton = { TextButton(enabled = !locked && !busy, onClick = { confirmPointFit = false; savePointFit() }) { Text("确认保存") } },
+        dismissButton = { TextButton(onClick = { confirmPointFit = false }) { Text("取消") } })
     pendingImport?.let { file -> AlertDialog(onDismissRequest = { pendingImport = null },
         title = { Text("导入检测节点标定") },
         text = { Text("将来源第${(file.sourceRow ?: 0) + 1}行的标定应用到第${row + 1}行，保留目标地址。\n导入只恢复平板标定；节点止点需要重新写入。") },
-        confirmButton = { TextButton(onClick = {
+        confirmButton = { TextButton(enabled = !locked && !busy, onClick = { action {
             persist { DepthNodeCalibIoFun.apply(file, it) }
             val saved = viewModel.currentDepthNodeState().channels[row]
-            heights.clear(); heights.addAll(saved.calibrationPoints.map { it.second.toString() })
+            heights.clear(); heights.addAll(saved.calibrationPoints.map { it.second.toString() }.ifEmpty { defaultNodeCalibrationHeights })
             captures.clear(); saved.calibrationPoints.forEachIndexed { i, point -> captures[i] =
                 DepthCalibrationFit.Capture(point.first, saved.calibrationStdMv[i], 0) }
-            order = saved.fitOrder; fit = null; pendingImport = null; notice = "节点标定已导入"
-        }) { Text("确认导入") } }, dismissButton = { TextButton(onClick = { pendingImport = null }) { Text("取消") } }) }
+            order = if (saved.linearVoltageUnit == null) saved.fitOrder else 2
+            fit = null; pendingImport = null; notice = "节点标定已导入"
+        } }) { Text("确认导入") } }, dismissButton = { TextButton(onClick = { pendingImport = null }) { Text("取消") } }) }
 }

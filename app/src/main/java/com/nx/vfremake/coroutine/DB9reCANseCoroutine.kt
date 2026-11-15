@@ -1,16 +1,23 @@
 package com.nx.vfremake.coroutine
 
+import android.serialport.SerialPort
+import com.nx.vfremake.data.DepthTrialFix
+import java.io.File
+
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.geometry.SpatialReferences
 import com.esri.arcgisruntime.mapping.view.GraphicsOverlay
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.funClass.ConvAndCtrlFun
 import com.nx.vfremake.funClass.MyArcGisFun
 import com.nx.vfremake.funClass.MyGNSSFun
 import com.nx.vfremake.funClass.MySharedPreFun
 import com.nx.vfremake.funClass.RmcData
+import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mRmcData
 import com.nx.vfremake.mSPParamData
 import com.nx.vfremake.mSerialPortDB9
@@ -24,6 +31,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -38,6 +47,8 @@ import kotlin.random.Random
  * @note   我有一些值的初始化放在类里了，因为协程类我一般都是先初始化，不会lateinit或者null
  */
 class DB9reCANseCoroutine {
+    private data class TrialLocationSession(val row: Int, val simulated: Boolean, val rmc: RmcData = RmcData())
+    private var trialLocation: TrialLocationSession? = null
     // 因为我在Mainactivity顶层类里初始化DB9reCANseCoroutine()，可以这么写
     // 固定按最大行数 8 分配，避免运行中机型行数增大时下标越界（rowNumber 上限为 8）
     private val polyPointExport = Array(8) { arrayOfNulls<Point>(4) }
@@ -49,7 +60,7 @@ class DB9reCANseCoroutine {
     private val drawnCells = Array(8) { HashSet<Long>() }
 
     // 绘制图形需要持续调用函数，这个得放函数外面，才可以持续 add(Graphic)
-    private val navMarkGraphicsOverlay = GraphicsOverlay() // 该图层只用于navMark，因为每次更新需要清除图层，便于管理
+    private val navMarkGraphicsOverlay = GraphicsOverlay() // 拖拉机和补偿点复用图层
     // 已施肥区域图层：作业期间持续累积多边形（从不清除）。用 STATIC 渲染模式——ArcGIS 对大量静态
     // 图形以后台线程缓存渲染、按需批量刷新，避免 DYNAMIC 每帧重绘上万个多边形拖垮渲染线程（田间
     // 实测约 10 分钟后卡死 ANR 的主因）。
@@ -59,11 +70,15 @@ class DB9reCANseCoroutine {
     // 定义一个协程作用域，保存作业引用的HashSet，以便于管理
     private var scope = CoroutineScope(Dispatchers.Default)
     private val jobs = HashSet<Job>()
+    private var currentViewModel: VariableFertViewModel? = null
+    private val fixRevision = AtomicLong()
 
     // 开始标志位
     var isRunning = false
 
     companion object {
+        private const val GNSS_FIX_TIMEOUT_MS = 2500L
+
         // 绘制去重网格边长（米）：处方图渔网 2.4×4m，2m 量化既够细腻又与之相称。落笔按此网格去重，
         // 使已施肥多边形数量只与「实际驶过的网格数」相关，与 RMC 频率、车速、作业时长、重叠压线均无关，
         // 配合 STATIC 渲染从根本上消除长时间作业多边形无界累积导致的卡死/崩溃问题。
@@ -87,33 +102,106 @@ class DB9reCANseCoroutine {
 
     fun shutdown() {
         scope.cancel() // 取消整个作用域，包括任何卡在 read() 里的 job
+        currentViewModel?.let { clearGnssFix(it) }
+        currentViewModel = null
         jobs.clear()
         drawnCells.forEach { it.clear() } // 释放去重集，下次作业从空覆盖开始
         isRunning = false
     }
 
+    private fun startGnssSession(viewModel: VariableFertViewModel) {
+        scope = CoroutineScope(Dispatchers.Default)
+        currentViewModel = viewModel
+        clearGnssFix(viewModel)
+        if (trialLocation == null) mRmcData.directionAvailable = false
+        drawnCells.forEach { it.clear() }
+    }
+
+    private fun clearGnssFix(viewModel: VariableFertViewModel, stopFertilizer: Boolean = false) {
+        trialLocation?.let { trial ->
+            trial.rmc.lastFixAtMs = 0
+            trial.rmc.speedBufCount = 0
+            trial.rmc.speedBufHead = 0
+            trial.rmc.directionAvailable = false
+            viewModel.updateDepthTrialLocation(null)
+            return
+        }
+        val hadFix = mRmcData.lastFixAtMs != 0L
+        fixRevision.incrementAndGet()
+        mRmcData.lastFixAtMs = 0L
+        mRmcData.status = ""
+        mRmcData.speedBufCount = 0
+        mRmcData.speedBufHead = 0
+        mRmcData.forwardSpeed = 0.0
+        mRmcData.forwardSpeedCalculate = 0.0
+        mRmcData.gnssRawSpeed = 0.0
+        viewModel.loLaDidegData.postValue(null)
+        viewModel.gnssIsGood.postValue(true)
+        viewModel.forwardspeed.postValue(0.0)
+        viewModel.depthRowPositions.postValue(emptyList())
+        viewModel.dantiLLGeo.postValue(null)
+        viewModel.drawLLGeo.postValue(null)
+        viewModel.invalidateDepthPrescriptionLocation()
+        polyPointExport.forEach { it.fill(null) }
+        if (hadFix && stopFertilizer && isSystemRunning && viewModel.depthPrescriptionMode.value != true) {
+            for (row in 0 until mSPParamData.rowNumber) {
+                if (!isSystemRunning) break
+                ConvAndCtrlFun().motorSpeedrpmSend(0.0, row)
+            }
+            viewModel.fertApplied.postValue(DoubleArray(mSPParamData.rowNumber))
+        }
+    }
+
+    /** 试验单独接收定位，不写作业定位、处方目标或 CAN。 */
+    fun startTrial(context: Context, viewModel: VariableFertViewModel, row: Int, simulated: Boolean) {
+        trialLocation = TrialLocationSession(row, simulated)
+        if (simulated) start1Simulated(context, viewModel) else start1(context, viewModel)
+    }
+
+    suspend fun stopTrialAndJoin() {
+        val running = jobs.toList()
+        shutdown()
+        running.forEach { it.join() }
+    }
+
+    private fun openTrialGnssPort(context: Context): SerialPort? {
+        val preferences = MySharedPreFun(context)
+        val port = preferences.getSpecificValue(R.string.serial_db9_port_name)
+            ?: context.getString(R.string.serial_db9_port_defValue)
+        val canPort = preferences.getSpecificValue(R.string.serial_can_port_name)
+            ?: context.getString(R.string.serial_can_port_defValue)
+        if (port.isBlank() || port == canPort) return null
+        val baud = preferences.getSpecificValue(R.string.serial_db9_baud_name)?.toIntOrNull() ?: 230400
+        return try {
+            SerialPort(File("/dev/$port"), baud)
+        } catch (e: Exception) {
+            Log.w("DepthTrialGnss", "定位串口无法打开", e)
+            null
+        }
+    }
 
     fun start1(
         context: Context,
         mVariableFertViewModel: VariableFertViewModel
     ) {
-        // 每次启动创建新的 scope，防止旧 scope 已 cancel 导致无法 launch
-        scope = CoroutineScope(Dispatchers.Default)
-        // 重置速度滑动窗口，避免上次运行的残留速度值影响本次冷启动
-        mRmcData.speedBufCount = 0
-        mRmcData.speedBufHead = 0
-        // 清空绘制去重集，新作业从空覆盖重新开始落笔
-        drawnCells.forEach { it.clear() }
+        startGnssSession(mVariableFertViewModel)
 
         // 在协程作用域内启动协程
-        jobs.add(scope.launch {
-            val inputStreamDB9 = mSerialPortDB9?.inputStream
+        jobs.add(scope.launch(Dispatchers.IO) {
+            val rmc = trialLocation?.rmc ?: mRmcData
+            val existingPort = mSerialPortDB9
+            val ownedPort = if (trialLocation != null && existingPort == null) openTrialGnssPort(context) else null
             try {
+                val inputStreamDB9 = (existingPort ?: ownedPort)?.inputStream
                 val buffer = ByteArray(80)  // 根据语句长度调整缓冲区大小
                 var bytesRead: Int
                 val sb = StringBuilder()
 
                 while (isActive) {
+                    val lastFix = rmc.lastFixAtMs
+                    if (lastFix != 0L && SystemClock.elapsedRealtime() - lastFix > GNSS_FIX_TIMEOUT_MS) {
+                        clearGnssFix(mVariableFertViewModel, stopFertilizer = true)
+                    }
                     if (inputStreamDB9 == null || withContext(Dispatchers.IO) { inputStreamDB9.available() } == 0) {
                         // 如果CAN输入流没有消息，休息10ms停止执行后续代码，重新while
                         delay(10)
@@ -121,6 +209,7 @@ class DB9reCANseCoroutine {
                     }
                     try {
                         bytesRead = withContext(Dispatchers.IO) { inputStreamDB9.read(buffer) }
+                        if (bytesRead < 0) break
                         // 将读取的数据转换为String并添加到StringBuilder中，sb会自动拼接字符，粘包后解析sb
                         sb.append(String(buffer, 0, bytesRead))
 
@@ -133,7 +222,7 @@ class DB9reCANseCoroutine {
                                 Log.d("GNSS", line)
                                 // 兜底：任何单条坏报文/越界等异常都不得杀死控制协程；CancellationException 须放行
                                 try {
-                                    onGNSSMsgReceived(line, context, mVariableFertViewModel)
+                                    onGNSSMsgReceived(line, context, mVariableFertViewModel) { isActive }
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (t: Throwable) {
@@ -151,6 +240,11 @@ class DB9reCANseCoroutine {
                 e.printStackTrace()
             } catch (e: InterruptedException) {
                 e.printStackTrace()
+            } finally {
+                try { ownedPort?.tryClose() } catch (e: IOException) {
+                    Log.w("DepthTrialGnss", "定位串口关闭失败", e)
+                }
+                if (isActive) clearGnssFix(mVariableFertViewModel, stopFertilizer = true)
             }
         })
         isRunning = true
@@ -170,16 +264,12 @@ class DB9reCANseCoroutine {
         context: Context,
         mVariableFertViewModel: VariableFertViewModel
     ) {
-        // 与真实 start1 一致：每次启动重建 scope，重置速度滑动窗口
-        scope = CoroutineScope(Dispatchers.Default)
-        mRmcData.speedBufCount = 0
-        mRmcData.speedBufHead = 0
-        drawnCells.forEach { it.clear() }
+        startGnssSession(mVariableFertViewModel)
 
         // 十进制度 → RMC 的「度分」格式（纬度2位度 / 经度3位度），沿用旧实现
         fun decimalToRMCFormat(coordinate: Double, isLatitude: Boolean): String {
-            val degrees = coordinate.toInt()
-            val minutes = (coordinate - degrees) * 60
+            val degrees = abs(coordinate).toInt()
+            val minutes = (abs(coordinate) - degrees) * 60
             return if (isLatitude) {
                 String.format(Locale.US, "%02d%07.4f", degrees, minutes)
             } else {
@@ -224,6 +314,13 @@ class DB9reCANseCoroutine {
         val tickS = interval / 1000.0
         val totalSteps = max(1, ceil(distM / (vMps * tickS)).toInt())
         val speedKnots = speedKmh / 1.852
+        val lat1 = Math.toRadians(startLat)
+        val lat2 = Math.toRadians(endLat)
+        val lonDelta = Math.toRadians(endLon - startLon)
+        val course = (Math.toDegrees(atan2(
+            sin(lonDelta) * cos(lat2),
+            cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(lonDelta)
+        )) + 360.0) % 360.0
 
         Log.i(
             "DB9reCANseCoroutine",
@@ -241,14 +338,17 @@ class DB9reCANseCoroutine {
 
                     val line = String.format(
                         Locale.US,
-                        "\$GPRMC,171012.000,A,%s,N,%s,E,%.3f,10.7068,151216,,D*49",
+                        "\$GPRMC,171012.000,A,%s,%s,%s,%s,%.3f,%.4f,151216,,D*49",
                         decimalToRMCFormat(currentLat, true),
+                        if (currentLat < 0.0) "S" else "N",
                         decimalToRMCFormat(currentLon, false),
-                        speedKnots
+                        if (currentLon < 0.0) "W" else "E",
+                        speedKnots,
+                        course,
                     )
                     Log.d("GNSS", line)
                     try {
-                        onGNSSMsgReceived(line, context, mVariableFertViewModel)
+                        onGNSSMsgReceived(line, context, mVariableFertViewModel) { isActive }
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (t: Throwable) {
@@ -257,6 +357,7 @@ class DB9reCANseCoroutine {
                     delay(interval)
                 }
             } while (loop && isActive)
+            if (isActive) clearGnssFix(mVariableFertViewModel, stopFertilizer = true)
         })
         isRunning = true
     }
@@ -271,42 +372,91 @@ class DB9reCANseCoroutine {
     private fun onGNSSMsgReceived(
         gnssString: String,
         context: Context,
-        mVariableFertViewModel: VariableFertViewModel
+        mVariableFertViewModel: VariableFertViewModel,
+        isRunActive: () -> Boolean,
     ) {
-        // 解析RMC
-        MyGNSSFun().extractAndParseRMC(
+        if (!isRunActive()) return
+        val trial = trialLocation
+        val rmc = trial?.rmc ?: mRmcData
+        val valid = MyGNSSFun().extractAndParseRMC(
             gnssSentence = gnssString,
             forwardSpeed = mSPParamData.forwardSpeed,
-            mRmcData = mRmcData,
-            mVariableFertViewModel = mVariableFertViewModel,
+            mRmcData = rmc,
             context = context
         )
+        if (!isRunActive()) return
+        if (!valid) {
+            if (rmc.lastFixAtMs != 0L) clearGnssFix(mVariableFertViewModel, stopFertilizer = true)
+            return
+        }
+        val fixAt = SystemClock.elapsedRealtime()
+        rmc.lastFixAtMs = fixAt
+        if (trial != null) {
+            val antenna = Point(rmc.longitude, rmc.latitude, SpatialReferences.getWgs84())
+            val rowPoint = if (rmc.directionAvailable) runCatching {
+                MyArcGisFun().depthRowPositions(antenna, rmc.directionDeg, mSPParamData).getOrNull(trial.row)
+            }.getOrNull() else null
+            if (isRunActive() && mVariableFertViewModel.isDepthTrialActive()) {
+                mVariableFertViewModel.updateDepthTrialLocation(
+                    DepthTrialFix(fixAt, antenna.x, antenna.y, rowPoint?.x, rowPoint?.y, trial.simulated)
+                )
+            }
+            return
+        }
+        val revision = fixRevision.get()
         mVariableFertViewModel.rtkEverReceived = true
+        mVariableFertViewModel.gnssIsGood.postValue(false)
+        mVariableFertViewModel.loLaDidegData.postValue(
+            Triple(mRmcData.longitude, mRmcData.latitude, mRmcData.directionDeg)
+        )
+        mVariableFertViewModel.forwardspeed.postValue(mRmcData.forwardSpeedCalculate)
 
+        val arcGis = MyArcGisFun()
         val point = Point(mRmcData.longitude, mRmcData.latitude, SpatialReferences.getWgs84())
+        val isSameFix = { isRunActive() && revision == fixRevision.get() && mRmcData.lastFixAtMs == fixAt }
+        if (mVariableFertViewModel.depthPrescriptionMode.value == true) {
+            val heading = mRmcData.directionDeg
+            val lagMeters = mRmcData.forwardSpeed * mSPParamData.lagTime / 3.6
+            val compensatedAntenna = if (mRmcData.directionAvailable) {
+                arcGis.offsetGeographicPosition(point, heading, lagMeters)
+            } else point
+            arcGis.addMarkerToMap(mRmcData, compensatedAntenna, navMarkGraphicsOverlay,
+                mVariableFertViewModel, context, isSameFix)
+            if (!mRmcData.directionAvailable || !isSameFix()) return
+            val rowPositions = arcGis.depthRowPositions(point, heading, mSPParamData)
+            val targetPositions = if (lagMeters == 0.0) rowPositions
+                else arcGis.depthRowPositions(point, heading, mSPParamData, lagMeters)
+            if (!isSameFix()) return
+            mVariableFertViewModel.depthRowPositions.postValue(rowPositions.asList())
+            mVariableFertViewModel.dantiLLGeo.postValue(rowPositions)
+            arcGis.queryDepthTargets(targetPositions, mVariableFertViewModel)
+            return
+        }
 
         // 位置补偿
-        val wgsCompensatedPoint = MyArcGisFun().calculateCompensatedPosition(
-            pointXY = MyArcGisFun().doProjection(point),
+        val wgsCompensatedPoint = arcGis.calculateCompensatedPosition(
+            pointXY = arcGis.doProjection(point),
             forwardspeed = mRmcData.forwardSpeed,
             directionRad = mRmcData.directionRad,
             lagTime = mSPParamData.lagTime
         )
 
         // 添加当前位置图标
-        MyArcGisFun().addMarkerToMap(
+        arcGis.addMarkerToMap(
             mRmcData = mRmcData,
-            pointCompensationLLGeo = MyArcGisFun().doGeographic(wgsCompensatedPoint),
+            pointCompensationLLGeo = arcGis.doGeographic(wgsCompensatedPoint),
             navMarkGraphicsOverlay = navMarkGraphicsOverlay,
             mVariableFertViewModel = mVariableFertViewModel,
-            context = context
+            context = context,
+            isCurrentFix = isSameFix,
         )
         // 计算单体位置生成并发送控制信息
-        val pointi = MyArcGisFun().dantiPositionAndCtrl(
+        val pointi = arcGis.dantiPositionAndCtrl(
             pointXY = wgsCompensatedPoint,
             directionRad = mRmcData.directionRad,
             mSPParamData = mSPParamData,
-            mVariableFertViewModel = mVariableFertViewModel
+            mVariableFertViewModel = mVariableFertViewModel,
+            isGnssActive = { isRunActive() && revision == fixRevision.get() },
         )
 
         //...测试用
@@ -341,7 +491,7 @@ class DB9reCANseCoroutine {
         // 停车/低速门控：近零速时 RTK 航向角不可靠，幅宽横排会绕定位点旋转，逐帧缝合会把
         // 条形带画成发散的圆疙瘩。此时暂停绘制——polyPointExport 保持上次末端不变，恢复前进后
         // 下一次绘制自然从"上次末端 → 新位置"桥接续上，无空洞；同时避免停车时图层无限累积退化四边形。
-        // 控制逻辑（dantiPositionAndCtrl 的施肥/控深下发）已在前面照常运行，这里只门控绘制。
+        // 施肥指令已在前面处理，这里只门控绘制。
         val fertApplied = mVariableFertViewModel.fertApplied.value
         // 绘制去重：每单体只在首次进入某网格（~DRAW_GRID_M 米）时落笔。原绘制频率与 RMC 频率挂钩，
         // 高频/慢速时同一处堆叠上万个多边形，约 10 分钟拖垮地图渲染导致卡死；即便按里程抽稀，反复压线/
