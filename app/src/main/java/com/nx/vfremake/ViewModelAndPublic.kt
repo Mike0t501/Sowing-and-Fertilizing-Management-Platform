@@ -14,23 +14,44 @@
  */
 package com.nx.vfremake
 
+import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
 import android.serialport.SerialPort
 import androidx.activity.result.ActivityResultLauncher
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.nx.vfremake.data.DepthNodeState
+import com.nx.vfremake.data.DepthNodeChannel
+import com.nx.vfremake.data.DepthNodeStateStore
+import com.nx.vfremake.data.DepthPrescriptionSource
+import com.nx.vfremake.data.DepthPrescriptionTargets
+import com.nx.vfremake.funClass.DepthNodeStorage
+import com.nx.vfremake.funClass.DepthNodeRuntime
+import com.nx.vfremake.funClass.DepthNodeCfgClient
+import com.nx.vfremake.funClass.DepthNodeSimulator
+import com.nx.vfremake.funClass.CanOpenFun
+import com.nx.vfremake.funClass.MeasuredDepthFacade
+import com.nx.vfremake.funClass.DepthBusTrafficMeter
+import com.nx.vfremake.funClass.DepthNodeManagement
+import com.nx.vfremake.funClass.DepthQualityService
+import com.nx.vfremake.funClass.MySharedPreFun
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import com.esri.arcgisruntime.data.ShapefileFeatureTable
 import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.layers.FeatureLayer
 import com.esri.arcgisruntime.mapping.ArcGISMap
 import com.esri.arcgisruntime.mapping.view.GraphicsOverlay
-import com.nx.vfremake.data.EncoderCalibration
-import com.nx.vfremake.data.EncoderFeedbackState
 import com.nx.vfremake.data.ServoCalibration
 import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.funClass.RmcData
 import com.nx.vfremake.funClass.SPParamData
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 // ax+b
@@ -98,6 +119,7 @@ class CustomViewModel : ViewModel() {
 
 // 地图有关的viewmodel（彻底修复了嵌套类问题）
 class VariableFertViewModel : ViewModel() {
+    val workRunning = MutableLiveData(false)
     val activeMotorsState = MutableLiveData<BooleanArray>()
     val mArcGISMap = MutableLiveData<ArcGISMap>() // ArcGISMap
     val shapefileFeatureLayer = MutableLiveData<FeatureLayer>()
@@ -121,9 +143,11 @@ class VariableFertViewModel : ViewModel() {
 
     // 字段列表，更换处方图使用
     val fieldsList = MutableLiveData<List<String>>()
+    val prescriptionDraftPath = MutableLiveData<String?>()
 
     val dantiLLGeo = MutableLiveData<Array<Point>>() // 单体地理坐标
     val drawLLGeo = MutableLiveData<Array<Point>>() // 单体地理坐标
+    val depthRowPositions = MutableLiveData<List<Point>>(emptyList()) // 当前播种单体中心，无滞后补偿
 
     val monfertflow = MutableLiveData<DoubleArray>() // 监测施肥量monitor
     val monAdcV = MutableLiveData<DoubleArray>() // 监测电压
@@ -183,8 +207,8 @@ class VariableFertViewModel : ViewModel() {
     //
     // 线程模型（田间缺陷修复：处方图深度写入被并发覆盖丢失）：
     //   sowingDepthStateRef 是唯一真源，所有写入经 mutateSowingDepthState 做 CAS 原子更新；
-    //   sowingDepthState LiveData 仅作 Compose UI 投影。写入方有 ArcGIS 查询回调（每条 RMC
-    //   n 路 targetDepth）、CanReceiveCoroutine 接收线程（高频位置/在线状态）、SowingDepthCoroutine，
+    //   sowingDepthState LiveData 仅作 Compose UI 投影。写入方有 ArcGIS 查询回调（处方目标）、
+    //   CanReceiveCoroutine 接收线程（高频位置/在线状态）、SowingDepthCoroutine，
     //   旧实现「读 value + postValue」会互相用陈旧快照覆盖，模拟GNSS高频RMC下地图深度几乎必丢。
     //   后台读取方一律用 currentSowingDepthState()，不要读 sowingDepthState.value（postValue 存在
     //   主线程刷新延迟，读到的是旧快照）。
@@ -206,18 +230,24 @@ class VariableFertViewModel : ViewModel() {
             val updated = transform(current)
             if (updated === current) return
             if (sowingDepthStateRef.compareAndSet(current, updated)) {
-                sowingDepthState.postValue(updated)
+                synchronized(sowingDepthStateRef) {
+                    sowingDepthState.postValue(sowingDepthStateRef.get())
+                }
                 return
             }
         }
     }
 
-    // 处方图控深模式开关：不持久化，启动默认 false。
-    // ON → dantiPositionAndCtrl 每条 RMC 把地图深度写入各电机 targetDepth。
+    // 主界面作业模式，独立于是否加载了播深处方图。
     val depthPrescriptionMode = MutableLiveData(false)
 
-    // 最近一次从处方图读到的各电机深度(mm)，仅供 UI 显示，-1 表示无效/未读
-    val mapDepthApplied = MutableLiveData<FloatArray>()
+    class DepthPrescriptionQuery internal constructor(internal val id: Long, internal val fixAtMs: Long)
+
+    private val depthPrescriptionLock = Any()
+    private val depthPrescriptionFixTimeoutMs = 3_000L
+    private var depthPrescriptionQueryId = 0L
+    private var lastAcceptedDepthQueryId = 0L
+    private var lastDepthPrescriptionFixAtMs: Long? = null
 
     // 控深「未下发原因」一次性提示；主界面 observe 后弹窗，消费后置 null。
     val depthControlNotice = MutableLiveData<String?>(null)
@@ -227,10 +257,80 @@ class VariableFertViewModel : ViewModel() {
 
     // 一键深度性能测试实时状态；null=从未运行。DepthTestCoroutine postValue，DepthTestScreen 观察。
     val depthTestStatus = MutableLiveData<com.nx.vfremake.data.DepthTestStatus?>(null)
+    private val depthTrialFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+    val depthTrialActive = MutableLiveData(false)
+    private val depthTrialFix = java.util.concurrent.atomic.AtomicReference<com.nx.vfremake.data.DepthTrialFix?>()
+    val depthTrialLocation = MutableLiveData<com.nx.vfremake.data.DepthTrialFix?>()
 
-    /** 切换处方图控深模式（数据源开关，与 [updateMasterEnabled] 的使能门控相互独立）。 */
+    fun isDepthTrialActive(): Boolean = depthTrialFlag.get()
+
+    @Synchronized fun tryBeginDepthTrial(): Boolean {
+        if (workRunning.value == true || isSystemRunning || isDepthRecording() ||
+            !depthTrialFlag.compareAndSet(false, true)
+        ) return false
+        depthTrialActive.postValue(true)
+        return true
+    }
+
+    fun endDepthTrial() {
+        updateDepthTrialLocation(null)
+        depthTrialFlag.set(false)
+        depthTrialActive.postValue(false)
+    }
+
+    fun updateDepthTrialLocation(fix: com.nx.vfremake.data.DepthTrialFix?) {
+        depthTrialFix.set(fix)
+        depthTrialLocation.postValue(fix)
+    }
+
+    fun currentDepthTrialLocation(): com.nx.vfremake.data.DepthTrialFix? = depthTrialFix.get()
+
+    /** 主界面在停止作业时可切换作业模式。 */
     fun setDepthPrescriptionMode(enabled: Boolean) {
-        depthPrescriptionMode.postValue(enabled)
+        if (workRunning.value == true || isSystemRunning || depthPrescriptionMode.value == enabled) return
+        invalidateDepthPrescriptionLocation()
+        depthPrescriptionMode.value = enabled
+    }
+
+    /** 地图加载或清除使所有在途查询失效。 */
+    fun setDepthPrescriptionSource(source: DepthPrescriptionSource) = synchronized(depthPrescriptionLock) {
+        lastAcceptedDepthQueryId = depthPrescriptionQueryId
+        lastDepthPrescriptionFixAtMs = null
+        mutateSowingDepthState { state ->
+            val targets = DepthPrescriptionTargets(source)
+            if (targets == state.depthPrescription) state else state.copy(depthPrescription = targets)
+        }
+    }
+
+    fun beginDepthPrescriptionQuery(): DepthPrescriptionQuery? = synchronized(depthPrescriptionLock) {
+        if (!isSystemRunning || depthPrescriptionMode.value != true ||
+            currentSowingDepthState().depthPrescription.source != DepthPrescriptionSource.PRESCRIPTION
+        ) return@synchronized null
+        DepthPrescriptionQuery(++depthPrescriptionQueryId, SystemClock.elapsedRealtime())
+    }
+
+    /** 发布整组行目标，防止较慢的旧帧覆盖新帧。 */
+    fun publishDepthPrescriptionQuery(query: DepthPrescriptionQuery, depthsMm: List<Float?>) =
+        synchronized(depthPrescriptionLock) {
+            if (!isSystemRunning || depthPrescriptionMode.value != true || query.id <= lastAcceptedDepthQueryId ||
+                SystemClock.elapsedRealtime() - query.fixAtMs >= depthPrescriptionFixTimeoutMs
+            ) return@synchronized
+            lastAcceptedDepthQueryId = query.id
+            lastDepthPrescriptionFixAtMs = query.fixAtMs
+            mutateSowingDepthState { state ->
+                val targets = state.depthPrescription.copy(depthsMm = depthsMm)
+                if (targets == state.depthPrescription) state else state.copy(depthPrescription = targets)
+            }
+        }
+
+    /** 定位无效、停止或重新开始时撤销处方目标，直到收到新的有效位置。 */
+    fun invalidateDepthPrescriptionLocation() = synchronized(depthPrescriptionLock) {
+        lastAcceptedDepthQueryId = depthPrescriptionQueryId
+        lastDepthPrescriptionFixAtMs = null
+        mutateSowingDepthState { state ->
+            if (state.depthPrescription.depthsMm.isEmpty()) state
+            else state.copy(depthPrescription = state.depthPrescription.copy(depthsMm = emptyList()))
+        }
     }
 
     /**
@@ -261,6 +361,32 @@ class VariableFertViewModel : ViewModel() {
                 if (idx in newMotors.indices) newMotors[idx] = updater(newMotors[idx])
             }
             current.copy(motors = newMotors)
+        }
+    }
+
+    fun setConfiguredDepthTarget(row: Int, depthMm: Float) {
+        if (!depthMm.isFinite() || depthMm <= 0f) return
+        mutateSowingDepthState { state ->
+            if (row !in state.motors.indices) return@mutateSowingDepthState state
+            state.copy(
+                motors = state.motors.mapIndexed { index, motor ->
+                    if (index == row) motor.copy(targetDepth = depthMm) else motor
+                },
+                configuredRowTargetsMm = state.configuredRowTargetsMm + (row to depthMm)
+            )
+        }
+    }
+
+    fun setConfiguredGlobalDepth(depthMm: Float, activeRows: List<Int>) {
+        if (!depthMm.isFinite() || depthMm <= 0f) return
+        mutateSowingDepthState { state ->
+            state.copy(
+                motors = state.motors.mapIndexed { row, motor ->
+                    if (row in activeRows) motor.copy(targetDepth = depthMm) else motor
+                },
+                globalTargetDepth = depthMm,
+                configuredRowTargetsMm = emptyMap()
+            )
         }
     }
 
@@ -340,72 +466,130 @@ class VariableFertViewModel : ViewModel() {
         }
     }
 
-    // ====== 摆臂编码器实测播深反馈状态 ======
-    // 线程模型与 sowingDepthStateRef 完全一致：AtomicReference 唯一真源 + CAS 更新 +
-    // LiveData 仅作 Compose 投影。写入方为 CanReceiveCoroutine 接收线程（8 路 × 50ms TPDO）
-    // 与标定/配置 UI；后台读取一律用 currentEncoderFeedbackState()，禁止读
-    // encoderFeedbackState.value（postValue 主线程刷新滞后，读到旧快照）。
-    private val encoderFeedbackStateRef =
-        java.util.concurrent.atomic.AtomicReference(EncoderFeedbackState())
-    val encoderFeedbackState = MutableLiveData(encoderFeedbackStateRef.get())
+    // ====== 检测节点：实时原子真源 + 最多 10Hz 界面投影 ======
+    val depthNodeStore = DepthNodeStateStore()
+    val depthNodeState = MutableLiveData(depthNodeStore.current())
+    val depthNodeRuntime = DepthNodeRuntime(depthNodeStore, nowMs = { android.os.SystemClock.elapsedRealtime() })
+    val measuredDepthFacade = MeasuredDepthFacade({ currentDepthNodeState() }, depthNodeRuntime.nowMs)
+    val depthBusTrafficMeter = DepthBusTrafficMeter()
+    @Volatile var depthNodeSimulator: DepthNodeSimulator? = null
+        private set
+    private var realDepthNodeSnapshot: DepthNodeState? = null
+    private val depthRecordingFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+    val depthRecordingState = MutableLiveData(false)
 
-    /** 后台协程/回调读取编码器反馈状态的唯一入口：始终返回最新原子快照。 */
-    fun currentEncoderFeedbackState(): EncoderFeedbackState = encoderFeedbackStateRef.get()
+    /** 配置和标定页据此避免在记录期间改变标定/预设。 */
+    fun isDepthRecording(): Boolean = depthRecordingFlag.get()
 
-    /**
-     * 对 [encoderFeedbackStateRef] 做 CAS 原子更新并投影到 LiveData。
-     * transform 返回原引用视为无变更（同值短路），不触发 LiveData。
-     * CAS 失败会重试，transform 必须是纯函数（调用方全部用 copy()）。
-     */
-    private fun mutateEncoderFeedbackState(transform: (EncoderFeedbackState) -> EncoderFeedbackState) {
-        while (true) {
-            val current = encoderFeedbackStateRef.get()
-            val updated = transform(current)
-            if (updated === current) return
-            if (encoderFeedbackStateRef.compareAndSet(current, updated)) {
-                encoderFeedbackState.postValue(updated)
-                return
+    /** 手动记录和一键测试共享一个记录租约，不能同时创建两套未关联文件。 */
+    @Synchronized fun tryBeginDepthRecording(): Boolean {
+        val acquired = depthRecordingFlag.compareAndSet(false, true)
+        if (acquired) depthRecordingState.postValue(true)
+        return acquired
+    }
+
+    /** 记录器完成文件收尾后才释放，避免后一会话接管尚未落盘的文件。 */
+    fun endDepthRecording() { depthRecordingFlag.set(false); depthRecordingState.postValue(false) }
+    val depthNodeClient = DepthNodeCfgClient(depthNodeRuntime, send = { frame ->
+        val bridge = CanOpenFun.wrapCanFrame(frame.canId, frame.data)
+        val simulator = depthNodeSimulator
+        if (simulator != null) CanOpenFun.sendFrameSequenced(bridge) { simulator.command(frame) }
+        else CanOpenFun.sendFrameSequenced(bridge)
+    })
+    val depthNodeManagement = DepthNodeManagement(depthNodeRuntime, depthNodeClient)
+    val depthQualityService = DepthQualityService(depthNodeStore, measuredDepthFacade, depthNodeRuntime.nowMs,
+        { System.currentTimeMillis() }, { row ->
+            val state = currentSowingDepthState()
+            val useWorkTarget = depthPrescriptionMode.value == true && (isSystemRunning || !state.masterEnabled)
+            state.depthTargetMm(row, useWorkTarget) ?: Float.NaN
+        }, {
+            if (depthPrescriptionMode.value == true && isSystemRunning) {
+                val fixAtMs = mRmcData.lastFixAtMs
+                mRmcData.gnssRawSpeed.takeIf {
+                    fixAtMs > 0L && SystemClock.elapsedRealtime() - fixAtMs < depthPrescriptionFixTimeoutMs &&
+                        it.isFinite() && it >= 0.0
+                }
+            } else {
+                mSPParamData.forwardSpeed.takeIf { it.isFinite() && it >= 0 }
+                    ?: if (mRmcData.status in listOf("A", "D"))
+                        mRmcData.forwardSpeedCalculate.takeIf { it.isFinite() && it >= 0 } else null
+            }
+        })
+
+    /** 模拟会话跨页面保留；真实标定隔离，关闭测试模式后恢复。 */
+    @Synchronized
+    fun configureDepthNodeSimulation(enabled: Boolean) {
+        if (enabled && depthNodeSimulator == null) {
+            realDepthNodeSnapshot = currentDepthNodeState()
+            depthNodeStore.update { DepthNodeState(displayMode = it.displayMode, qualityConfig = it.qualityConfig, simulated = true) }
+            depthNodeRuntime.resetTracking()
+            depthQualityService.reset()
+            depthNodeSimulator = DepthNodeSimulator(
+                emit = { depthNodeRuntime.onDepthNodeFrame(it.canId, it.data) },
+                nowMs = depthNodeRuntime.nowMs, initialRows = 0 until mSPParamData.rowNumber.coerceIn(1, 8)
+            )
+        } else if (!enabled && depthNodeSimulator != null) {
+            depthNodeSimulator = null
+            val saved = realDepthNodeSnapshot ?: DepthNodeState()
+            depthNodeStore.update { DepthNodeState(channels = saved.channels.mapIndexed { row, channel ->
+                DepthNodeStorage.apply(DepthNodeStorage.saved(channel), DepthNodeChannel(row))
+            }, displayMode = it.displayMode, qualityConfig = it.qualityConfig) }
+            realDepthNodeSnapshot = null
+            depthNodeRuntime.resetTracking()
+            depthQualityService.reset()
+        }
+    }
+
+    init {
+        viewModelScope.launch(Dispatchers.Default) {
+            depthNodeRuntime.samples.collect { depthQualityService.accept(it) }
+        }
+        viewModelScope.launch {
+            var previous = depthNodeStore.current()
+            while (isActive) {
+                delay(100)
+                synchronized(depthPrescriptionLock) {
+                    val fixAtMs = lastDepthPrescriptionFixAtMs
+                    if (fixAtMs != null && SystemClock.elapsedRealtime() - fixAtMs >= depthPrescriptionFixTimeoutMs) {
+                        invalidateDepthPrescriptionLocation()
+                    }
+                }
+                depthQualityService.tick()
+                val snapshot = depthNodeStore.current()
+                if (snapshot !== previous) {
+                    depthNodeState.value = snapshot
+                    previous = snapshot
+                }
             }
         }
     }
 
-    /**
-     * 更新单路编码器的 [EncoderCalibration]（TPDO 到达刷新运行时字段，
-     * 或标定/配置界面写入 zeroSet / 拟合系数 / nodeId 等持久化字段）。
-     * 模式与 [updateServoCalibration] 相同，含同值短路。
-     */
-    fun updateEncoderCalibration(motorIndex: Int, updater: (EncoderCalibration) -> EncoderCalibration) {
-        mutateEncoderFeedbackState { current ->
-            if (motorIndex !in current.encoders.indices) return@mutateEncoderFeedbackState current
-            val updated = updater(current.encoders[motorIndex])
-            if (updated === current.encoders[motorIndex] || updated == current.encoders[motorIndex]) {
-                return@mutateEncoderFeedbackState current
-            }
-            current.copy(encoders = current.encoders.toMutableList().also { it[motorIndex] = updated })
-        }
+    /** 测量消费者只能读原子快照，不读可能滞后 100ms 的 LiveData。 */
+    fun currentDepthNodeState(): DepthNodeState = depthNodeStore.current()
+
+    /** 更新节点配置/运行时；CAS transform 必须保持纯函数。 */
+    fun updateDepthNodeChannel(row: Int, updater: (DepthNodeChannel) -> DepthNodeChannel) =
+        depthNodeStore.updateChannel(row, updater)
+
+    fun canEditDepthNodeCalibration(): Boolean =
+        !isSystemRunning && workRunning.value != true && !isDepthTrialActive() && !isDepthRecording()
+
+    @Synchronized fun saveDepthNodeCalibration(context: Context, row: Int, updater: (DepthNodeChannel) -> DepthNodeChannel) {
+        check(canEditDepthNodeCalibration()) { "请先停止作业、试验和记录，再修改检测节点标定" }
+        depthQualityService.updateCalibration(row, updater)
+        val saved = currentDepthNodeState()
+        if (!saved.simulated) MySharedPreFun(context).saveDepthNodeCalibration(saved.channels[row])
     }
 
-    /**
-     * 从存储恢复编码器持久化字段，保留运行时反馈字段
-     * （对齐 [restoreSowingDepthPersistentState] 的合并语义）。
-     */
-    fun restoreEncoderPersistentState(savedState: EncoderFeedbackState) {
-        mutateEncoderFeedbackState { current ->
-            val merged = current.encoders.mapIndexed { index, runtime ->
-                val saved = savedState.encoders.getOrNull(index)
-                    ?: EncoderCalibration(motorIndex = index)
-                runtime.copy(
-                    nodeId = saved.nodeId,
-                    zeroSet = saved.zeroSet,
-                    singleTurnResolution = saved.singleTurnResolution,
-                    calibrationPoints = saved.calibrationPoints,
-                    fitA = saved.fitA,
-                    fitB = saved.fitB,
-                    fitValid = saved.fitValid
-                )
+    /** 开机只恢复标定及显示设置，不恢复在线或实测深度。 */
+    fun restoreDepthNodePersistentState(saved: DepthNodeState) {
+        depthNodeStore.update { current -> current.copy(
+            displayMode = saved.displayMode,
+            qualityConfig = saved.qualityConfig,
+            channels = current.channels.mapIndexed { row, channel ->
+                DepthNodeStorage.apply(DepthNodeStorage.saved(saved.channels[row]), channel)
             }
-            current.copy(encoders = merged)
-        }
+        ) }
     }
 
     // ====== 从”开始作业”之后的时间平均统计 ======

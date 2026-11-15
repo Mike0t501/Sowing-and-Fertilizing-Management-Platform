@@ -780,7 +780,9 @@ Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
 
 ---
 
-## 八、摆臂编码器实测深度反馈子系统（2026-07 已实现）
+## 八、摆臂编码器实测深度反馈子系统（历史停用方案，2026-11-04）
+
+> 本节仅保留历史设计上下文。独立 CANopen 编码器 Node-ID 21–28 的代码、入口、状态、模拟和新记录字段已移除，不再读取 `enc_N_*` 标定。当前检测方案见第九节。伺服 11–18 的内部位置反馈、限位、点动和位置换算继续保留。
 
 ### 8.1 背景与范围
 
@@ -903,3 +905,74 @@ expedited SDO 与 abort、RO 写保护、SYNC、手册示例帧逐字节核对�
 SdoReplyWaiters 消费语义。
 
 变更摘要详见 `docs/ENCODER_FEEDBACK_CHANGES.md`。
+
+## 九、播深检测节点（2026-11-04）
+
+### 9.1 契约与测量链
+
+唯一检测方案是「0–5 V 角度传感器 + dingoFW 变送节点」。以 `docs/DEPTH_NODE_ICD.md` v1.0 为唯一协议契约；节点不是 CANopen 设备，输出传感器端子电压，不输出深度。平板不叠加滤波，不把实测深度写回伺服目标或控制决策。
+
+| 用途 | 基址 / CAN-ID |
+|---|---|
+| 第1至8行 | B = 0x680 + 8·r，r=0…7；最后基址0x6B8 |
+| 未配号节点 | B = 0x6C0，同一时刻只允许接入一个 |
+| 参数应答 / 请求 | B+0 / B+1 |
+| STATUS / INFO / RESEARCH | B+2 / B+3 / B+4 |
+| 吸收保留帧 | B+5…B+7；不跌落施肥解析 |
+
+```text
+CSM100T → CAN帧 → classifyCanOpen
+  ├─ 非CANopen且在0x680–0x6C7 → DepthNodeRuntime
+  │    ├─ STATUS → CAS原子状态 → MeasuredDepthFacade → 显示 / 记录 / 质量监测
+  │    ├─ INFO → 版本、运行时间、供电温度和发送丢包诊断
+  │    ├─ CFG_RSP → DepthNodeCfgWaiters（F/R/E通告不匹配事务）
+  │    └─ RESEARCH → 仅计数，不解析研究样本
+  ├─ 配置的伺服节点 → 原有伺服处理
+  ├─ SDO事务等待器 → 原有共享应答处理
+  ├─ 旧独立编码器21–28 → 忽略
+  └─ 其他帧 → 保留原有施肥处理
+```
+
+CFG先注册等待器再发送，匹配 `(canId, cmd, index, subindex)`，共享全局20ms发送步调。Write无应答时Read确认；配号应答来自新B+0，随后向新B+1发Burn并等待新INFO。上线通告和INFO重启检测重置序号基线与本次启动计数；正常seq和uptime回绕不当成重启。
+
+`DepthNodeStateStore` 是后台真源；LiveData投影最多10Hz。STATUS默认50ms，超过 `max(1000ms, 3×实际报告周期)` 离线；INFO/CFG不能续期。质量优先级：OFFLINE、FAULT/SAT、OUT_OF_RANGE、SETTLING、UNCALIBRATED、OK。非OK不提供深度；0mm是合法值。换算唯一入口 `DepthNodeCalib.depthFromMv`，极差按u_mean处的导数计算。
+
+### 9.2 页面和标定
+
+设置页固定入口「播深检测节点管理」，可查看8行诊断、回读参数、应用6种预设、设置报告周期、Burn、研究流和配号。进入管理页仅启动CAN接收，不启动伺服运动。主界面和播深控制页显示节点实测值，保留明确标识的伺服换算值。0.5cm档位采用5mm四舍五入和额外±1mm回差；1mm档位可切换，仅影响显示。
+
+播深标定页保留伺服步骤1、2，第3步统一为检测节点标定：
+
+1. 确认节点在线、协议兼容、无故障，逐点放置0/20/40/60/80/100mm挡块（高度可编辑）。每点采集真实STATUS的u_mean共2秒，检查有效帧覆盖率和标准差。
+2. 一次至少3点、二次至少4点，中心化缩放后最小二乘。已有斜率时采集即检查σ≤0.3mm；初次没有换算斜率时，拟合后检查所有采点稳定性，超限拒绝保存。显示系数、R²及各点/最大残差。
+3. 保存后用不参与拟合的挡块独立验证；零点复核只调整offsetTrimMm并记录时间。
+4. 两端止点分别采集，写sub12/13、逐项回读后Burn。STOP按电压定义，浅端由标定斜率解释，不改变伺服限位。
+5. 节点标定JSON独立使用schema `vfremake.depthNodeCalibration` v1。导入校验拟合一致性并二次确认，保留目标行地址；导入本身不向节点写参数或止点。`dn_N_calibration`与伺服标定独立保存。
+
+研究流同一时刻最多一个节点；开启前显示CAN/UART预算，多节点二次确认，8行在线禁止开启并主动关闭已开启流；长期预算上限500帧/s。1000Hz仅允许单检测节点且在线伺服已实际观测到约100ms TPDO。预设写全9项、回读并核验STATUS CRC，失败明确报告，不把界面选项当成节点已生效。
+
+### 9.3 质量监测与事件
+
+`DepthQualityMonitor` 是不发送CAN的纯Kotlin状态机。默认容差为目标≥30mm时10mm，否则5mm；依据任务引用GB/T 6973、NY/T 1768，具体适用范围仍以标准原文为准。偏浅/偏深持续0.3m或无车速0.3s进入，恢复并越过1mm回差后持续0.2m/0.2s退出。深度<10mm持续100ms或可信浅端STOP持续100ms触发LIFT_OFF。只有标定、方向和协议可信且无FAULT/SAT/SETTLING时，浅端STOP允许作为OUT_OF_RANGE的腾空事件例外；仍不显示深度、不进入合格率统计。
+
+目标变化后2秒屏蔽统计与偏浅/偏深，腾空继续检测。最近完整10m或无车速10s窗口合格率<75%或CV>20%判为UNSTABLE；CV可在播深页修改，20%是可修订工程默认值。速度优先人工设定，否则GNSS；有速度且为0时不累计距离。重复帧、序号缺口、离线和模式切换不伪造连续样本。窗口有界分箱聚合，保存实际样本数和矩，边界误差最多一个1cm或10ms分箱。
+
+### 9.4 CSV与元数据
+
+手动 `depthRec_` 和一键 `depthTest_` 共用 `depth_node_v1`，保留原始9列，追加12列，完整表头为：
+
+```csv
+timestamp,elapsed_ms,motor_no,test_stage,target_depth_mm,current_depth_mm,encoder_position,is_online,alarm_code,ds_online,ds_depth_mm,ds_depth_raw_mm,ds_span_mm,ds_u_filt_mv,ds_u_mean_mv,ds_span_mv,ds_flags,ds_seq,ds_cfg_crc,ds_quality,ds_event
+```
+
+原始`encoder_position`是伺服内部位置反馈，继续保留；已移除的是旧独立编码器的`measured_depth_mm,enc_position,enc_online`。非OK的三个深度/极差mm字段留空，禁止用0冒充缺测。数值用小数点、深度0.1mm，flags/seq/CRC为十进制。`ds_event`用`|`连接事件名。
+
+同名`.meta.json`保存App版本、模拟标记、各行标定/地址/版本、真实参数回读和错误、CRC、报告周期、显示档位、质量阈值、配置变化历史、事件文件名。回读失败保留空值和错误，不填默认配置。事件另存`depthEvt_*.csv`，含行、类型、起止单调时间与绝对时间、持续时间、距离、最小最大深度、目标和原因。记录开始前已存在的事件保留真实起点，elapsed_ms可为负。停止记录保存活动事件快照，不停止界面监测。
+
+数据页单独识别事件CSV，不把JSON列入数据文件。历史CSV不改写；分析工具按表头/schema识别，不能假定旧12列布局。
+
+### 9.5 模拟与验收边界
+
+测试模式合成20Hz STATUS与1Hz INFO，走真实解析、标定、配置等待器、显示、记录和质量路径；包含偏深尖峰及每60秒1秒腾空。支持预设、报告周期、研究流超时、Burn和出厂配号的模拟应答。采点可按输入挡块保持信号；模拟会话标定不覆盖真实标定。此模拟验证接入链路，不代表节点DSP滤波性能或传感器精度。
+
+目前审查的 `D:\dev\dingoFW` 是精简直出版本，sub0–8固定直出配置（CRC 0xD1），其他滤波预设可能被拒绝；App保留完整ICD能力并显示实际回读。此次未修改固件。真实传感器、CAN节点和伺服联动仍需用户按变更摘要现场验收。完整实施、测试和限制见 `docs/DEPTH_NODE_CHANGES.md`。

@@ -1,407 +1,268 @@
-/**
- ***********************************************************************************************************
- * @author  :NIANXI
- * @date    :2026年7月4日
- * @file    :
- * @brief   :一键播种深度性能测试协程
- * ---------------------------------------------------------------------------------------------------------
- *                                         Change History
- * ---------------------------------------------------------------------------------------------------------
- * 单电机梯度往返测试：起始深度→按梯度逐级至终点→逐级返回，每级到位停留后进入下一级
- * 全程按 config.recordIntervalMs 采样记录 CSV（DepthRecordFun），测试状态经 depthTestStatus 通知 UI
- ***********************************************************************************************************
- */
-
 package com.nx.vfremake.coroutine
 
+import android.app.Activity
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
+import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.DepthTestConfig
+import com.nx.vfremake.data.DepthTestPhase
 import com.nx.vfremake.data.DepthTestStatus
 import com.nx.vfremake.data.ServoCalibration
+import com.nx.vfremake.data.activeSowingDepthMotorIndices
+import com.nx.vfremake.funClass.CanOpenFun
+import com.nx.vfremake.funClass.DepthRecordSchema
+import com.nx.vfremake.funClass.DocuAndManageFun
+import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.funClass.MySharedPreFun
-import com.nx.vfremake.isSystemRunning
+import com.nx.vfremake.mSPParamData
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Locale
 import kotlin.math.abs
 
-/**
- * 一键深度性能测试协程类
- *
- * 驱动方式：本协程只写被测电机的 targetDepth，实际 CAN 帧下发完全由
- * SowingDepthCoroutine Phase 4 完成（复用其门控、限位限幅与 SDO 时序，
- * 避免两处发帧竞争总线）。Phase 4 最多 500ms 的下发延迟对测试无影响，
- * 到位判定完全基于反馈深度（TPDO/SDO 更新的 currentDepth）。
- *
- * 中止策略：回写 targetDepth=当前深度让 Phase 4 下发"移动到当前位置"实现
- * 平滑停车。刻意不用 quickStop——它会使驱动器脱离 Operation Enabled，
- * 但 motorInitialized 标志仍为 true，之后电机对新 targetDepth 无响应。
- */
+/** 单行试验统一持有控制、定位及记录。所有位置帧由 SowingDepthCoroutine 下发。 */
 class DepthTestCoroutine {
-    companion object {
-        private const val TAG = "DepthTest"
-
-        // 状态轮询周期（到位判定/使能等待）
-        private const val POLL_MS = 100L
-
-        // 等待 masterEnabled → isEnabled（Phase 2 DS402 初始化）的超时
-        private const val ENABLE_TIMEOUT_MS = 5000L
-    }
+    private data class Stage(
+        val index: Int = 0,
+        val phase: DepthTestPhase = DepthTestPhase.PREPARING,
+        val label: String = "准备记录",
+        val targetMm: Float? = null,
+    )
 
     private val scope = CoroutineScope(Dispatchers.Default)
-    private val jobs = HashSet<Job>()
+    private var job: Job? = null
 
-    // 测试进行中标志位
-    var isRunning = false
+    fun abort() { job?.cancel() }
+    fun shutdown() = abort()
 
-    // 用户中止请求：主循环各挂起点检查后体面收尾
-    @Volatile
-    private var abortRequested = false
-
-    // 当前阶段标签与目标深度：供 DepthRecordFun 的采样回调跨协程只读
-    @Volatile
-    private var currentStageLabel = ""
-
-    @Volatile
-    private var currentTarget = 0f
-
-    // 记录器由本类持有，finally 里统一关闭落盘
-    private val recorder = DepthRecordFun()
-
-    /**
-     * 请求中止测试（体面收尾：平滑停车 + 保存已记录数据）
-     */
-    fun abort() {
-        abortRequested = true
-    }
-
-    /**
-     * 页面销毁兜底：直接取消协程作用域（记录器单独关闭落盘）
-     */
-    fun shutdown() {
-        jobs.forEach { it.cancel() }
-        jobs.clear()
-        if (recorder.isRunning) recorder.shutdown()
-        isRunning = false
-    }
-
-    /**
-     * 启动一键性能测试
-     * @param  context:上下文
-     * @param  viewModel:共享ViewModel（读电机状态、写targetDepth、post测试状态）
-     * @param  config:测试配置快照
-     * @note
-     */
-    fun start(context: Context, viewModel: VariableFertViewModel, config: DepthTestConfig) {
-        if (isRunning) return
-        isRunning = true
-        abortRequested = false
-
-        jobs.add(scope.launch {
-            var aborted = false
+    fun start(context: Context, viewModel: VariableFertViewModel, config: DepthTestConfig): Boolean {
+        if (job?.isActive == true || !viewModel.tryBeginDepthTrial()) return false
+        job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            val appContext = context.applicationContext
+            val stages = DepthTestConfig.stageDepths(config.startDepthMm, config.endDepthMm, config.stepMm)
+            val originalState = viewModel.currentSowingDepthState()
+            val originalMotor = originalState.motors.getOrNull(config.motorIndex)
+            val preferences = MySharedPreFun(appContext)
+            val simulatedGnss = preferences.getSpecificValue(R.string.simGnss_Switch_name) == "1"
+            val receiver = CanReceiveCoroutine()
+            val control = SowingDepthCoroutine()
+            var gnss: DB9reCANseCoroutine? = null
+            val recorder = DepthRecordFun()
+            var recordingAccepted = false
+            var controlStarted = false
+            val stage = java.util.concurrent.atomic.AtomicReference(Stage())
             val anomalies = mutableListOf<String>()
+            var result = DepthTestPhase.FAILED
+            var resultMessage = ""
+
+            fun publish(next: Stage, message: String = "", running: Boolean = true) {
+                stage.set(next)
+                viewModel.depthTestStatus.postValue(DepthTestStatus(
+                    running = running, finished = next.phase == DepthTestPhase.COMPLETE,
+                    motorIndex = config.motorIndex, stageIndex = next.index, stageCount = stages.size,
+                    stageLabel = next.label, targetDepth = next.targetMm ?: 0f,
+                    message = message, anomalies = anomalies.toList(), phase = next.phase,
+                ))
+            }
+
             try {
-                // ── 预检：失败直接报错返回，不启动记录 ──────────────────────
-                val precheckError = precheck(viewModel, config)
-                if (precheckError != null) {
-                    postStatus(viewModel, config, 0, 0, "预检失败", precheckError, anomalies)
-                    return@launch
+                publish(stage.get())
+                check(!originalState.masterEnabled) { "请先在播深控制页关闭总开关" }
+                check(preferences.getSpecificValue(R.string.testMode_Switch_name) != "1") {
+                    "硬件测试模式下不可驱动试验伺服，请关闭测试模式"
                 }
+                val active = activeSowingDepthMotorIndices(mSPParamData.rowNumber,
+                    viewModel.activeMotorsState.value ?: mSPParamData.activeMotors)
+                check(config.motorIndex in active && originalMotor != null) { "请先启用被测单体" }
+                check(stages.isNotEmpty()) { "起止深度或步长无效，或级数过多" }
+                check(config.toleranceMm.isFinite() && config.toleranceMm > 0f &&
+                    config.dwellMs in 0..600_000 && config.stableSamples > 0 && config.timeoutMs > 0 &&
+                    config.positionSpeed in 100..3000 && config.acceleration in 1000..60000 &&
+                    config.recordIntervalMs in 20..1000
+                ) { "试验运动或采样参数无效" }
+                validateLimits(originalMotor, config)
+                withContext(Dispatchers.IO) {
+                    check(DocuAndManageFun().getWriteDirDocumentUri(appContext) != null) { "请先授权实验数据保存目录" }
+                    check(MySerialPortFun.ensureCanPortOpen(appContext)) { "无法打开 CAN 串口" }
+                }
+                receiver.start(viewModel, appContext)
+                waitForPosition(viewModel, config.motorIndex, originalMotor.nodeId)
+                gnss = DB9reCANseCoroutine().also { it.startTrial(appContext, viewModel, config.motorIndex, simulatedGnss) }
 
-                // ── 使能：确保总开关开启且被测电机完成 DS402 初始化 ─────────
-                if (!viewModel.currentSowingDepthState().masterEnabled) {
-                    viewModel.updateMasterEnabled(true)
-                }
-                if (!waitForEnabled(viewModel, config.motorIndex)) {
-                    postStatus(
-                        viewModel, config, 0, 0, "使能失败",
-                        "电机 ${config.motorIndex + 1} 使能超时（${ENABLE_TIMEOUT_MS / 1000}s），" +
-                            "请检查电机在线状态后重试", anomalies
+                recordingAccepted = recorder.start(
+                    context = appContext, mVariableFertViewModel = viewModel, filePrefix = "depthTest",
+                    header = DepthRecordSchema.TRIAL_HEADER, intervalMs = config.recordIntervalMs,
+                    recordRows = listOf(config.motorIndex), trial = config, simulatedGnss = simulatedGnss
+                ) {
+                    val now = SystemClock.elapsedRealtime()
+                    val phase = stage.get()
+                    val motor = viewModel.currentSowingDepthState().motors[config.motorIndex]
+                    val fresh = hasFreshPosition(motor, now)
+                    val row = listOf(
+                        (motor.motorIndex + 1).toString(), phase.label,
+                        phase.targetMm?.let { "%.2f".format(Locale.ROOT, it) }.orEmpty(),
+                        if (fresh) "%.2f".format(Locale.ROOT, motor.currentDepth) else "",
+                        if (fresh) motor.currentPosition.toString() else "",
+                        if (motor.isOnline) "1" else "0", motor.alarmCode.toString()
+                    ) + DepthRecordSchema.trialColumns(
+                        phase.index, phase.phase, viewModel.currentDepthTrialLocation(), now, simulatedGnss
                     )
-                    return@launch
+                    listOf(row)
                 }
-
-                // ── 写运动参数（速度/加速度），Phase 4 下发时使用并持久化 ──────
-                val stateNow = viewModel.currentSowingDepthState()
+                check(recordingAccepted && withTimeoutOrNull(30_000L) { recorder.awaitReady() } == true) {
+                    "记录文件准备失败，未下发试验深度"
+                }
+                // 等待文件和配置回读可能超过位置反馈时限，再取一帧后才使能。
+                waitForPosition(viewModel, config.motorIndex, originalMotor.nodeId)
                 viewModel.updateSowingDepthGlobalSettings(
-                    positionSpeed = config.positionSpeed,
-                    acceleration = config.acceleration
+                    positionSpeed = config.positionSpeed, acceleration = config.acceleration
                 )
-                MySharedPreFun(context).saveSowingDepthGlobalSettings(
-                    jogSpeed = stateNow.jogSpeed,
-                    positionSpeed = config.positionSpeed,
-                    acceleration = config.acceleration,
-                    globalTargetDepth = stateNow.globalTargetDepth
-                )
-                // 状态改为原子真源后更新同步生效，等待循环保留为兜底（首轮即满足退出）
-                var settleWaited = 0L
-                while (settleWaited < 1000L) {
-                    val st = viewModel.currentSowingDepthState()
-                    if (st.positionSpeed == config.positionSpeed &&
-                        st.acceleration == config.acceleration
-                    ) break
-                    delay(POLL_MS)
-                    settleWaited += POLL_MS
-                }
-
-                // ── 生成梯度序列：上行 + 下行（去峰值），默认 20→40→60→80→60→40→20 ──
-                val stages = buildStageSequence(config)
-                Log.d(TAG, "梯度序列: ${stages.joinToString()}")
-
-                // ── 启动记录器：按配置周期采样被测电机一行 ───────────────────
-                // 周期取自播深控制页的全局设置（与手动记录共用），与下方 POLL_MS 的
-                // 到位判定轮询无关——改采样密度不应改变测试的到位/超时判定行为
-                recorder.start(
-                    context = context,
-                    mVariableFertViewModel = viewModel,
-                    filePrefix = "depthTest",
-                    header = DepthRecordFun.buildDepthRecordHeader(),
-                    intervalMs = config.recordIntervalMs
-                ) { _ ->
-                    val m = viewModel.currentSowingDepthState().motors
-                        .getOrNull(config.motorIndex) ?: return@start emptyList()
-                    // 尾部追加该行摆臂编码器实测深度 3 列（离线/未标定为空串，不改旧列）
-                    val enc = viewModel.currentEncoderFeedbackState()
-                        .encoders.getOrNull(config.motorIndex)
-                    listOf(
-                        listOf(
-                            (m.motorIndex + 1).toString(),
-                            currentStageLabel,
-                            "%.2f".format(currentTarget),
-                            "%.2f".format(m.currentDepth),
-                            m.currentPosition.toString(),
-                            if (m.isOnline) "1" else "0",
-                            m.alarmCode.toString()
-                        ) + DepthRecordFun.buildEncoderColumns(enc)
-                    )
-                }
-
-                // ── 逐级执行 ────────────────────────────────────────────────
-                for ((k, target) in stages.withIndex()) {
-                    val stageIndex = k + 1
-                    currentTarget = target
-                    currentStageLabel = if (k == 0) {
-                        "起始定位 %.1f".format(target)
-                    } else {
-                        "运行 %.1f→%.1f".format(stages[k - 1], target)
-                    }
-                    postStatus(
-                        viewModel, config, stageIndex, stages.size,
-                        currentStageLabel, "", anomalies, running = true
-                    )
-
-                    // 写目标深度，Phase 4 下一轮（≤500ms）下发绝对位移帧
-                    viewModel.updateServoCalibration(config.motorIndex) {
-                        it.copy(targetDepth = target)
-                    }
-
-                    // 到位等待：深度容差 + 连续稳定采样 + 超时保护
-                    when (waitForArrival(viewModel, config, target)) {
-                        ArrivalResult.ARRIVED -> {
-                            // 停留：分段 delay 以便响应中止；记录持续（稳态误差素材）
-                            currentStageLabel = "停留 %.1f".format(target)
-                            postStatus(
-                                viewModel, config, stageIndex, stages.size,
-                                currentStageLabel, "", anomalies, running = true
-                            )
-                            var dwelt = 0L
-                            while (dwelt < config.dwellMs && !abortRequested) {
+                for ((index, target) in stages.withIndex()) {
+                    verifyFeedback(viewModel, config.motorIndex, recorder)
+                    publish(Stage(index + 1, DepthTestPhase.MOVING, "运行至 %.1f mm".format(Locale.ROOT, target), target))
+                    viewModel.updateServoCalibration(config.motorIndex) { it.copy(targetDepth = target) }
+                    if (!controlStarted) {
+                        viewModel.updateMasterEnabled(true)
+                        control.start(viewModel, appContext, trialMotorIndex = config.motorIndex)
+                        controlStarted = true
+                        check(withTimeoutOrNull(5_000L) {
+                            while (!control.trialMotorInitialized) {
+                                verifyFeedback(viewModel, config.motorIndex, recorder)
                                 delay(POLL_MS)
-                                dwelt += POLL_MS
                             }
-                        }
-
-                        ArrivalResult.TIMEOUT -> {
-                            anomalies.add("第${stageIndex}级(%.1fmm)超时".format(target))
-                            currentStageLabel = "超时 %.1f".format(target)
-                            Log.w(TAG, "第${stageIndex}级目标 ${target}mm 超时，继续下一级")
-                        }
-
-                        ArrivalResult.ABORTED -> { /* 跳出后统一走中止路径 */ }
-
-                        ArrivalResult.OFFLINE -> {
-                            anomalies.add("第${stageIndex}级(%.1fmm)电机离线".format(target))
-                            postStatus(
-                                viewModel, config, stageIndex, stages.size, "电机离线",
-                                "电机 ${config.motorIndex + 1} 离线，测试中止", anomalies
-                            )
-                            return@launch
-                        }
-
-                        ArrivalResult.ALARM -> {
-                            val code = motorOf(viewModel, config.motorIndex)?.alarmCode ?: 0
-                            anomalies.add("第${stageIndex}级(%.1fmm)报警码$code".format(target))
-                            postStatus(
-                                viewModel, config, stageIndex, stages.size, "电机报警",
-                                "电机 ${config.motorIndex + 1} 报警（码 $code），测试中止", anomalies
-                            )
-                            return@launch
-                        }
+                            true
+                        } == true) { "被测伺服使能超时" }
                     }
 
-                    if (abortRequested) {
-                        aborted = true
-                        break
+                    if (waitForArrival(viewModel, config, recorder, target)) {
+                        publish(stage.get().copy(phase = DepthTestPhase.DWELL, label = "到位停留"))
+                        val until = SystemClock.elapsedRealtime() + config.dwellMs
+                        while (SystemClock.elapsedRealtime() < until) {
+                            verifyFeedback(viewModel, config.motorIndex, recorder)
+                            delay(minOf(POLL_MS, (until - SystemClock.elapsedRealtime()).coerceAtLeast(1)))
+                        }
+                    } else {
+                        anomalies.add("第 ${index + 1} 级（${target} mm）到位超时")
+                        publish(stage.get().copy(phase = DepthTestPhase.TIMEOUT, label = "到位超时"))
+                        // 保留至少一个采样间隔，让超时阶段进入记录。
+                        delay(config.recordIntervalMs + POLL_MS)
                     }
                 }
-
-                if (aborted) {
-                    // 中止：回写当前深度实现平滑停车（见类注释）
-                    val cur = motorOf(viewModel, config.motorIndex)?.currentDepth
-                    if (cur != null) {
-                        viewModel.updateServoCalibration(config.motorIndex) {
-                            it.copy(targetDepth = cur)
-                        }
-                    }
-                    currentStageLabel = "中止"
-                    postStatus(
-                        viewModel, config, 0, stages.size, "中止",
-                        "测试已中止，已记录数据将保存", anomalies
-                    )
-                } else {
-                    currentStageLabel = "完成"
-                    postStatus(
-                        viewModel, config, stages.size, stages.size, "完成",
-                        "测试完成：共 ${stages.size} 级，异常 ${anomalies.size} 项",
-                        anomalies, finished = true
-                    )
-                }
+                result = DepthTestPhase.COMPLETE
+                resultMessage = "完成 ${stages.size} 级，异常 ${anomalies.size} 项"
+            } catch (_: CancellationException) {
+                result = DepthTestPhase.ABORTED
+                resultMessage = "试验已中止，保留已采集数据"
+            } catch (e: Exception) {
+                Log.w("DepthTest", "变量播深试验中止", e)
+                resultMessage = e.message ?: "试验失败"
             } finally {
-                // 无论正常/中止/取消，记录器统一在此关闭落盘（触发保存通知）
-                if (recorder.isRunning) recorder.shutdown()
-                isRunning = false
+                withContext(NonCancellable) {
+                    publish(stage.get().copy(phase = DepthTestPhase.STOPPING, label = "停止并保存"), resultMessage)
+                    try {
+                        if (controlStarted) {
+                            control.stopForWork(viewModel)
+                            delay(POLL_MS)
+                        }
+                    } catch (e: Exception) {
+                        result = DepthTestPhase.FAILED
+                        resultMessage = "伺服停止指令发送异常：${e.message}"
+                        Log.e("DepthTest", resultMessage, e)
+                    } finally {
+                        if (controlStarted) {
+                            viewModel.updateServoCalibration(config.motorIndex) {
+                                it.copy(targetDepth = originalMotor?.targetDepth ?: 0f)
+                            }
+                            viewModel.updateSowingDepthGlobalSettings(
+                                positionSpeed = originalState.positionSpeed, acceleration = originalState.acceleration
+                            )
+                        }
+                        gnss?.stopTrialAndJoin()
+                        if (recordingAccepted) recorder.shutdownAndJoin()
+                        receiver.shutdown()
+                        withContext(Dispatchers.Main) {
+                            if ((context as? Activity)?.isDestroyed == true) MySerialPortFun().releaseSerialPort(viewModel)
+                            viewModel.endDepthTrial()
+                        }
+                        val label = when (result) {
+                            DepthTestPhase.COMPLETE -> "完成"
+                            DepthTestPhase.ABORTED -> "中止"
+                            else -> "失败"
+                        }
+                        publish(stage.get().copy(phase = result, label = label), resultMessage, running = false)
+                    }
+                    Unit
+                }
             }
-        })
-    }
-
-    // ── 到位判定结果 ─────────────────────────────────────────────────────────
-    private enum class ArrivalResult { ARRIVED, TIMEOUT, ABORTED, OFFLINE, ALARM }
-
-    /**
-     * 等待被测电机到位：|当前深度-目标| ≤ 容差且连续 stableSamples 次采样稳定
-     */
-    private suspend fun waitForArrival(
-        viewModel: VariableFertViewModel,
-        config: DepthTestConfig,
-        target: Float
-    ): ArrivalResult {
-        var stable = 0
-        var waited = 0L
-        while (waited < config.timeoutMs) {
-            if (abortRequested) return ArrivalResult.ABORTED
-            val m = motorOf(viewModel, config.motorIndex) ?: return ArrivalResult.OFFLINE
-            if (!m.isOnline) return ArrivalResult.OFFLINE
-            if (m.alarmCode != 0) return ArrivalResult.ALARM
-
-            if (abs(m.currentDepth - target) <= config.toleranceMm) {
-                stable++
-                if (stable >= config.stableSamples) return ArrivalResult.ARRIVED
-            } else {
-                stable = 0
-            }
-            delay(POLL_MS)
-            waited += POLL_MS
         }
-        return ArrivalResult.TIMEOUT
+        return true
     }
 
-    /**
-     * 等待电机使能完成（masterEnabled 开启后 Phase 2 需 ≥1 个 500ms 周期做 DS402 初始化）
-     */
-    private suspend fun waitForEnabled(
-        viewModel: VariableFertViewModel,
-        motorIndex: Int
+    private fun validateLimits(motor: ServoCalibration, config: DepthTestConfig) {
+        check(motor.limitsSet && motor.fitValid && motor.fitA.isFinite() && motor.fitA != 0f && motor.fitB.isFinite()) {
+            "请先完成被测伺服的限位和深度标定"
+        }
+        val bounds = minOf(motor.limitMin, motor.limitMax).toDouble()..maxOf(motor.limitMin, motor.limitMax).toDouble()
+        check(listOf(config.startDepthMm, config.endDepthMm).all { (it.toDouble() - motor.fitB) / motor.fitA in bounds }) {
+            "起止深度超出被测伺服的标定行程"
+        }
+    }
+
+    private suspend fun waitForPosition(viewModel: VariableFertViewModel, row: Int, node: Int) {
+        val started = SystemClock.elapsedRealtime()
+        while (SystemClock.elapsedRealtime() - started < FEEDBACK_TIMEOUT_MS) {
+            CanOpenFun.sendFrameSequenced(CanOpenFun.buildReadStatusWordFrame(node))
+            CanOpenFun.sendFrameSequenced(CanOpenFun.buildReadPositionFrame(node))
+            delay(150)
+            val motor = viewModel.currentSowingDepthState().motors[row]
+            check(motor.alarmCode == 0) { "被测伺服报警（码 ${motor.alarmCode}）" }
+            if (motor.isOnline && motor.positionAtMs >= started && motor.currentDepth.isFinite()) return
+        }
+        error("未收到被测伺服的位置反馈")
+    }
+
+    private fun verifyFeedback(viewModel: VariableFertViewModel, row: Int, recorder: DepthRecordFun): ServoCalibration {
+        check(recorder.isRunning) { "试验数据记录已停止" }
+        val motor = viewModel.currentSowingDepthState().motors[row]
+        check(motor.alarmCode == 0) { "被测伺服报警（码 ${motor.alarmCode}）" }
+        check(hasFreshPosition(motor, SystemClock.elapsedRealtime())) { "被测伺服位置反馈中断" }
+        return motor
+    }
+
+    private suspend fun waitForArrival(
+        viewModel: VariableFertViewModel, config: DepthTestConfig, recorder: DepthRecordFun, target: Float
     ): Boolean {
-        var waited = 0L
-        while (waited < ENABLE_TIMEOUT_MS) {
-            if (abortRequested) return false
-            if (motorOf(viewModel, motorIndex)?.isEnabled == true) return true
+        val started = SystemClock.elapsedRealtime()
+        var previousPositionAt = started
+        var stable = 0
+        while (SystemClock.elapsedRealtime() - started < config.timeoutMs) {
+            val motor = verifyFeedback(viewModel, config.motorIndex, recorder)
+            if (motor.positionAtMs > previousPositionAt) {
+                previousPositionAt = motor.positionAtMs
+                stable = if (abs(motor.currentDepth - target) <= config.toleranceMm) stable + 1 else 0
+                if (stable >= config.stableSamples) return true
+            }
             delay(POLL_MS)
-            waited += POLL_MS
         }
         return false
     }
 
-    /**
-     * 启动前预检，返回错误文案；全部通过返回 null
-     */
-    private fun precheck(viewModel: VariableFertViewModel, config: DepthTestConfig): String? {
-        if (isSystemRunning) return "作业进行中，CAN 串口被占用，无法测试"
+    private fun hasFreshPosition(motor: ServoCalibration, nowMs: Long): Boolean =
+        motor.isOnline && motor.currentDepth.isFinite() && motor.positionAtMs != 0L &&
+            nowMs - motor.positionAtMs in 0..FEEDBACK_TIMEOUT_MS
 
-        val m = motorOf(viewModel, config.motorIndex)
-            ?: return "电机序号无效"
-        if (!m.isOnline) return "电机 ${config.motorIndex + 1} 离线"
-        if (!m.limitsSet) return "电机 ${config.motorIndex + 1} 限位未标定"
-        if (!m.fitValid) return "电机 ${config.motorIndex + 1} 深度拟合无效，请先完成标定"
-
-        if (config.stepMm < 1f) return "梯度须 ≥ 1mm"
-        if (config.startDepthMm >= config.endDepthMm) return "起始深度须小于终点深度"
-        if (config.toleranceMm <= 0f) return "到位容差须 > 0"
-
-        // 起/终点换算编码器脉冲须落在标定行程内：Phase 4 虽会限幅，
-        // 但限幅后深度到不了目标必然超时，不如启动前拒绝
-        if (m.fitA == 0f) return "拟合系数无效（fitA=0）"
-        val safeMin = minOf(m.limitMin, m.limitMax)
-        val safeMax = maxOf(m.limitMin, m.limitMax)
-        val startPulse = ((config.startDepthMm - m.fitB) / m.fitA).toInt()
-        val endPulse = ((config.endDepthMm - m.fitB) / m.fitA).toInt()
-        if (startPulse !in safeMin..safeMax || endPulse !in safeMin..safeMax) {
-            return "目标深度超出标定行程（%.1f~%.1fmm 对应脉冲 %d/%d 不在限位 %d~%d 内）"
-                .format(config.startDepthMm, config.endDepthMm, startPulse, endPulse, safeMin, safeMax)
-        }
-        return null
-    }
-
-    /**
-     * 生成梯度序列：上行 start→end（末级 clamp 到 end 并去重）+ 下行倒序去峰值
-     * 例：start=20 end=80 step=20 → [20, 40, 60, 80, 60, 40, 20]
-     */
-    private fun buildStageSequence(config: DepthTestConfig): List<Float> {
-        val up = mutableListOf<Float>()
-        var d = config.startDepthMm
-        while (d < config.endDepthMm - 0.01f) {
-            up.add(d)
-            d += config.stepMm
-        }
-        up.add(config.endDepthMm)
-        // 下行 = 上行倒序去掉峰值（首元素）
-        val down = up.reversed().drop(1)
-        return up + down
-    }
-
-    private fun motorOf(viewModel: VariableFertViewModel, motorIndex: Int): ServoCalibration? =
-        viewModel.currentSowingDepthState().motors.getOrNull(motorIndex)
-
-    /**
-     * 发布测试状态到 UI
-     */
-    private fun postStatus(
-        viewModel: VariableFertViewModel,
-        config: DepthTestConfig,
-        stageIndex: Int,
-        stageCount: Int,
-        stageLabel: String,
-        message: String,
-        anomalies: List<String>,
-        running: Boolean = false,
-        finished: Boolean = false
-    ) {
-        viewModel.depthTestStatus.postValue(
-            DepthTestStatus(
-                running = running,
-                finished = finished,
-                motorIndex = config.motorIndex,
-                stageIndex = stageIndex,
-                stageCount = stageCount,
-                stageLabel = stageLabel,
-                targetDepth = currentTarget,
-                message = message,
-                anomalies = anomalies.toList()
-            )
-        )
+    private companion object {
+        const val POLL_MS = 100L
+        const val FEEDBACK_TIMEOUT_MS = 2000L
     }
 }

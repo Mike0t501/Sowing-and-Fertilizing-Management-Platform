@@ -102,6 +102,13 @@ private enum class ExperimentCsvType(
         shortLabel = "测试",
         description = "播种深度一键测试",
         color = Color(0xFFF57C00)
+    ),
+    DepthEvent(
+        prefix = "depthEvt_",
+        label = "播深事件",
+        shortLabel = "事件",
+        description = "偏浅、偏深、腾空和不稳定事件",
+        color = Color(0xFFC62828)
     );
 }
 
@@ -151,6 +158,13 @@ private fun ExperimentTypeFilterBar(
                 selected = selectedType == ExperimentCsvType.DepthTest,
                 color = ExperimentCsvType.DepthTest.color,
                 onClick = { onSelect(ExperimentCsvType.DepthTest) }
+            )
+            ExperimentTypeFilterButton(
+                modifier = Modifier.weight(1f), label = ExperimentCsvType.DepthEvent.label,
+                count = typeCounts[ExperimentCsvType.DepthEvent] ?: 0,
+                selected = selectedType == ExperimentCsvType.DepthEvent,
+                color = ExperimentCsvType.DepthEvent.color,
+                onClick = { onSelect(ExperimentCsvType.DepthEvent) }
             )
         }
     }

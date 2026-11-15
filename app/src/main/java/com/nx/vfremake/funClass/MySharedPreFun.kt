@@ -19,6 +19,10 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import com.nx.vfremake.R
 import com.nx.vfremake.data.CalibrationMode
+import com.nx.vfremake.data.DepthNodeChannel
+import com.nx.vfremake.data.DepthNodeState
+import com.nx.vfremake.data.DepthDisplayMode
+import com.nx.vfremake.data.DepthQualityConfig
 import com.nx.vfremake.data.IndirectCalibPoint
 import com.nx.vfremake.data.RECORD_INTERVAL_MAX_MS
 import com.nx.vfremake.data.RECORD_INTERVAL_MIN_MS
@@ -26,6 +30,35 @@ import com.nx.vfremake.data.STANDARD_BLOCK_DEPTHS_MM
 import com.nx.vfremake.mSPParamData
 
 class MySharedPreFun(private val context: Context) {
+
+    /** 节点标定与旧 enc_N_* 无关；模拟标定调用方禁止写入真实存储。 */
+    fun saveDepthNodeCalibration(channel: DepthNodeChannel) {
+        require(channel.row in 0..7)
+        getSowingDepthSharedPre().edit()
+            .putString("dn_${channel.row}_calibration", DepthNodeStorage.encode(channel)).apply()
+    }
+
+    /** 显示档位只影响 UI，与控制、记录的原值无关。 */
+    fun saveDepthDisplayMode(mode: DepthDisplayMode) {
+        getSowingDepthSharedPre().edit().putString("depth_display_mode", mode.name).apply()
+    }
+
+    /** CV阈值为可调工程参数，和每次记录的元数据保持一致。 */
+    fun saveDepthQualityConfig(config: DepthQualityConfig) {
+        require(config.cvThreshold.isFinite() && config.cvThreshold in 0.01f..2f)
+        getSowingDepthSharedPre().edit().putFloat("depth_quality_cv_threshold", config.cvThreshold).apply()
+    }
+
+    /** 旧独立编码器键不读取、不迁移；未标定节点需要重新采集电压标定。 */
+    fun loadDepthNodeState(): DepthNodeState {
+        val prefs = getSowingDepthSharedPre()
+        val mode = runCatching { DepthDisplayMode.valueOf(prefs.getString("depth_display_mode", "HALF_CM") ?: "HALF_CM") }
+            .getOrDefault(DepthDisplayMode.HALF_CM)
+        return DepthNodeState(channels = List(8) { row ->
+            DepthNodeStorage.decode(prefs.getString("dn_${row}_calibration", null), row)
+        }, displayMode = mode, qualityConfig = DepthQualityConfig(
+            prefs.getFloat("depth_quality_cv_threshold", 0.2f).takeIf { it.isFinite() && it in 0.01f..2f } ?: 0.2f))
+    }
 
     /**
      * 获取设置SharedPreferences
@@ -507,84 +540,7 @@ class MySharedPreFun(private val context: Context) {
         )
     }
 
-    // =========================================================================
-    // 摆臂编码器实测播深 — SharedPreferences 持久化
-    // 复用 "sowing_depth_prefs" 文件，键前缀 enc_ 与伺服 depth_ 区分。
-    //
-    // Key 命名规则（N = motorIndex 0~7，M = 标定点序号 0~4）：
-    //   enc_N_nodeId        Int    编码器 CAN Node-ID（默认 21+N）
-    //   enc_N_zeroSet       Bool   是否已做零位预设
-    //   enc_N_resolution    Int    物理单圈分辨率（配置工具读 6501h 写入；0=未知）
-    //   enc_N_fitA          Float  拟合系数 a
-    //   enc_N_fitB          Float  拟合系数 b
-    //   enc_N_fitValid      Bool   拟合是否有效
-    //   enc_N_cal_count     Int    已存标定点数量
-    //   enc_N_cal_M_pos     Int    第 M 个标定点的（滤波后）编码值
-    //   enc_N_cal_M_depth   Float  第 M 个标定点的实测深度 mm
-    // =========================================================================
 
-    /**
-     * 保存单路编码器的标定配置（nodeId / 零位标志 / 分辨率 / 标定点 / 拟合系数）。
-     * 运行时状态（rawPosition / isOnline 等）不持久化。
-     */
-    fun saveEncoderCalibration(cal: com.nx.vfremake.data.EncoderCalibration) {
-        val n = cal.motorIndex
-        val prefs = getSowingDepthSharedPre().edit()
-
-        prefs.putInt("enc_${n}_nodeId",       cal.nodeId)
-        prefs.putBoolean("enc_${n}_zeroSet",  cal.zeroSet)
-        prefs.putInt("enc_${n}_resolution",   cal.singleTurnResolution)
-        prefs.putFloat("enc_${n}_fitA",       cal.fitA)
-        prefs.putFloat("enc_${n}_fitB",       cal.fitB)
-        prefs.putBoolean("enc_${n}_fitValid", cal.fitValid)
-
-        val pts = cal.calibrationPoints
-        prefs.putInt("enc_${n}_cal_count", pts.size)
-        pts.forEachIndexed { m, (pos, depth) ->
-            prefs.putInt("enc_${n}_cal_${m}_pos",     pos)
-            prefs.putFloat("enc_${n}_cal_${m}_depth", depth)
-        }
-
-        prefs.apply()
-    }
-
-    /**
-     * 读取单路编码器标定配置，返回 [com.nx.vfremake.data.EncoderCalibration]
-     * （仅含持久化字段，运行时字段保持默认值）。
-     * 若从未写入，返回默认对象（nodeId = 21 + motorIndex）。
-     */
-    fun loadEncoderCalibration(motorIndex: Int): com.nx.vfremake.data.EncoderCalibration {
-        val n = motorIndex
-        val prefs = getSowingDepthSharedPre()
-
-        val calCount  = prefs.getInt("enc_${n}_cal_count", 0)
-        val calPoints = (0 until calCount).map { m ->
-            Pair(
-                prefs.getInt("enc_${n}_cal_${m}_pos", 0),
-                prefs.getFloat("enc_${n}_cal_${m}_depth", 0f)
-            )
-        }
-
-        return com.nx.vfremake.data.EncoderCalibration(
-            motorIndex           = n,
-            nodeId               = prefs.getInt("enc_${n}_nodeId", 21 + n),
-            zeroSet              = prefs.getBoolean("enc_${n}_zeroSet", false),
-            singleTurnResolution = prefs.getInt("enc_${n}_resolution", 0),
-            calibrationPoints    = calPoints,
-            fitA                 = prefs.getFloat("enc_${n}_fitA", 0f),
-            fitB                 = prefs.getFloat("enc_${n}_fitB", 0f),
-            fitValid             = prefs.getBoolean("enc_${n}_fitValid", false)
-        )
-    }
-
-    /**
-     * 加载完整的 [com.nx.vfremake.data.EncoderFeedbackState]（8 路编码器）。
-     * App 启动时调用一次，经 ViewModel.restoreEncoderPersistentState 合并进运行时状态。
-     */
-    fun loadEncoderFeedbackState(): com.nx.vfremake.data.EncoderFeedbackState =
-        com.nx.vfremake.data.EncoderFeedbackState(
-            encoders = (0 until 8).map { loadEncoderCalibration(it) }
-        )
 }
 
 /**

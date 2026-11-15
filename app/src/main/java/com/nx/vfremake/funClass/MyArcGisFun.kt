@@ -16,12 +16,18 @@
 package com.nx.vfremake.funClass
 
 import android.content.Context
-import android.graphics.drawable.BitmapDrawable
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
-import androidx.core.content.res.ResourcesCompat
+import com.esri.arcgisruntime.data.Field
 import com.esri.arcgisruntime.data.QueryParameters
 import com.esri.arcgisruntime.data.ShapefileFeatureTable
+import com.esri.arcgisruntime.geometry.AngularUnit
+import com.esri.arcgisruntime.geometry.AngularUnitId
+import com.esri.arcgisruntime.geometry.GeodeticCurveType
 import com.esri.arcgisruntime.geometry.GeometryEngine
+import com.esri.arcgisruntime.geometry.LinearUnit
+import com.esri.arcgisruntime.geometry.LinearUnitId
 import com.esri.arcgisruntime.geometry.Point
 import com.esri.arcgisruntime.geometry.Polygon
 import com.esri.arcgisruntime.geometry.PolygonBuilder
@@ -31,6 +37,7 @@ import com.esri.arcgisruntime.layers.FeatureLayer
 import com.esri.arcgisruntime.loadable.LoadStatus
 import com.esri.arcgisruntime.mapping.ArcGISMap
 import com.esri.arcgisruntime.mapping.Basemap
+import com.esri.arcgisruntime.mapping.Viewpoint
 import com.esri.arcgisruntime.mapping.view.Graphic
 import com.esri.arcgisruntime.mapping.view.GraphicsOverlay
 import com.esri.arcgisruntime.symbology.ClassBreaksRenderer
@@ -40,6 +47,8 @@ import com.esri.arcgisruntime.symbology.SimpleLineSymbol
 import com.nx.vfremake.DEPTH_MAP_CM_TO_MM
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.data.activeSowingDepthMotorIndices
+import com.nx.vfremake.data.DepthPrescriptionSource
 import com.nx.vfremake.depthQueryField
 import com.nx.vfremake.fertQueryField
 import com.nx.vfremake.fittingCoefficientA
@@ -47,16 +56,62 @@ import com.nx.vfremake.fittingCoefficientB
 import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mRmcData
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReferenceArray
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
 
-// 控深模式下处方图查询被静默跳过（table 未加载 / 深度字段未配置）的一次性日志节流标志。
-// 每条 RMC 都会走 dantiPositionAndCtrl，不节流会刷屏；loadShp 成功后复位以便下次仍能提示。
-private var depthQuerySkipLogged = false
-
 class MyArcGisFun {
+
+    companion object {
+        private const val CLEARED_PATH = "-1"
+        private val mapLoadRevision = AtomicLong()
+        private val fieldListRevision = AtomicLong()
+        private val markerHandler by lazy { Handler(Looper.getMainLooper()) }
+        private val numericFieldTypes = setOf(
+            Field.Type.SHORT, Field.Type.INTEGER, Field.Type.FLOAT, Field.Type.DOUBLE
+        )
+        private val meters by lazy { LinearUnit(LinearUnitId.METERS) }
+        private val degrees by lazy { AngularUnit(AngularUnitId.DEGREES) }
+    }
+
+    private fun pathKey(depthMode: Boolean) =
+        if (depthMode) R.string.depthShpFilePath_name else R.string.myLoadShpFile_Path_name
+
+    private fun fieldKey(depthMode: Boolean) =
+        if (depthMode) R.string.depthQueryField_name else R.string.fertQueryField_name
+
+    fun configuredShpPath(context: Context, depthMode: Boolean): String? =
+        MySharedPreFun(context).getSpecificValue(pathKey(depthMode))
+            ?.takeIf { it.isNotBlank() && it != CLEARED_PATH }
+
+    fun savePrescription(
+        context: Context,
+        viewModel: VariableFertViewModel,
+        depthMode: Boolean,
+        path: String,
+        field: String,
+    ) {
+        MySharedPreFun(context).getMySharedPre().edit()
+            .putString(context.getString(pathKey(depthMode)), path)
+            .putString(context.getString(fieldKey(depthMode)), field)
+            .apply()
+        loadShp(context, viewModel, depthMode)
+    }
+
+    fun clearPrescription(context: Context, viewModel: VariableFertViewModel, depthMode: Boolean) {
+        // 保留显式清除标记，避免默认配置恢复旧图或再次迁移旧版共享图。
+        MySharedPreFun(context).getMySharedPre().edit()
+            .putString(context.getString(pathKey(depthMode)), CLEARED_PATH)
+            .apply()
+        getFieldList(null, viewModel)
+        loadShp(context, viewModel, depthMode)
+    }
 
     //...加载渲染地图有关
     /**
@@ -66,50 +121,73 @@ class MyArcGisFun {
      * @return
      * @note
      */
-    fun loadShp(context: Context, mVariableFertViewModel: VariableFertViewModel) {
-        val shpPath =
-            MySharedPreFun(context).getSpecificValue(R.string.myLoadShpFile_Path_name)
-        if (shpPath.isNullOrEmpty()) return
-        // 施肥/深度两个字段都先读出来（深度可选），加载后据存在性各自置入全局
-        val fertField =
-            MySharedPreFun(context).getSpecificValue(R.string.fertQueryField_name)
-        val depthField =
-            MySharedPreFun(context).getSpecificValue(R.string.depthQueryField_name)
-        // 处方图工作模式：控深开 → 按深度字段渲染；控深关 → 按施肥字段渲染
-        val depthMode = mVariableFertViewModel.depthPrescriptionMode.value == true
+    fun loadShp(
+        context: Context,
+        mVariableFertViewModel: VariableFertViewModel,
+        depthMode: Boolean = mVariableFertViewModel.depthPrescriptionMode.value == true,
+    ) {
+        val preferences = MySharedPreFun(context)
+        val renderField = preferences.getSpecificValue(fieldKey(depthMode)).orEmpty()
+        val explicitPath = configuredShpPath(context, depthMode)
+        val legacyDepthPath = if (depthMode && renderField.isNotBlank() &&
+            preferences.getSpecificValue(pathKey(true)) == null
+        ) configuredShpPath(context, false) else null
+        val shpPath = explicitPath ?: legacyDepthPath
+        val revision = mapLoadRevision.incrementAndGet()
+        val viewModel = mVariableFertViewModel
 
-        val shapefileFeatureTable = ShapefileFeatureTable(shpPath)
-        shapefileFeatureTable.loadAsync()
-        // 异步加载监听
-        shapefileFeatureTable.addDoneLoadingListener {
-            if (shapefileFeatureTable.loadStatus == LoadStatus.LOADED) {
-                try {
-                    val fieldListString = shapefileFeatureTable.fields.map { it.name }
-                    // 检查字段是否属于该处方图字段集，存在则置入全局，否则空串
-                    fertQueryField = if (!fertField.isNullOrEmpty() &&
-                        fieldListString.contains(fertField)
-                    ) fertField else ""
-                    depthQueryField = if (!depthField.isNullOrEmpty() &&
-                        fieldListString.contains(depthField)
-                    ) depthField else ""
-                    depthQuerySkipLogged = false   // 重新加载后允许再次提示跳过原因
-                    // 渲染字段：控深模式优先深度字段，否则施肥字段（只显示当前工作的处方图）
-                    val renderField =
-                        if (depthMode && depthQueryField.isNotEmpty()) depthQueryField
-                        else fertQueryField
-                    if (renderField.isNotEmpty()) {
-                        MyArcGisFun().loadShapefile(
-                            shpPath,
-                            renderField,
-                            mVariableFertViewModel,
-                            context
-                        )
-                    }
-                } catch (e: Exception) {
-                    Log.e("shapefileFeatureTable", "错误: " + e.message)
-                }
-            }
+        viewModel.shapefileFeatureTable.value = null
+        viewModel.shapefileFeatureLayer.value = null
+        viewModel.mArcGISMap.value = null
+        viewModel.colorList.value = emptyList()
+        viewModel.classBreaksList.value = emptyList()
+        fertQueryField = ""
+        depthQueryField = ""
+        if (depthMode) {
+            viewModel.setDepthPrescriptionSource(
+                if (shpPath == null) DepthPrescriptionSource.FIXED else DepthPrescriptionSource.LOADING
+            )
         }
+        if (shpPath == null) return
+
+        val table = ShapefileFeatureTable(shpPath)
+        table.addDoneLoadingListener {
+            if (mapLoadRevision.get() != revision) return@addDoneLoadingListener
+            if (table.loadStatus != LoadStatus.LOADED) {
+                Log.e("ShapefileFeatureTable", "处方图加载失败", table.loadError)
+                if (depthMode) viewModel.setDepthPrescriptionSource(
+                    if (explicitPath == null) DepthPrescriptionSource.FIXED else DepthPrescriptionSource.UNAVAILABLE
+                )
+                return@addDoneLoadingListener
+            }
+            if (renderField !in prescriptionFields(table)) {
+                if (depthMode) viewModel.setDepthPrescriptionSource(
+                    if (explicitPath == null) DepthPrescriptionSource.FIXED else DepthPrescriptionSource.MISSING_FIELD
+                )
+                return@addDoneLoadingListener
+            }
+            if (depthMode) {
+                depthQueryField = renderField
+                if (explicitPath == null) preferences.getMySharedPre().edit()
+                    .putString(context.getString(pathKey(true)), shpPath)
+                    .apply()
+            } else {
+                fertQueryField = renderField
+            }
+
+            val layer = FeatureLayer(table)
+            val map = ArcGISMap(table.spatialReference ?: SpatialReferences.getWgs84()).apply {
+                basemap = Basemap()
+                operationalLayers.add(layer)
+                table.extent?.takeUnless { it.isEmpty }?.let { initialViewpoint = Viewpoint(it) }
+            }
+            viewModel.shapefileFeatureLayer.value = layer
+            viewModel.shapefileFeatureTable.value = table
+            viewModel.mArcGISMap.value = map
+            if (depthMode) viewModel.setDepthPrescriptionSource(DepthPrescriptionSource.PRESCRIPTION)
+            renderPrescription(table, layer, renderField, viewModel, context, revision)
+        }
+        table.loadAsync()
     }
 
     /**
@@ -120,23 +198,23 @@ class MyArcGisFun {
      * @note
      */
     fun getFieldList(shpFilePath: String?, mVariableFertViewModel: VariableFertViewModel) {
-        if (!shpFilePath.isNullOrEmpty()) {
-            // 构建ShapefileFeatureTable，引入本地存储的shapefile文件
-            val shapefileFeatureTable = ShapefileFeatureTable(shpFilePath)
-            shapefileFeatureTable.loadAsync()
-            // 异步加载监听
-            shapefileFeatureTable.addDoneLoadingListener {
-                if (shapefileFeatureTable.loadStatus == LoadStatus.LOADED) {
-                    try {
-                        val fieldListString = shapefileFeatureTable.fields.map { it.name }
-                        mVariableFertViewModel.fieldsList.postValue(fieldListString)
-                    } catch (e: Exception) {
-                        Log.e("shapefileFeatureTable", "获取字段错误: " + e.message)
-                    }
-                }
+        val revision = fieldListRevision.incrementAndGet()
+        mVariableFertViewModel.prescriptionDraftPath.value = shpFilePath
+        mVariableFertViewModel.fieldsList.value = if (shpFilePath.isNullOrBlank()) emptyList() else null
+        if (shpFilePath.isNullOrBlank()) return
+
+        val table = ShapefileFeatureTable(shpFilePath)
+        table.addDoneLoadingListener {
+            if (fieldListRevision.get() == revision) {
+                mVariableFertViewModel.fieldsList.value = if (table.loadStatus == LoadStatus.LOADED)
+                    prescriptionFields(table) else emptyList()
             }
         }
+        table.loadAsync()
     }
+
+    private fun prescriptionFields(table: ShapefileFeatureTable): List<String> =
+        table.fields.filter { it.fieldType in numericFieldTypes }.map { it.name }
 
     /**
      * 数字格式化
@@ -161,6 +239,7 @@ class MyArcGisFun {
     private fun generateGradient(
         startColor: Int, endColor: Int, steps: Int
     ): List<Int> {
+        if (steps == 1) return listOf(startColor)
         // 解析开始颜色和结束颜色的RGB值
         val startA = (startColor shr 24) and 0xff
         val startR = (startColor shr 16) and 0xff
@@ -206,7 +285,7 @@ class MyArcGisFun {
         min: Double, max: Double, colors: List<Int>, steps: Int, context: Context
     ): List<ClassBreaksRenderer.ClassBreak> {
         val range = max - min
-        val classInterval: Double = range / steps
+        val classInterval = if (steps > 0) range / steps else 0.0
         // 施肥量越多越黄
         val classBreaks = ArrayList<ClassBreaksRenderer.ClassBreak>()
 
@@ -247,161 +326,50 @@ class MyArcGisFun {
         return classBreaks
     }
 
-    /**
-     *  加载离线地图(处方图)
-     * @param   shpFilePath:地图路径
-     * @param   renderField:分级渲染所用字段（施肥量 / 播种深度，按当前工作模式）
-     * @param   mVariableFertViewModel:更新UI使用的viewmodel
-     * @param   context:上下文，获取strings.xml里的资源值
-     * @note
-     */
-    private fun loadShapefile(
-        shpFilePath: String,
-        renderField: String,
-        mVariableFertViewModel: VariableFertViewModel,
-        context: Context
+    private fun renderPrescription(
+        table: ShapefileFeatureTable,
+        layer: FeatureLayer,
+        field: String,
+        viewModel: VariableFertViewModel,
+        context: Context,
+        revision: Long,
     ) {
-        val mArcGISMap = ArcGISMap()
-        // 构建ShapefileFeatureTable，引入本地存储的shapefile文件
-        val shapefileFeatureTable = ShapefileFeatureTable(shpFilePath)
-        shapefileFeatureTable.loadAsync()
-        // 异步加载监听
-        shapefileFeatureTable.addDoneLoadingListener {
-            if (shapefileFeatureTable.loadStatus == LoadStatus.LOADED) {
-                // 构建FeatureLayer
-                val shapefileFeatureLayer = FeatureLayer(shapefileFeatureTable)
-                shapefileFeatureLayer.loadAsync()
-
-                // 设置Shapefile文件的渲染方式
-
-                //...第一种渲染方式黄色轮廓绿色实心方块
-//                val lineSymbol = SimpleLineSymbol(SimpleLineSymbol.Style.SOLID, Color.YELLOW, 1.0f)
-//                val fillSymbol =
-//                    SimpleFillSymbol(SimpleFillSymbol.Style.SOLID, Color.GREEN, lineSymbol)
-//                val renderer = SimpleRenderer(fillSymbol)
-                //...
-
-                //...第二种渲染方式，分级渲染
-                // 分级渲染非零地块，零区域在分级函数里已经应用
-                try {
-                    val queryParameters = QueryParameters().apply {
-                        whereClause = renderField // 指定渲染字段（施肥量 / 播种深度）
-                    }
-                    var maxValue = Double.MIN_VALUE
-                    var minValue = Double.MAX_VALUE
-                    val shapefileFuture =
-                        shapefileFeatureTable.queryFeaturesAsync(queryParameters)
-                    shapefileFuture.addDoneListener {
-                        val result = shapefileFuture.get()
-
-                        for (feature in result) {
-                            val attribute = feature.attributes[renderField]
-                            if (attribute == 0.0) {
-                                // 如果当前字段的值为0，则跳过本次遍历
-                                // 创建分级渲染器时已经考虑到0值，这里跳过避免清一色
-                                continue
-                            }
-                            // 检索的是shptable数据中的 栏，根据实际修改
-                            // 因为制作的shp字段数据有浮点也有双精度，判断浮点还是双精度
-                            val currentValue: Double = when (attribute) {
-                                is Float -> {
-                                    attribute.toDouble()
-                                }
-
-                                is Int -> {
-                                    attribute.toDouble()
-                                }
-
-                                is Double -> {
-                                    attribute
-                                }
-
-                                else -> {
-                                    throw IllegalArgumentException("字段信息不是双精度、浮点或者整形类型")
-                                }
-                            }
-                            // 执行遍历
-                            if (currentValue > maxValue) {
-                                maxValue = currentValue
-                            }
-                            if (currentValue < minValue) {
-                                minValue = currentValue
-                            }
-                        }
-                        //...遍历测试代码
-                        Log.d("FeatureResult", "max: $maxValue   min:$minValue")
-                        //...
-
-                        // colorList的颜色提示用
-                        val stepSharedPre =
-                            MySharedPreFun(context).getSpecificValue(R.string.colorStep_name)
-                        val step = if (!stepSharedPre.isNullOrEmpty()) {
-                            stepSharedPre.toInt()
-                        } else {
-                            context.resources.getInteger(R.integer.colorStep_value)
-                        }
-                        val colorList = MyArcGisFun().generateGradient(
-                            context.getColor(R.color.start_color_green),
-                            context.getColor(R.color.end_color_yellow),
-                            step
-                        )
-                        val classBreaks = MyArcGisFun().calculateBreaks(
-                            minValue,
-                            maxValue,
-                            colorList,
-                            step,
-                            context
-                        )
-                        mVariableFertViewModel.colorList.value = colorList
-                        for (i in colorList.indices) {
-                            val co = colorList[i]
-                            Log.d("ColorList", "colorlist $i: $co")
-                        }
-                        // classBreaks的颜色提示用
-                        val combinedList = mutableListOf<String>()
-                        for (i in classBreaks.indices) {
-                            val cb = classBreaks[i]
-                            val min = MyArcGisFun().formatNumber(cb.minValue)
-                            val max = MyArcGisFun().formatNumber(cb.maxValue)
-                            val combined = "$min - $max"
-                            combinedList.add(combined)
-                            Log.d(
-                                "ClassBreakList",
-                                "classBreak $i: $min - $max " + cb.description
-                            )
-                        }
-                        mVariableFertViewModel.classBreaksList.value = combinedList.toList()
-
-                        // 设置分级渲染器
-                        val renderer = ClassBreaksRenderer(
-                            renderField,
-                            classBreaks
-                        )
-                        shapefileFeatureLayer.renderer = renderer
-                    }
-                } catch (e: Exception) {
-                    Log.e(
-                        "ClassBreaksRenderer",
-                        "设置分级渲染器失败: " + e.message
-                    )
+        val query = QueryParameters().apply {
+            whereClause = "1=1"
+            isReturnGeometry = false
+        }
+        val future = table.queryFeaturesAsync(query)
+        future.addDoneListener {
+            if (mapLoadRevision.get() != revision) return@addDoneListener
+            try {
+                var minValue = Double.POSITIVE_INFINITY
+                var maxValue = Double.NEGATIVE_INFINITY
+                for (feature in future.get()) {
+                    val value = (feature.attributes[field] as? Number)?.toDouble() ?: continue
+                    if (!value.isFinite() || value <= 0.0) continue
+                    minValue = minOf(minValue, value)
+                    maxValue = maxOf(maxValue, value)
                 }
-                //...第二种渲染方式，分级渲染结束
-                // 添加到地图的图层组中
-                val basemap = Basemap()
-                mArcGISMap.basemap = basemap
-
-                mArcGISMap.operationalLayers.add(shapefileFeatureLayer)
-
-                // 观测mArcGISMap
-                mVariableFertViewModel.shapefileFeatureLayer.value = shapefileFeatureLayer
-                mVariableFertViewModel.shapefileFeatureTable.value = shapefileFeatureTable
-                mVariableFertViewModel.mArcGISMap.value = mArcGISMap
-
-            } else {
-                Log.e(
-                    "ShapefileFeatureTable",
-                    "ShapefileFeatureTable加载失败: " + shapefileFeatureTable.loadError
+                val steps = when {
+                    !minValue.isFinite() -> 0
+                    minValue == maxValue -> 1
+                    else -> (MySharedPreFun(context).getSpecificValue(R.string.colorStep_name)
+                        ?.toIntOrNull() ?: context.resources.getInteger(R.integer.colorStep_value))
+                        .coerceAtLeast(1)
+                }
+                val colors = if (steps == 0) emptyList() else generateGradient(
+                    context.getColor(R.color.start_color_green),
+                    context.getColor(R.color.end_color_yellow),
+                    steps
                 )
+                val breaks = calculateBreaks(minValue, maxValue, colors, steps, context)
+                layer.renderer = ClassBreaksRenderer(field, breaks)
+                viewModel.classBreaksList.value = breaks.map {
+                    "${formatNumber(it.minValue)} - ${formatNumber(it.maxValue)}"
+                }
+                viewModel.colorList.value = colors
+            } catch (e: Exception) {
+                Log.e("ClassBreaksRenderer", "设置处方图分级渲染器失败", e)
             }
         }
     }
@@ -422,70 +390,34 @@ class MyArcGisFun {
         pointCompensationLLGeo: Point,
         navMarkGraphicsOverlay: GraphicsOverlay,
         mVariableFertViewModel: VariableFertViewModel,
-        context: Context
+        context: Context,
+        isCurrentFix: () -> Boolean,
     ) {
-        // 转换Drawable资源到BitmapDescriptor
-        val navmarkDrawable =
-            ResourcesCompat.getDrawable(
-                context.resources,
-                R.drawable.navigation,
-                null
-            ) as BitmapDrawable
-        val navmarkCompensationDrawable =
-            ResourcesCompat.getDrawable(
-                context.resources,
-                R.drawable.navigation_compensation,
-                null
-            ) as BitmapDrawable
-        // 创建点对象
-        // SpatialReference.create(4326)和SpatialReferences.getWgs84()并无区别，地理坐标系
-        val pointLLGeo =
-            Point(mRmcData.longitude, mRmcData.latitude, SpatialReferences.getWgs84())
-        // 创建一个图像标记符号
-        val symbolFuture = PictureMarkerSymbol.createAsync(navmarkDrawable)
-        symbolFuture.addDoneListener {
-            try {
-                val symbol = symbolFuture.get()
-                // symbolFuture.angle使用的是角度
-                val mapViewRotation = mVariableFertViewModel.mapViewRotation.value ?: 0.0
-                if (mVariableFertViewModel.navCenterIsRunning.value != true) {
-                    symbol.angle = (mRmcData.directionDeg - mapViewRotation).toFloat()
-                }
-                // 使用符号和几何图形创建图像
-                val graphic = Graphic(pointLLGeo, symbol)
+        val antenna = Point(mRmcData.longitude, mRmcData.latitude, SpatialReferences.getWgs84())
+        val direction = mRmcData.directionDeg
+        val showCompensation = MySharedPreFun(context)
+            .getSpecificValue(R.string.navMarkCompensated_Switch_name) == "1"
+        markerHandler.post {
+            if (!isCurrentFix()) return@post
+            val graphics = navMarkGraphicsOverlay.graphics
+            val tractor = graphics.firstOrNull() ?: Graphic(antenna, MapMarkerArtwork.tractor(context.resources))
+                .apply { zIndex = 1 }
+                .also { graphics.add(it) }
+            tractor.geometry = antenna
+            val mapRotation = mVariableFertViewModel.mapViewRotation.value ?: 0.0
+            (tractor.symbol as PictureMarkerSymbol).angle = (direction - mapRotation).toFloat()
 
-                // 清除navMark图层先前的所有图形，该图层只用于navMark
-                navMarkGraphicsOverlay.graphics?.clear()
-                // 在地图上添加图像
-                navMarkGraphicsOverlay.graphics?.add(graphic)
-
-                if (MySharedPreFun(context).getSpecificValue(R.string.navMarkCompensated_Switch_name) == "1") {
-                    // 处理第二个点的符号和图形
-                    val compensationSymbolFuture =
-                        PictureMarkerSymbol.createAsync(navmarkCompensationDrawable)
-                    compensationSymbolFuture.addDoneListener {
-                        try {
-                            val compensationSymbol = compensationSymbolFuture.get()
-
-                            if (mVariableFertViewModel.navCenterIsRunning.value != true) {
-                                compensationSymbol.angle =
-                                    (mRmcData.directionDeg - mapViewRotation).toFloat()
-                            }
-
-                            val compensationGraphic =
-                                Graphic(pointCompensationLLGeo, compensationSymbol)
-
-                            // 添加第二个点的图形
-                            navMarkGraphicsOverlay.graphics?.add(compensationGraphic)
-
-                        } catch (e: Exception) {
-                            Log.e("MarktoMap", "添加compensation图标失败: " + e.message)
-                        }
-                    }
-                }
-                mVariableFertViewModel.navMarkGraphicsOverlay.postValue(navMarkGraphicsOverlay)
-            } catch (e: Exception) {
-                Log.e("MarktoMap", "添加navigation图标失败: " + e.message)
+            var compensation = graphics.getOrNull(1)
+            if (showCompensation && compensation == null) {
+                compensation = Graphic(pointCompensationLLGeo, MapMarkerArtwork.compensation(context.resources))
+                    .also { graphics.add(it) }
+            }
+            compensation?.let {
+                it.geometry = pointCompensationLLGeo
+                it.isVisible = showCompensation
+            }
+            if (mVariableFertViewModel.navMarkGraphicsOverlay.value !== navMarkGraphicsOverlay) {
+                mVariableFertViewModel.navMarkGraphicsOverlay.value = navMarkGraphicsOverlay
             }
         }
     }
@@ -703,6 +635,80 @@ class MyArcGisFun {
         return Point(mapPointX, mapPointY, SpatialReference.create(2363))
     }
 
+    fun offsetGeographicPosition(
+        antenna: Point,
+        directionDeg: Double,
+        forwardMeters: Double,
+        rightMeters: Double = 0.0,
+    ): Point {
+        val distance = hypot(forwardMeters, rightMeters)
+        if (distance == 0.0) return antenna
+        val bearing = (directionDeg + Math.toDegrees(atan2(rightMeters, forwardMeters)) + 360.0) % 360.0
+        return GeometryEngine.moveGeodetic(antenna, distance, meters, bearing, degrees, GeodeticCurveType.GEODESIC)
+    }
+
+    /** 播深单体位置按 WGS84 距离偏移，适用于不同地区与无处方图地图。 */
+    fun depthRowPositions(
+        antenna: Point,
+        directionDeg: Double,
+        parameters: SPParamData,
+        lagCompensationMeters: Double = 0.0,
+    ): Array<Point> = Array(parameters.rowNumber) { row ->
+        val rowOffset = (row - (parameters.rowNumber - 1) / 2.0) * parameters.rowSize
+        offsetGeographicPosition(
+            antenna,
+            directionDeg,
+            lagCompensationMeters - parameters.gnssDistanceVertical,
+            rowOffset - parameters.gnssDistanceHorizontal,
+        )
+    }
+
+    fun queryDepthTargets(dantiLLGeo: Array<Point>, viewModel: VariableFertViewModel) {
+        val query = viewModel.beginDepthPrescriptionQuery() ?: return
+        val table = viewModel.shapefileFeatureTable.value ?: return
+        val field = depthQueryField.takeIf { it.isNotBlank() } ?: return
+        val activeRows = activeSowingDepthMotorIndices(dantiLLGeo.size, viewModel.activeMotorsState.value)
+        if (activeRows.isEmpty()) return
+
+        val depthsMm = AtomicReferenceArray<Float>(dantiLLGeo.size)
+        val remaining = AtomicInteger(activeRows.size)
+        fun completeRow() {
+            if (remaining.decrementAndGet() == 0) {
+                viewModel.publishDepthPrescriptionQuery(query, List(dantiLLGeo.size) { depthsMm.get(it) })
+            }
+        }
+
+        for (row in activeRows) {
+            try {
+                val parameters = QueryParameters().apply {
+                    geometry = dantiLLGeo[row]
+                    spatialRelationship = QueryParameters.SpatialRelationship.INTERSECTS
+                    whereClause = "1=1"
+                    isReturnGeometry = false
+                }
+                val future = table.queryFeaturesAsync(parameters)
+                future.addDoneListener {
+                    try {
+                        val matchingDepths = future.get().mapNotNull { feature ->
+                            feature.attributes[field]?.toString()?.toDoubleOrNull()
+                                ?.let { (it * DEPTH_MAP_CM_TO_MM).toFloat() }
+                                ?.takeIf { it.isFinite() && it > 0f }
+                        }.toSet()
+                        // 重叠图斑如果目标不同，暂不下发该行的目标。
+                        depthsMm.set(row, matchingDepths.singleOrNull())
+                    } catch (e: Exception) {
+                        Log.w("depthQueryField", "播深处方图查询失败，第 ${row + 1} 行", e)
+                    } finally {
+                        completeRow()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("depthQueryField", "无法查询播深处方图，第 ${row + 1} 行", e)
+                completeRow()
+            }
+        }
+    }
+
     /**
      * 单体位置和控制
      * @param  pointXY:补偿后的投影点Point(x,y)
@@ -717,6 +723,7 @@ class MyArcGisFun {
         directionRad: Double,
         mSPParamData: SPParamData,
         mVariableFertViewModel: VariableFertViewModel,
+        isGnssActive: () -> Boolean,
     ): Array<Array<Point>> {
 
         val n = mSPParamData.rowNumber
@@ -724,6 +731,8 @@ class MyArcGisFun {
         var dantiXPro: Double
         var dantiYPro: Double
         var fertApplied = DoubleArray(n) { 0.0 }
+        fun canSendFertilizer() = isSystemRunning && isGnssActive() &&
+            mVariableFertViewModel.depthPrescriptionMode.value != true
 
         //...计算单体投影位置
         for (i in 0 until n) {
@@ -748,7 +757,7 @@ class MyArcGisFun {
             fertApplied = DoubleArray(n) { mSPParamData.fertApplied }
             mVariableFertViewModel.fertApplied.postValue(fertApplied)
             for (i in 0 until n) {
-                if (!isSystemRunning) break
+                if (!canSendFertilizer()) break
                 val motorSpeedrpm = ConvAndCtrlFun().fertToMotorSpeed(
                     mSPParamData.fertApplied,
                     mRmcData.forwardSpeedCalculate,
@@ -764,60 +773,10 @@ class MyArcGisFun {
         }
 
         // 处方图工作模式（拮抗/互斥）：控深开 → 只控播深；控深关 → 只控施肥
-        val depthMode = mVariableFertViewModel.depthPrescriptionMode.value == true
         val table = mVariableFertViewModel.shapefileFeatureTable.value
+        val field = fertQueryField
 
-        if (depthMode) {
-            // ── 播深模式：仅查深度字段、写 targetDepth，绝不下发任何施肥命令 ──
-            if (table == null || depthQueryField.isEmpty()) {
-                // 静默跳过是「电机停在种子深度、永不跟图」的隐蔽根因，必须留痕（一次性）
-                if (!depthQuerySkipLogged) {
-                    depthQuerySkipLogged = true
-                    Log.w(
-                        "depthQueryField",
-                        "控深模式已开启但处方图深度查询被跳过：" +
-                            "table${if (table == null) "未加载" else "已加载"}，" +
-                            "depthQueryField='${depthQueryField}'（空=字段未配置或不存在于shp）"
-                    )
-                }
-            }
-            if (table != null && depthQueryField.isNotEmpty()) {
-                val mapDepth = FloatArray(n) { -1f }
-                for (i in 0 until n) {
-                    val idx = i // 捕获，避免 addDoneListener 闭包错位
-                    val queryParameters = QueryParameters().apply {
-                        geometry = dantiLLGeo[idx]
-                        whereClause = depthQueryField
-                    }
-                    val shapefileFuture = table.queryFeaturesAsync(queryParameters)
-                    shapefileFuture?.addDoneListener {
-                        try {
-                            var depthCm = Double.NaN
-                            shapefileFuture.get().forEach { feature ->
-                                depthCm = feature.attributes[depthQueryField]
-                                    ?.toString()?.toDoubleOrNull() ?: Double.NaN
-                            }
-                            // cm → mm；无效/缺失/≤0 → 不动电机，保留上次 targetDepth
-                            if (isSystemRunning && !depthCm.isNaN() && depthCm > 0.0) {
-                                val depthMm = (depthCm * DEPTH_MAP_CM_TO_MM).toFloat()
-                                mapDepth[idx] = depthMm
-                                Log.d(
-                                    "depthQueryField",
-                                    dantiLLGeo[idx].x.toString() + "  " + dantiLLGeo[idx].y.toString() + "  cm=" + depthCm.toString() + "  mm=" + depthMm.toString()
-                                )
-                                mVariableFertViewModel.updateServoCalibration(idx) {
-                                    it.copy(targetDepth = depthMm)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                        mVariableFertViewModel.mapDepthApplied.postValue(mapDepth)
-                    }
-                }
-            }
-        } else {
-            // ── 施肥模式：与改动前 fert 行为逐字一致（auto 查询 / manual 定额）──
+        if (canSendFertilizer()) {
             // 停车门控（田间实测修复：停车时 3 号电机空转不停）：以真实对地速度 gnssRawSpeed 判停。
             // 近零速时一律对所有排肥电机发 0 并跳过本帧查询/下发——forwardSpeed→0 时 fertToMotorSpeed
             // 返回 -B/A，某路标定 B 与 A 异号时是正的低转速，会让该电机停车空转；固定前进速度模式下
@@ -828,17 +787,18 @@ class MyArcGisFun {
             val fertAuto = mSPParamData.fertApplied == -1.0 || mSPParamData.fertApplied <= 0.0
             if (standstill) {
                 for (i in 0 until n) {
-                    if (!isSystemRunning) break
+                    if (!canSendFertilizer()) break
                     ConvAndCtrlFun().motorSpeedrpmSend(0.0, i)
                 }
                 fertApplied = DoubleArray(n) { 0.0 }
                 mVariableFertViewModel.fertApplied.postValue(fertApplied)
-            } else if (fertAuto && table != null) {
+            } else if (fertAuto && table != null && field.isNotBlank()) {
                 for (i in 0 until n) {
                     val idx = i // 捕获，避免 addDoneListener 闭包错位
                     val queryParameters = QueryParameters().apply {
                         geometry = dantiLLGeo[idx]
-                        whereClause = fertQueryField
+                        whereClause = "1=1"
+                        spatialRelationship = QueryParameters.SpatialRelationship.INTERSECTS
                     }
                     val shapefileFuture = table.queryFeaturesAsync(queryParameters)
                     shapefileFuture?.addDoneListener {
@@ -854,10 +814,12 @@ class MyArcGisFun {
                             var featureFound = false
                             shapefileFuture.get().forEach { feature ->
                                 featureFound = true
-                                fert = feature.attributes[fertQueryField]
+                                fert = feature.attributes[field]
                                     ?.toString()?.toDoubleOrNull() ?: Double.NaN
                             }
-                            if (isSystemRunning) {
+                            if (canSendFertilizer() && table === mVariableFertViewModel.shapefileFeatureTable.value &&
+                                mRmcData.gnssRawSpeed >= RmcData.STANDSTILL_SPEED_KMH
+                            ) {
                                 when {
                                     // ① 图斑之外：该处不施肥 -> 停机
                                     !featureFound -> {
@@ -893,7 +855,9 @@ class MyArcGisFun {
                         } catch (e: Exception) {
                             e.printStackTrace()
                         }
-                        mVariableFertViewModel.fertApplied.postValue(fertApplied)
+                        if (canSendFertilizer() && table === mVariableFertViewModel.shapefileFeatureTable.value) {
+                            mVariableFertViewModel.fertApplied.postValue(fertApplied)
+                        }
                     }
                 }
             } else {

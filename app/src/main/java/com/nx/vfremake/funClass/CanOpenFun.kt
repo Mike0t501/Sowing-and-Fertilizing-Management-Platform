@@ -609,12 +609,12 @@ object CanOpenFun {
     private var lastTxElapsedMs = 0L
 
     /** 持锁前提下：距上一帧不足 [GLOBAL_INTER_FRAME_MS] 则补足等待，再发送。 */
-    private suspend fun paceThenSend(frame: ByteArray) {
+    private suspend fun paceThenSend(frame: ByteArray, transmitter: (ByteArray) -> Unit = ::sendFrame) {
         val sinceLast = SystemClock.elapsedRealtime() - lastTxElapsedMs
         if (sinceLast in 0 until GLOBAL_INTER_FRAME_MS) {
             delay(GLOBAL_INTER_FRAME_MS - sinceLast)
         }
-        sendFrame(frame)
+        transmitter(frame)
         lastTxElapsedMs = SystemClock.elapsedRealtime()
     }
 
@@ -623,6 +623,11 @@ object CanOpenFun {
      */
     suspend fun sendFrameSequenced(frame: ByteArray) {
         sdoMutex.withLock { paceThenSend(frame) }
+    }
+
+    /** 模拟传输仍参与全局20ms步调，但合成请求不得发送给现场硬件。 */
+    suspend fun sendFrameSequenced(frame: ByteArray, virtualTransmitter: (ByteArray) -> Unit) {
+        sdoMutex.withLock { paceThenSend(frame, virtualTransmitter) }
     }
 
     /**
@@ -703,14 +708,12 @@ object JogSession {
 
 /**
  * SDO 应答等待器：把纯推送式的接收路由（CanReceiveCoroutine → ViewModel 状态）扩展出
- * "发一帧、等应答"的请求-应答能力，供编码器标定置零与一次性配置工具使用。
+ * "发一帧、等应答"的请求-应答能力，供伺服诊断与 YZ-MOTOR 验证使用。
  *
  * 为什么需要它：
- *   - 配置工具面对的是【未配置】的编码器（出厂 Node-ID=1，SDO 应答 0x581），
- *     不在任何白名单内，接收路由无法把应答投递到状态容器；
- *   - 写 3001h 改节点 ID 后，设备在保存并断电重启前仍用【旧 ID】应答（手册明确），
- *     等待方必须能按任意 canId 精确匹配；
- *   - 置零/配置每步都要"收到 0x60 应答再走下一步，超时报错中止"，轮询状态容器
+ *   - 诊断读写需要取得原始应答，单靠状态容器无法区分超时、拒绝和旧值；
+ *   - 维护操作必须能按明确的应答 canId 匹配；
+ *   - 每步都要收到应答再走下一步，超时报错中止，轮询状态容器
  *     既不可靠（同值短路）又有竞态。
  *
  * 匹配语义：按应答 CAN-ID（0x580+nodeId）匹配，同一 canId 同时只有一个 waiter

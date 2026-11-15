@@ -8,14 +8,20 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.activity.result.ActivityResultLauncher
 import androidx.core.app.ActivityCompat
 import com.nx.vfremake.R
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStreamWriter
+import java.nio.file.Files
+import java.util.Locale
 
 
 /**
@@ -66,8 +72,81 @@ class DocuAndManageFun {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             type = "*/*"
             addCategory(Intent.CATEGORY_OPENABLE)
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
         selectFileLauncher.launch(intent)
+    }
+
+    /** ArcGIS 需要同名的本地文件。分区存储下将用户选中的整组文件复制进应用目录。须在 IO 线程调用。 */
+    suspend fun resolveSelectedShapefile(context: Context, uris: List<Uri>): String? {
+        val requiredExtensions = setOf("shp", "shx", "dbf")
+        val allowedExtensions = requiredExtensions + setOf("prj", "cpg")
+        val coroutineContext = currentCoroutineContext()
+        var importDirectory: File? = null
+        var complete = false
+        try {
+            val resolver = context.contentResolver
+            val documents = uris.distinct().mapNotNull { uri ->
+                val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { if (it.moveToFirst()) it.getString(0) else null }
+                    ?: getPathFromContentUri(context, uri)?.let { File(it).name }
+                if (name.isNullOrBlank() || '/' in name || '\\' in name) null else uri to name
+            }
+            val (shapeUri, shapeName) = documents.singleOrNull { (_, name) ->
+                name.endsWith(".shp", ignoreCase = true)
+            } ?: return null
+            val baseName = shapeName.substringBeforeLast('.')
+            if (baseName.isBlank()) return null
+
+            val localShape = getPathFromContentUri(context, shapeUri)?.let { File(it) }
+            val localDirectory = localShape?.parentFile
+            if (localShape?.isFile == true && localShape.canRead() && localDirectory != null &&
+                requiredExtensions.filter { it != "shp" }.all { ext ->
+                    File(localDirectory, "$baseName.$ext").let { it.isFile && it.canRead() }
+                }
+            ) return localShape.absolutePath
+
+            val parts = documents.filter { (uri, name) ->
+                uri.authority == shapeUri.authority && name.substringBeforeLast('.').equals(baseName, ignoreCase = true) &&
+                    name.substringAfterLast('.', "").lowercase(Locale.ROOT) in allowedExtensions
+            }.groupBy { (_, name) -> name.substringAfterLast('.').lowercase(Locale.ROOT) }
+            if (!parts.keys.containsAll(requiredExtensions) || parts.values.any { it.size != 1 }) return null
+
+            val parent = File(context.filesDir, "prescriptions")
+            if (!parent.isDirectory && !parent.mkdirs()) return null
+            val directory = Files.createTempDirectory(parent.toPath(), "shape-").toFile()
+            importDirectory = directory
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            for ((extension, candidates) in parts) {
+                val output = File(directory, "$baseName.$extension")
+                val input = resolver.openInputStream(candidates.single().first)
+                    ?: throw IOException("无法读取 .$extension 文件")
+                input.use { source ->
+                    output.outputStream().use { target ->
+                        while (true) {
+                            coroutineContext.ensureActive()
+                            val size = source.read(buffer)
+                            if (size < 0) break
+                            target.write(buffer, 0, size)
+                        }
+                    }
+                }
+                if (output.length() == 0L) {
+                    if (extension in requiredExtensions) throw IOException(".$extension 文件为空")
+                    output.delete()
+                }
+            }
+            coroutineContext.ensureActive()
+            complete = true
+            return File(directory, "$baseName.shp").absolutePath
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("PrescriptionImport", "无法导入处方图文件", e)
+            return null
+        } finally {
+            if (!complete) importDirectory?.deleteRecursively()
+        }
     }
 
     /**
@@ -295,6 +374,14 @@ class DocuAndManageFun {
      * @note   保存目录未设置/授权失效/创建失败时抛 IOException
      */
     fun createExperimentFileWriter(context: Context, fileName: String, mimeType: String): OutputStreamWriter {
+        val fileUri = createExperimentDocument(context, fileName, mimeType)
+        val outputStream = context.contentResolver.openOutputStream(fileUri, "w")
+            ?: throw IOException("写出数据输出流获取失败")
+        return OutputStreamWriter(outputStream, Charsets.UTF_8)
+    }
+
+    /** 创建文档并返回稳定URI，meta.json后续更新必须复用它，不能创建重名副本。 */
+    fun createExperimentDocument(context: Context, fileName: String, mimeType: String): Uri {
         // 校验授权与目录存在性，失效时给操作员明确指引（否则 createDocument 抛
         // SecurityException，提示里只有一串 content:// 看不懂）
         val documentUri = getWriteDirDocumentUri(context)
@@ -306,10 +393,7 @@ class DocuAndManageFun {
         val fileUri = DocumentsContract.createDocument(
             context.contentResolver, documentUri, mimeType, fileName
         ) ?: throw IOException("文件创建失败")
-        // 获取documentUri对应的输出流
-        val outputStream = context.contentResolver.openOutputStream(fileUri, "w")
-            ?: throw IOException("写出数据输出流获取失败")
-        return OutputStreamWriter(outputStream)
+        return fileUri
     }
 
     /**
@@ -338,7 +422,7 @@ class DocuAndManageFun {
                 while (cursor.moveToNext()) {
                     val docId = cursor.getString(0) ?: continue
                     val name = cursor.getString(1) ?: continue
-                    val prefixes = listOf("fertMsg_", "depthTest_", "depthRec_")
+                    val prefixes = listOf("fertMsg_", "depthTest_", "depthRec_", "depthEvt_")
                     if (!(name.endsWith(".csv") && prefixes.any { name.startsWith(it) })) continue
                     result.add(
                         ExperimentCsvFile(
@@ -444,9 +528,9 @@ class DocuAndManageFun {
             // 检查Uri的authority是否指向外部存储
             if ("com.android.externalstorage.documents" == contentDocumentUri.authority) {
                 // 使用":"分割docId，获取存储类型和路径
-                val split = docId.split(":".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
+                val split = docId.split(":", limit = 2)
                 val type = split[0] // 存储类型，例如"primary"
-                val path = split[1] // 文件路径，例如"shp/VariableFert.shp"
+                val path = split.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return null
 
                 // 如果是主存储，则构造文件路径
                 if ("primary".equals(type, ignoreCase = true)) {

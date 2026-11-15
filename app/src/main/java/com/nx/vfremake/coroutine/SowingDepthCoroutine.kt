@@ -5,7 +5,6 @@ import android.util.Log
 import com.nx.vfremake.R
 import com.nx.vfremake.VariableFertViewModel
 import com.nx.vfremake.data.ServoCalibration
-import com.nx.vfremake.data.SowingDepthState
 import com.nx.vfremake.data.SERVO_ALARM_DRIVE_FAULT
 import com.nx.vfremake.data.SERVO_ALARM_INTERNAL_LIMIT
 import com.nx.vfremake.data.SERVO_ALARM_NONE
@@ -15,14 +14,17 @@ import com.nx.vfremake.funClass.CanOpenFun
 import com.nx.vfremake.funClass.JogSession
 import com.nx.vfremake.funClass.MySerialPortFun
 import com.nx.vfremake.funClass.MySharedPreFun
+import com.nx.vfremake.isSystemRunning
 import com.nx.vfremake.mSPParamData
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
@@ -44,13 +46,16 @@ import kotlin.math.abs
  *   由其内部 Mutex 强制全局 ≥20ms 帧间步调并保证多帧序列原子性——
  *   跨协程（本协程 vs 标定页点动）的 SDO 背靠背相撞曾导致驱动器丢帧
  *
- * 参照 DB9reCANseCoroutine.kt 的协程模式（scope/jobs/shutdown/start）。
+ * 参照 DB9reCANseCoroutine.kt 的协程生命周期。
  */
 class SowingDepthCoroutine {
 
-    var isRunning = false
+    @Volatile var isRunning = false
     private var scope = CoroutineScope(Dispatchers.Default)
-    private val jobs = HashSet<Job>()
+    private var controlJob: Job? = null
+    private val workInitializedNodes = linkedSetOf<Int>()
+    @Volatile var trialMotorInitialized = false
+        private set
 
     companion object {
         private const val TAG = "SowingDepthCoroutine"
@@ -75,7 +80,25 @@ class SowingDepthCoroutine {
     fun shutdown() {
         isRunning = false
         scope.cancel()
-        jobs.clear()
+    }
+
+    /** 主界面先结束位置发送，再等待已初始化驱动器的 Shutdown 帧发送完毕。 */
+    suspend fun stopForWork(viewModel: VariableFertViewModel) = withContext(Dispatchers.IO + NonCancellable) {
+        viewModel.updateMasterEnabled(false)
+        val stoppingJob = controlJob
+        shutdown()
+        stoppingJob?.join()
+        trialMotorInitialized = false
+        if (workInitializedNodes.isNotEmpty()) {
+            CanOpenFun.sendSequence(workInitializedNodes.map { nodeId ->
+                CanOpenFun.buildSdoWriteFrame(nodeId, 0x6040, 0x00, 2, 0x0006L)
+            })
+            val updates = viewModel.currentSowingDepthState().motors
+                .filter { it.nodeId in workInitializedNodes }
+                .associate { motor -> motor.motorIndex to { cal: ServoCalibration -> cal.copy(isEnabled = false) } }
+            viewModel.updateMultipleServos(updates)
+            workInitializedNodes.clear()
+        }
     }
 
     /**
@@ -84,19 +107,36 @@ class SowingDepthCoroutine {
      * 调用前提：CAN 串口已打开（mSerialPortCAN != null），
      * 伺服电机已上电（CanReceiveCoroutine 正在运行以接收回复）。
      */
-    fun start(viewModel: VariableFertViewModel, context: Context? = null) {
+    fun start(
+        viewModel: VariableFertViewModel,
+        context: Context? = null,
+        usePrescription: Boolean = false,
+        trialMotorIndex: Int? = null,
+    ) {
+        require(trialMotorIndex == null || !usePrescription)
         scope = CoroutineScope(Dispatchers.Default)
+        val startedAtMs = System.currentTimeMillis()
+        if (usePrescription) {
+            val updates = viewModel.currentSowingDepthState().motors.associate { motor ->
+                motor.motorIndex to { cal: ServoCalibration ->
+                    if (cal.lastHeardMs >= startedAtMs) cal
+                    else cal.copy(isOnline = false, isEnabled = false, alarmCode = SERVO_ALARM_NONE)
+                }
+            }
+            viewModel.updateMultipleServos(updates)
+        }
 
         val isTestMode = context != null &&
             MySharedPreFun(context).getSpecificValue(R.string.testMode_Switch_name) == "1"
 
         if (isTestMode) Log.i(TAG, "测试模式：跳过Phase3离线辅助判定")
 
-        jobs.add(scope.launch {
+        controlJob = scope.launch {
             // ── 启动时广播 NMT Start，让总线上所有节点进入 Operational 状态 ──
             // Operational 状态下 PDO/SDO 均可用，是正常控制所必需的。
-            CanOpenFun.sendFrameSequenced(CanOpenFun.buildNmtFrame(CanOpenFun.Nmt.OPERATIONAL, 0x00))
-            Log.i(TAG, "NMT广播：所有节点进入Operational状态")
+            val nmtNode = trialMotorIndex?.let { viewModel.currentSowingDepthState().motors[it].nodeId } ?: 0x00
+            CanOpenFun.sendFrameSequenced(CanOpenFun.buildNmtFrame(CanOpenFun.Nmt.OPERATIONAL, nmtNode))
+            Log.i(TAG, "NMT Start node=$nmtNode")
             delay(100)   // 等待节点响应 NMT
 
             // ── 每路电机的本地追踪变量 ──────────────────────────────────────
@@ -119,9 +159,10 @@ class SowingDepthCoroutine {
                 val motors = state.motors
                 val activeMotorState = viewModel.activeMotorsState.value ?: mSPParamData.activeMotors
                 val activeIndices = activeSowingDepthMotorIndices(mSPParamData.rowNumber, activeMotorState)
+                    .filter { trialMotorIndex == null || it == trialMotorIndex }
                 val activeIndexSet = activeIndices.toSet()
                 for (i in 0 until 8) {
-                    if (i !in activeIndexSet) {
+                    if (trialMotorIndex == null && i !in activeIndexSet) {
                         motorInitialized[i] = false
                         motorInitCooldown[i] = 0
                         lastSentTargetDepth[i] = Float.NaN
@@ -148,6 +189,9 @@ class SowingDepthCoroutine {
                 // 既避免与点动/其他发送方的 SDO 背靠背相撞，也保护 CSM100T 桥缓冲
                 for (i in activeIndices) {
                     CanOpenFun.sendFrameSequenced(CanOpenFun.buildReadPositionFrame(motors[i].nodeId))
+                    if (trialMotorIndex != null) {
+                        CanOpenFun.sendFrameSequenced(CanOpenFun.buildReadStatusWordFrame(motors[i].nodeId))
+                    }
                 }
 
                 // 等待 SDO 回复到达并由 CanReceiveCoroutine 写入 ViewModel
@@ -161,7 +205,7 @@ class SowingDepthCoroutine {
                 // Phase 2 init 仅当 masterEnabled=true 时执行；离线重置始终生效。
                 // ════════════════════════════════════════════════════════════
                 val stateAfterRead = viewModel.currentSowingDepthState()
-                val masterEnabled  = stateAfterRead.masterEnabled
+                val masterEnabled = stateAfterRead.masterEnabled && (!usePrescription || isSystemRunning)
 
                 if (lastMasterEnabled && !masterEnabled) {
                     Log.i(TAG, "总开关 ON→OFF：对所有已初始化电机发 Shutdown")
@@ -186,36 +230,43 @@ class SowingDepthCoroutine {
                 lastMasterEnabled = masterEnabled
 
                 for (i in activeIndices) {
+                    if (usePrescription && !isSystemRunning) break
                     val cal = stateAfterRead.motors[i]
 
-                    if (!cal.isOnline) {
+                    if (!cal.isOnline || (usePrescription && cal.lastHeardMs < startedAtMs)) {
                         // 电机离线：重置初始化标志和目标记录，以便重新上线后重新初始化
                         if (motorInitialized[i]) {
                             motorInitialized[i] = false
+                            if (trialMotorIndex != null) trialMotorInitialized = false
                             lastSentTargetDepth[i] = Float.NaN
                             Log.i(TAG, "motor=$i (nodeId=${cal.nodeId}) 离线，已重置初始化状态")
                         }
                         continue
                     }
 
-                    if (masterEnabled && !motorInitialized[i] && !JogSession.isJogging(cal.nodeId)) {
+                    val workReady = when {
+                        trialMotorIndex != null -> cal.limitsSet && cal.fitValid && cal.alarmCode == SERVO_ALARM_NONE
+                        usePrescription -> cal.limitsSet && cal.fitValid && stateAfterRead.depthTargetMm(i, true) != null
+                        else -> true
+                    }
+                    if (masterEnabled && workReady && !motorInitialized[i] && !JogSession.isJogging(cal.nodeId)) {
                         // 总开关已开启 + 电机首次上线/重新上线：DS402 完整状态机序列 + 位置模式使能。
                         // 点动中的电机跳过——init 的 0x6060=1 / 0x0006 会掐掉正在进行的速度模式点动。
                         Log.i(TAG, "motor=$i (nodeId=${cal.nodeId}) 上线且总开关已开，执行初始化")
+                        if (usePrescription || trialMotorIndex != null) workInitializedNodes.add(cal.nodeId)
                         CanOpenFun.sendSequence(CanOpenFun.buildMotorInitSequence(cal.nodeId))
                         motorInitialized[i] = true
+                        if (trialMotorIndex != null) trialMotorInitialized = true
                         motorInitCooldown[i]  = 6   // 初始化后强制重发 3s（6×500ms）
-                        // 种子目标：仅当尚无有效目标（默认 0mm）时种入 globalTargetDepth，
-                        // 避免首次 dispatch 跑到 0mm。处方图控深模式下地图深度可能在初始化
-                        // 完成前就已写入 targetDepth，无条件覆盖会让电机先跑一趟全局深度。
+                        // 调试页面保留原有的目标初始化。主界面的作业目标与调试值独立。
                         viewModel.updateServoCalibration(i) {
                             it.copy(
                                 isEnabled   = true,
-                                targetDepth = if (it.targetDepth > 0f) it.targetDepth
+                                targetDepth = if (usePrescription || trialMotorIndex != null || it.targetDepth > 0f) it.targetDepth
                                               else stateAfterRead.globalTargetDepth
                             )
                         }
-                        val seededTarget = viewModel.currentSowingDepthState().motors[i].targetDepth
+                        val seededTarget = viewModel.currentSowingDepthState().depthTargetMm(i, usePrescription)
                         Log.i(TAG, "motor=$i 初始化完成 targetDepth=${seededTarget}mm")
                     }
                 }
@@ -249,16 +300,15 @@ class SowingDepthCoroutine {
                 //   (c) 拟合系数有效（fitValid = true）
                 //   (d) 目标深度与上次发送值偏差 > DEPTH_TOLERANCE_MM
                 //
-                // 目标深度逐路读取 cal.targetDepth：UI 的"全部应用"会同步所有电机；
-                // "单独设置"仅修改对应电机。协程不回写 cal.targetDepth，
-                // 以免覆盖用户的单独设置。
+                // 主界面使用当前作业目标，调试页面使用伺服目标。
                 // ════════════════════════════════════════════════════════════
                 if (masterEnabled) {
-                    val posSpeed = stateAfterRead.positionSpeed
-
                     for (i in activeIndices) {
-                        val cal    = stateAfterRead.motors[i]
-                        val target = cal.targetDepth
+                        val currentState = viewModel.currentSowingDepthState()
+                        if (!currentState.masterEnabled || (usePrescription && !isSystemRunning)) break
+                        val cal = currentState.motors[i]
+                        val target = currentState.depthTargetMm(i, usePrescription) ?: continue
+                        val posSpeed = currentState.positionSpeed
 
                         // 点动中让路：位置模式帧会与速度模式点动打架（点动失灵/电机自行走位）。
                         // 必须放在 cooldown 自减之前——点动期间冻结初始化后的强制重发窗口，
@@ -266,7 +316,10 @@ class SowingDepthCoroutine {
                         if (JogSession.isJogging(cal.nodeId)) continue
 
                         // (a) 在线且已使能
-                        if (!cal.isOnline || !cal.isEnabled) continue
+                        if (!cal.isOnline || !cal.isEnabled ||
+                            ((usePrescription || trialMotorIndex != null) && !motorInitialized[i])
+                        ) continue
+                        if (trialMotorIndex != null && cal.alarmCode != SERVO_ALARM_NONE) continue
 
                         // (b) 限位必须已标定
                         if (!cal.limitsSet) {
@@ -321,7 +374,7 @@ class SowingDepthCoroutine {
                         // 先写加减速度（0x6083/0x6084），使位置运动遵循用户设定的斜率；
                         // buildAbsoluteMoveFrames 返回 [模式, 可选速度, 目标位置, 控制字复位, 控制字置位]
                         CanOpenFun.sendSequence(
-                            CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, state.acceleration) +
+                            CanOpenFun.buildSetAccelDecelFrames(cal.nodeId, currentState.acceleration) +
                             CanOpenFun.buildAbsoluteMoveFrames(
                                 nodeId       = cal.nodeId,
                                 targetPulse  = targetPulse,
@@ -359,18 +412,18 @@ class SowingDepthCoroutine {
 
                 for (i in activeIndices) {
                     val cal = stateForAlarm.motors[i]
-                    if (!cal.isOnline) continue
+                    if (!cal.isOnline || (usePrescription && cal.lastHeardMs < startedAtMs)) continue
 
                     when (cal.alarmCode) {
                         SERVO_ALARM_DRIVE_FAULT -> {
                             Log.e(TAG, "motor=$i 驱动器 Fault！发送 DS402 Quick Stop")
                             CanOpenFun.sendFrameSequenced(CanOpenFun.buildQuickStopFrame(cal.nodeId))
-                            lastSentTargetDepth[i] = cal.targetDepth
+                            lastSentTargetDepth[i] = stateForAlarm.depthTargetMm(i, usePrescription) ?: lastSentTargetDepth[i]
                         }
                         SERVO_ALARM_INTERNAL_LIMIT -> {
                             Log.e(TAG, "motor=$i 内部限位激活！发送 DS402 Quick Stop")
                             CanOpenFun.sendFrameSequenced(CanOpenFun.buildQuickStopFrame(cal.nodeId))
-                            lastSentTargetDepth[i] = cal.targetDepth
+                            lastSentTargetDepth[i] = stateForAlarm.depthTargetMm(i, usePrescription) ?: lastSentTargetDepth[i]
                         }
                         SERVO_ALARM_SDO_ABORT -> {
                             Log.w(TAG, "motor=$i SDO Abort，不发额外命令（等待恢复）")
@@ -385,7 +438,7 @@ class SowingDepthCoroutine {
                 // ════════════════════════════════════════════════════════════
                 delay(LOOP_INTERVAL_MS)
             }
-        })
+        }
 
         isRunning = true
         Log.i(TAG, "播种深度控制协程已启动")

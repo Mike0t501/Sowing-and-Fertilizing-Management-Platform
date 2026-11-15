@@ -17,6 +17,7 @@
     <!--    保存路径SharedPre-->
     <string name="myWriteDir_DocumentUri_name">writeDirDocumentUri</string>
     <string name="myLoadShpFile_Path_name">loadShpFilePath</string>
+    <string name="depthShpFilePath_name">depthShpFilePath</string>
     <string name="myLoadShpFile_AppSpecificExternalDirPath_name">appSpecificExternalDirShpFilePath</string>
 
     <!--    参数设置、设置页面sharedpre-->

@@ -18,6 +18,9 @@ data class RmcData(
     var magneticVariation: Double = 0.0, // 磁偏角，表示磁北与真北之间的偏差
     var checksum: String? = "" // 用于验证RMC语句完整性的校验和
 ) {
+    @Volatile var lastFixAtMs: Long = 0L
+    var directionAvailable = false
+
     // 滑动窗口速度均值所用环形缓冲区，由 MyGNSSFun 维护，不参与 data class 的 equals/copy
     var speedBuffer: DoubleArray = DoubleArray(0)
     var speedBufHead: Int = 0   // 下一个写入位置

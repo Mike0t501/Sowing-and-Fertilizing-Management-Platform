@@ -17,6 +17,7 @@ package com.nx.vfremake.coroutine
 
 import android.content.Context
 import com.nx.vfremake.VariableFertViewModel
+import com.nx.vfremake.funClass.DepthRecordSchema
 import com.nx.vfremake.funClass.DocuAndManageFun
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -151,7 +152,8 @@ class MyWriteSaveFun {
         }
         if (includeDepth) {
             header.addAll(
-                listOf("target_depth_mm", "actual_depth_mm", "encoder_position", "is_online", "alarm_code")
+                listOf("target_depth_mm", "actual_depth_mm", "encoder_position", "is_online", "alarm_code") +
+                    DepthRecordSchema.WORK_VOLTAGE_HEADER
             )
         }
         return header
@@ -187,7 +189,9 @@ class MyWriteSaveFun {
         // -----------------------------------
 
         // 播深数据：按索引 1:1 取对应电机
-        val depthMotors = mVariableFertViewModel.currentSowingDepthState().motors
+        val depthState = mVariableFertViewModel.currentSowingDepthState()
+        val depthWorkMode = mVariableFertViewModel.depthPrescriptionMode.value == true
+        val depthNodes = if (includeDepth) mVariableFertViewModel.currentDepthNodeState().channels else emptyList()
 
         val dataList = mutableListOf<List<String>>() // 创建一个可变的列表来存储数据
         for (i in 0 until n) {
@@ -216,12 +220,15 @@ class MyWriteSaveFun {
                 }
                 if (includeDepth) {
                     // 播深电机 i 对应字段，无对应电机时写 -1
-                    val motor = depthMotors.getOrNull(i)
-                    add(if (motor == null) "-1" else "%.2f".format(motor.targetDepth))
+                    val motor = depthState.motors.getOrNull(i)
+                    val target = depthState.depthTargetMm(i, depthWorkMode)
+                    add(if (target == null) "-1" else "%.2f".format(target))
                     add(if (motor == null) "-1" else "%.2f".format(motor.currentDepth))
                     add(if (motor == null) "-1" else motor.currentPosition.toString())
                     add(if (motor == null) "-1" else if (motor.isOnline) "1" else "0")
                     add(if (motor == null) "-1" else motor.alarmCode.toString())
+                    val channel = depthNodes.getOrNull(i)
+                    addAll(DepthRecordSchema.workVoltageColumns(channel, mVariableFertViewModel.measuredDepthFacade.forRow(i, channel)))
                 }
             }
             // 将当前索引的数据列表添加到 dataList 中

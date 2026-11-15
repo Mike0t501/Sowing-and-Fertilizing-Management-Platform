@@ -80,7 +80,12 @@ class MySerialPortFun {
      *  打开串口资源，串口名称和波特率从 SharedPreferences 读取
      * @note
      */
-    fun openSerialPort(context: Context, viewModel: VariableFertViewModel) {
+    fun openSerialPort(
+        context: Context,
+        viewModel: VariableFertViewModel,
+        allowPartial: Boolean = false,
+        openCan: Boolean = true,
+    ) {
         // 强制关闭设置页的测试串口，防止测试口占用端口导致主程序无法打开
         try { mTestSerialPortDB9?.tryClose() } catch (_: Exception) {}
         mTestSerialPortDB9 = null
@@ -96,26 +101,20 @@ class MySerialPortFun {
         val db9Baud = sharedPre.getString(context.getString(R.string.serial_db9_baud_name), context.getString(R.string.serial_db9_baud_defValue))?.toIntOrNull() ?: 230400
         val canPort = sharedPre.getString(context.getString(R.string.serial_can_port_name), context.getString(R.string.serial_can_port_defValue)) ?: context.getString(R.string.serial_can_port_defValue)
         val canBaud = sharedPre.getString(context.getString(R.string.serial_can_baud_name), context.getString(R.string.serial_can_baud_defValue))?.toIntOrNull() ?: 115200
-        try {
-            mSerialPortDB9 = SerialPort(File("/dev/$db9Port"), db9Baud)
-            mSerialPortCAN = SerialPort(File("/dev/$canPort"), canBaud)
-            viewModel.serialPortIsRunning.value = true
-        } catch (e: IOException) {
-            Log.e("SerialPortInit", "不存在或无法打开: " + e.message)
-            // 【修复】：部分打开时（DB9成功、CAN失败），关闭已打开的DB9，防止fd泄漏和下次EBUSY
-            try { mSerialPortDB9?.tryClose() } catch (_: Exception) {}
-            mSerialPortDB9 = null
-            mSerialPortCAN = null
-        } catch (e: SecurityException) {
-            Log.e("SerialPortInit", "没有足够的权限: " + e.message)
-            try { mSerialPortDB9?.tryClose() } catch (_: Exception) {}
-            mSerialPortDB9 = null
-            mSerialPortCAN = null
+        fun open(port: String, baud: Int): SerialPort? = try {
+            SerialPort(File("/dev/$port"), baud)
         } catch (e: Exception) {
-            Log.e("SerialPortInit", "其他异常: " + e.message)
-            try { mSerialPortDB9?.tryClose() } catch (_: Exception) {}
-            mSerialPortDB9 = null
-            mSerialPortCAN = null
+            Log.e("SerialPortInit", "无法打开 /dev/$port: ${e.message}")
+            null
+        }
+
+        // 播深作业可独立使用 GNSS 定位和 CAN 控深。
+        mSerialPortDB9 = open(db9Port, db9Baud)
+        if (openCan && (allowPartial || mSerialPortDB9 != null)) mSerialPortCAN = open(canPort, canBaud)
+        if (openCan && !allowPartial && mSerialPortCAN == null) {
+            releaseSerialPort(viewModel)
+        } else {
+            viewModel.serialPortIsRunning.value = mSerialPortDB9 != null || mSerialPortCAN != null
         }
     }
 
